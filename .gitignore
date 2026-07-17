@@ -1,0 +1,5 @@
+/bin/
+/autofuzz-work/
+*.tmp
+/autofuzz
+/autofuzz-web
