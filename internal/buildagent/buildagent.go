@@ -200,7 +200,7 @@ func buildPrompt(request Request) string {
 
 结果要求：
 - 使用 clang/clang++；
-- 库代码用 AddressSanitizer、调试信息和帧指针编译；优先用 fuzzer-no-link；
+- 库代码用 AddressSanitizer、调试信息和帧指针编译；优先用 fuzzer-no-link；必须加 -fprofile-instr-generate -fcoverage-mapping（LLVM source-based coverage，供后续 fuzzing 阶段的 llvm-cov 分析使用）；
 - 产出非空的 compile_commands.json，内容为 ASan 编译命令；
 - 至少产出一个非测试用途的静态 .a 库；
 - 支持时优先使用 out-of-tree 构建，并安装到工作区自有目录；

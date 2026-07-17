@@ -90,7 +90,6 @@ var stageDefinitions = []stageDefinition{
 	{string(state.StagePreprocessed), "API 预处理", "PromeFuzz"},
 	{string(state.StageComprehended), "API 理解", "PromeFuzz + Codex"},
 	{string(state.StageGenerated), "All-cover 全量生成", "PromeFuzz + Codex"},
-	{string(state.StageVerified), "最终编译验证", "Go"},
 	{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
 }
 
@@ -98,7 +97,7 @@ var stageRanks = map[string]int{
 	string(state.StageInit): 0, string(state.StageCloned): 1, string(state.StageBuilt): 2,
 	string(state.StageConfigured): 3, string(state.StagePreprocessed): 4,
 	string(state.StageComprehended): 5, string(state.StageGenerated): 6,
-	string(state.StageVerified): 7, string(state.StageFuzzing): 8,
+	string(state.StageFuzzing): 7,
 }
 
 type Task struct {

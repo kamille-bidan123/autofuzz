@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +35,9 @@ type FuzzConfig struct {
 	// MaxSeeds caps how many corpus seeds are replayed per analysis cycle
 	// (largest by size). 0 means DefaultMaxCorpusSeeds.
 	MaxSeeds int
+	// ForkWorkers is the libFuzzer -fork worker count. <=0 means use the
+	// number of logical CPUs (nproc).
+	ForkWorkers int
 
 	// TriggerCh is an optional channel that, when signaled, causes the
 	// fuzz loop to immediately skip the remaining wait and proceed to
@@ -90,6 +94,7 @@ func (c FuzzController) TriggerAnalysis() {
 // FuzzIteration records the results of a single fuzz+analyze+regenerate cycle.
 type FuzzIteration struct {
 	Iteration   int                  `json:"iteration"`
+	Seq         int                  `json:"seq"` // driver version that ran this cycle
 	FuzzStatus  FuzzStatus           `json:"fuzz_status"`
 	Coverage    CorpusCoverageStatus `json:"coverage_status"`
 	Analysis    AnalysisResponse     `json:"analysis"`
@@ -99,9 +104,12 @@ type FuzzIteration struct {
 }
 
 // RunFuzzingPhase is the main entry point for the fuzzing phase.
-// It runs the coverage-instrumented synthesized driver with fork mode
-// and ignore_crash, collects status every interval, sends data to Codex
-// for analysis, and if the driver needs updating, regenerates via PromeFuzz.
+// It runs the coverage-instrumented synthesized driver as a long-running
+// fuzzer, collects per-seed coverage each interval (without stopping the
+// fuzzer), sends the data to Codex which edits driver sources directly, and on
+// a driver change rebuilds + restarts. Crash artifacts land inside the driver
+// version's snapshot dir so every crash stays reproducible against the driver
+// version that found it.
 func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	if err := os.MkdirAll(cfg.LogsDir, 0o755); err != nil {
 		return err
@@ -110,7 +118,8 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		return err
 	}
 
-	iteration := 0
+	iteration := 0 // analysis cycle counter (~per interval)
+	seq := 0       // driver version counter (only on build)
 	needRebuild := true
 
 	// The fuzzer runs continuously across analysis intervals. These hold the
@@ -122,26 +131,35 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 
 	for {
 		iteration++
-		iterLogDir := filepath.Join(cfg.LogsDir, fmt.Sprintf("fuzz-iter-%03d", iteration))
-		if err := os.MkdirAll(iterLogDir, 0o755); err != nil {
-			return err
-		}
+		var snapDir string // set in needRebuild; persistent home of this driver version
 
 		// (Re)build and start the fuzzer only when the driver changed.
 		triggered := false
 		if needRebuild {
-			cfg.logf("[fuzzing] iteration %d: building and starting fuzz driver\n", iteration)
-			if err := cfg.buildCovDriver(ctx, iterLogDir); err != nil {
+			seq++
+			snapDir = filepath.Join(cfg.LogsDir, "driver-snapshots", fmt.Sprintf("fuzz-%03d", seq))
+			if err := os.MkdirAll(snapDir, 0o755); err != nil {
 				return err
 			}
+			cfg.logf("[fuzzing] iteration %d: building driver v%d (snapshot %s)\n", iteration, seq, snapDir)
+			if err := cfg.buildCovDriver(ctx, snapDir); err != nil {
+				return err
+			}
+			// Snapshot the driver sources that this binary was built from, so
+			// any crash found while this driver runs can later be reproduced by
+			// rebuilding from this snapshot.
+			if err := snapshotDriver(filepath.Join(cfg.DriverDir, "synthesized"), filepath.Join(snapDir, "synthesized")); err != nil {
+				cfg.logf("[fuzzing] driver snapshot failed: %v\n", err)
+			}
 			var err error
-			fuzzCtx, fuzzCancel, statusTracker, triggered, err = cfg.startFuzzerAndWaitInit(ctx, iterLogDir)
+			fuzzCtx, fuzzCancel, statusTracker, triggered, err = cfg.startFuzzerAndWaitInit(ctx, snapDir)
 			if err != nil {
 				return err
 			}
 			needRebuild = false
 		} else {
-			cfg.logf("[fuzzing] iteration %d: fuzzer still running, no rebuild\n", iteration)
+			snapDir = filepath.Join(cfg.LogsDir, "driver-snapshots", fmt.Sprintf("fuzz-%03d", seq))
+			cfg.logf("[fuzzing] iteration %d: fuzzer still running on driver v%d, no rebuild\n", iteration, seq)
 		}
 
 		// Run for the configured interval (or until manually triggered).
@@ -173,16 +191,21 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		fuzzStatus := statusTracker.Snapshot()
 		cfg.logf("[fuzzing] iteration %d: %s\n", iteration, fuzzStatus.String())
 
-		// Snapshot the corpus and replay each seed one-by-one to collect
-		// per-seed coverage. The fuzzer is NOT stopped here; coverage comes
-		// solely from the replay pass.
-		snapshotDir := filepath.Join(iterLogDir, "corpus-snapshot")
-		if err := copyCorpus(cfg.CorpusDir, snapshotDir); err != nil {
+		// Per-seed coverage. The corpus snapshot + profiles are ephemeral:
+		// keep them in a tmp dir and delete as soon as CorpusCoverageStatus is
+		// in memory, so we don't persist per-iteration coverage clutter.
+		covTmp, err := os.MkdirTemp(cfg.LogsDir, "cov-")
+		if err != nil {
+			return err
+		}
+		corpusSnapshotDir := filepath.Join(covTmp, "corpus-snapshot")
+		if err := copyCorpus(cfg.CorpusDir, corpusSnapshotDir); err != nil {
 			cfg.logf("[fuzzing] iteration %d: corpus snapshot failed: %v\n", iteration, err)
 		}
-		corpusCov, err := CollectCorpusCoverage(ctx, cfg.BinaryPath, cfg.SourceDir, cfg.DriverDir, snapshotDir, iterLogDir, cfg.MaxSeeds, cfg.logf)
-		if err != nil {
-			cfg.logf("[fuzzing] iteration %d: corpus coverage error: %v\n", iteration, err)
+		corpusCov, covErr := CollectCorpusCoverage(ctx, cfg.BinaryPath, cfg.SourceDir, cfg.DriverDir, corpusSnapshotDir, covTmp, cfg.MaxSeeds, cfg.logf)
+		_ = os.RemoveAll(covTmp) // coverage data is now in memory (corpusCov)
+		if covErr != nil {
+			cfg.logf("[fuzzing] iteration %d: corpus coverage error: %v\n", iteration, covErr)
 			corpusCov = CorpusCoverageStatus{}
 		}
 		cfg.logf("[fuzzing] iteration %d: %s\n", iteration, corpusCov.String())
@@ -195,7 +218,8 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			entrySource = ""
 		}
 
-		// Send to Codex for analysis
+		// Send to Codex for analysis. The codex prompt/response + logs are
+		// ephemeral; the driver edits codex makes persist in DriverDir (real).
 		cfg.logf("[fuzzing] iteration %d: asking Codex for analysis\n", iteration)
 		analyzer := CodexAnalyzer{
 			Command:   cfg.CodexCommand,
@@ -206,29 +230,32 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			EventSink: cfg.EventSink,
 			LogSink:   cfg.LogSink,
 		}
-
-		analysisResp, err := analyzer.Analyze(ctx, AnalysisRequest{
+		analysisTmp, err := os.MkdirTemp(cfg.LogsDir, "analysis-")
+		if err != nil {
+			return err
+		}
+		analysisResp, aErr := analyzer.Analyze(ctx, AnalysisRequest{
 			FuzzStatus:     fuzzStatus,
 			CoverageStatus: corpusCov,
 			DriverSource:   entrySource,
 			SourceDir:      cfg.SourceDir,
 			DriverDir:      cfg.DriverDir,
-		}, filepath.Join(iterLogDir, "analysis"))
-		if err != nil {
-			cfg.logf("[fuzzing] Codex analysis error: %v\n", err)
-			// Save iteration record and continue
-			recordIteration(iterLogDir, iteration, fuzzStatus, corpusCov, AnalysisResponse{}, false)
+		}, analysisTmp)
+		_ = os.RemoveAll(analysisTmp) // codex prompt/response are ephemeral
+		if aErr != nil {
+			cfg.logf("[fuzzing] Codex analysis error: %v\n", aErr)
+			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: AnalysisResponse{}, Regenerated: false, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
 			continue
 		}
 
 		cfg.logf("[fuzzing] iteration %d: plateau=%v needs_update=%v\n",
 			iteration, analysisResp.PlateauReached, analysisResp.NeedsUpdate)
 
-		recordIteration(iterLogDir, iteration, fuzzStatus, corpusCov, analysisResp, false)
+		appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: false, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
 
 		// Codex edits the synthesized driver sources directly (it has write
 		// access to DriverDir). If it reports edits, re-merge entry.c and
-		// rebuild+restart the fuzzer with the new driver.
+		// rebuild+restart the fuzzer with the new driver (new snapshot + crash dir).
 		if analysisResp.NeedsUpdate {
 			cfg.logf("[fuzzing] iteration %d: Codex edited driver sources, re-synthesizing\n", iteration)
 
@@ -237,33 +264,41 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 				fuzzCancel()
 			}
 
-			// Re-synthesize the merged driver (entry.c) from the edited per-driver sources.
+			// Re-synthesize the merged driver (entry.c). Logs are ephemeral.
 			synthesizeScript := filepath.Join(cfg.DriverDir, "synthesize_into_one")
 			if fileExists(synthesizeScript) {
+				synTmp, err := os.MkdirTemp(cfg.LogsDir, "synth-")
+				if err != nil {
+					return err
+				}
 				synCtx, synCancel := context.WithTimeout(ctx, 2*time.Minute)
-				_, err := cfg.Runner.Run(synCtx, iterLogDir, "synthesize", cfg.DriverDir, nil,
+				_, runErr := cfg.Runner.Run(synCtx, synTmp, "synthesize", cfg.DriverDir, nil,
 					cfg.PythonPath, synthesizeScript, cfg.DriverDir)
 				synCancel()
-				if err != nil {
-					cfg.logf("[fuzzing] re-synthesis failed: %v\n", err)
+				_ = os.RemoveAll(synTmp)
+				if runErr != nil {
+					cfg.logf("[fuzzing] re-synthesis failed: %v\n", runErr)
 					needRebuild = true
 					continue
 				}
 			}
 
-			// Record this as a regeneration iteration
-			recordIteration(iterLogDir, iteration, fuzzStatus, corpusCov, analysisResp, true)
+			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: true, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
 
-			// Driver changed: rebuild and restart the fuzzer on the next loop.
+			// Driver changed: rebuild and restart the fuzzer on the next loop
+			// (new seq, new snapshot, crashes go to the new snapshot dir).
 			needRebuild = true
 			continue
 		}
 
-		// If no update needed and plateau reached, we stop
+		// If no update needed and plateau reached, triage crashes and stop.
 		if analysisResp.PlateauReached && !analysisResp.NeedsUpdate {
 			cfg.logf("[fuzzing] iteration %d: plateau reached, no driver update needed, stopping\n", iteration)
 			if fuzzCancel != nil {
 				fuzzCancel()
+			}
+			if err := triageCrashes(cfg, seq); err != nil {
+				cfg.logf("[fuzzing] crash triage error: %v\n", err)
 			}
 			return nil
 		}
@@ -294,12 +329,12 @@ func (cfg FuzzConfig) buildCovDriver(ctx context.Context, logDir string) error {
 // context, its cancel func, the persistent status tracker, and whether a
 // manual trigger arrived during INIT (in which case the caller should skip the
 // interval wait and run analysis immediately).
-func (cfg FuzzConfig) startFuzzerAndWaitInit(ctx context.Context, iterLogDir string) (context.Context, context.CancelFunc, *FuzzStatusTracker, bool, error) {
+func (cfg FuzzConfig) startFuzzerAndWaitInit(ctx context.Context, snapDir string) (context.Context, context.CancelFunc, *FuzzStatusTracker, bool, error) {
 	fuzzCtx, fuzzCancel := context.WithCancel(ctx)
 	statusTracker := NewFuzzStatusTracker()
-	stderrPath := filepath.Join(iterLogDir, "fuzz.stderr.log")
-	stdoutPath := filepath.Join(iterLogDir, "fuzz.stdout.log")
-	if err := startFuzzer(fuzzCtx, cfg, iterLogDir, stderrPath, stdoutPath, statusTracker); err != nil {
+	stderrPath := filepath.Join(snapDir, "fuzz.stderr.log")
+	stdoutPath := filepath.Join(snapDir, "fuzz.stdout.log")
+	if err := startFuzzer(fuzzCtx, cfg, snapDir, stderrPath, stdoutPath, statusTracker); err != nil {
 		fuzzCancel()
 		return nil, nil, nil, false, fmt.Errorf("start fuzzer: %w", err)
 	}
@@ -366,11 +401,29 @@ func startFuzzer(ctx context.Context, cfg FuzzConfig, logDir, stderrPath, stdout
 		return err
 	}
 
+	// -artifact_prefix is a literal filename prefix; keep the trailing '/' so
+	// crash/oom/leak files land inside <snapDir>/crashes/ instead of cwd.
+	crashesDir := filepath.Join(logDir, "crashes")
+	if err := os.MkdirAll(crashesDir, 0o755); err != nil {
+		stdoutFile.Close()
+		stderrFile.Close()
+		return err
+	}
+	cfg.logf("[fuzzing] crash artifacts -> %s/\n", crashesDir)
+
+	// fork worker count: default to the number of logical CPUs (nproc).
+	fork := cfg.ForkWorkers
+	if fork <= 0 {
+		fork = runtime.NumCPU()
+	}
+	cfg.logf("[fuzzing] fork workers = %d (nproc=%d)\n", fork, runtime.NumCPU())
+
 	args := []string{
 		cfg.BinaryPath,
-		"-fork=1",
+		"-fork=" + fmt.Sprintf("%d", fork),
 		"-ignore_crashes=1",
 		"-use_value_profile=1",
+		"-artifact_prefix=" + crashesDir + "/",
 		cfg.CorpusDir,
 	}
 
@@ -454,21 +507,6 @@ func (w *lineSplitter) Flush() {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func recordIteration(logDir string, iteration int, fuzzStatus FuzzStatus, coverage CorpusCoverageStatus, analysis AnalysisResponse, regenerated bool) {
-	record := FuzzIteration{
-		Iteration:   iteration,
-		FuzzStatus:  fuzzStatus,
-		Coverage:    coverage,
-		Analysis:    analysis,
-		Regenerated: regenerated,
-		StartedAt:   time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second),
-		FinishedAt:  time.Now(),
-	}
-	data, _ := json.MarshalIndent(record, "", "  ")
-	recordPath := filepath.Join(logDir, "iteration-record.json")
-	_ = os.WriteFile(recordPath, data, 0o644)
 }
 
 // ParseStderrForStatus is a utility function that reads a libFuzzer stderr

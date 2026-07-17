@@ -186,7 +186,7 @@
           <div class="field full"><label for="python">虚拟环境 Python</label><div class="path-picker"><input id="python" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
           <div class="field"><label for="jobs">构建并行度</label><input id="jobs" type="number" min="1" required></div>
           <div class="field"><label for="pool_size">PromeFuzz 并发度</label><input id="pool_size" type="number" min="1" required></div>
-          <div class="field full"><label for="stop_after">停止阶段</label><select id="stop_after"><option value="built">built</option><option value="configured">configured</option><option value="preprocessed">preprocessed</option><option value="comprehended">comprehended</option><option value="generated">generated</option><option value="verified">verified</option><option value="fuzzing">fuzzing</option></select></div>
+          <div class="field full"><label for="stop_after">停止阶段</label><select id="stop_after"><option value="built">built</option><option value="configured">configured</option><option value="preprocessed">preprocessed</option><option value="comprehended">comprehended</option><option value="generated">generated</option><option value="fuzzing">fuzzing</option></select></div>
           <div class="field full"><label for="codex_command">Codex CLI 命令</label><div class="path-picker"><input id="codex_command" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
           <div class="field"><label for="codex_model">Codex 模型</label><input id="codex_model" placeholder="留空使用默认值"></div>
           <div class="field"><label for="codex_profile">Codex profile</label><input id="codex_profile" placeholder="可选"></div>
@@ -226,7 +226,7 @@
     ['cloned', '准备源码', 'Go'], ['built', '自主构建', 'Codex CLI'],
     ['configured', '生成 library.toml', 'Codex CLI'], ['preprocessed', 'API 预处理', 'PromeFuzz'],
     ['comprehended', 'API 理解', 'PromeFuzz + Codex'], ['generated', 'All-cover 全量生成', 'PromeFuzz + Codex'],
-    ['verified', '最终编译验证', 'Go'], ['fuzzing', '持续 Fuzz 测试', 'libFuzzer + Codex']
+    ['fuzzing', '持续 Fuzz 测试', 'libFuzzer + Codex']
   ];
   let taskId = null;
   let eventSource = null;
@@ -355,7 +355,6 @@
     if (!term) return;
     const source = `[${event.stage || '-'} · ${event.source || 'autofuzz'}]`;
     const msg = event.message || '';
-    // Use ANSI colors: cyan for source prefix, default for message
     term.write(`\x1b[36m${source}\x1b[0m ${msg}\r\n`);
     logCount++;
     $('logCount').textContent = `${logCount} 行`;
@@ -371,10 +370,10 @@
     } else if (event.kind === 'log') {
       appendLog(event);
     } else if (event.kind === 'run') {
-      appendLog(event);
-      if (event.status === 'running') setRunStatus('running', '运行中');
-      if (event.status === 'completed') finishUI('completed', '已完成');
-      if (event.status === 'failed') finishUI('failed', '运行失败');
+        appendLog(event);
+        if (event.status === 'running') setRunStatus('running', '运行中');
+        if (event.status === 'completed') finishUI('completed', '已完成');
+        if (event.status === 'failed') finishUI('failed', '运行失败');
     }
   }
 

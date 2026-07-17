@@ -139,21 +139,6 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 	if a.Options.StopAfter == state.StageGenerated {
 		return nil
 	}
-	if !a.State.Stage.AtLeast(state.StageVerified) {
-		a.stageStarted(state.StageVerified, "正在验证全部 fuzz driver")
-		if err := a.verifyDriver(ctx); err != nil {
-			return a.fail(state.StageVerified, err)
-		}
-		a.State.Stage = state.StageVerified
-		if err := a.State.Save(a.StatePath); err != nil {
-			return err
-		}
-		a.stageCompleted(state.StageVerified, "全部 fuzz driver 的编译和冒烟测试通过")
-		fmt.Println("all fuzz driver builds and 10-run smoke tests succeeded")
-	}
-	if a.Options.StopAfter == state.StageVerified {
-		return nil
-	}
 	if !a.State.Stage.AtLeast(state.StageFuzzing) {
 		a.stageStarted(state.StageFuzzing, "正在执行持续 fuzz 测试与覆盖分析")
 		if err := a.runFuzzing(ctx); err != nil {
@@ -193,8 +178,9 @@ func (a *Agent) configureWithCodex(ctx context.Context, firstAttempt int, failur
 			Name: a.State.ProjectName, SourceDir: a.State.SourceDir,
 			BuildDir: a.State.BuildDir, InstallDir: a.State.InstallDir, TargetDir: a.TargetDir,
 			CompileCommands: a.State.CompileCommandsPath, StaticLibraries: a.State.StaticLibraries,
-			FailureSummary: failure,
-			LogDir:         filepath.Join(a.LogsDir, fmt.Sprintf("configure-agent-%02d", attempt)),
+			FailureSummary:      failure,
+			LogDir:              filepath.Join(a.LogsDir, fmt.Sprintf("configure-agent-%02d", attempt)),
+			PromeFuzzConfigPath: a.Options.ConfigPath,
 		})
 		if err != nil {
 			lastErr = err
@@ -274,37 +260,6 @@ func findDrivers(outputPath string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func (a *Agent) verifyDriver(ctx context.Context) error {
-	driverDir := filepath.Join(a.State.OutputPath, "fuzz_driver")
-	scripts, _ := filepath.Glob(filepath.Join(driverDir, "build_fuzz_driver_*.sh"))
-	if len(scripts) == 0 {
-		return fmt.Errorf("no generated driver build script found")
-	}
-	sort.Strings(scripts)
-	for index, script := range scripts {
-		buildLogName := fmt.Sprintf("build-%03d", index+1)
-		verifyCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		_, err := a.Runner.Run(verifyCtx, filepath.Join(a.LogsDir, "verify"), buildLogName, driverDir, nil, script)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("rebuild generated driver %s: %w", filepath.Base(script), err)
-		}
-		binary := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(script), "build_"), ".sh")
-		binaryPath := filepath.Join(driverDir, binary)
-		if !fileExists(binaryPath) {
-			return fmt.Errorf("driver build script %s did not produce %s", filepath.Base(script), binaryPath)
-		}
-		runLogName := fmt.Sprintf("smoke-%03d", index+1)
-		runCtx, runCancel := context.WithTimeout(ctx, 2*time.Minute)
-		_, err = a.Runner.Run(runCtx, filepath.Join(a.LogsDir, "verify"), runLogName, driverDir, nil, binaryPath, "-runs=10")
-		runCancel()
-		if err != nil {
-			return fmt.Errorf("driver smoke test %s: %w", binary, err)
-		}
-	}
-	return nil
 }
 
 func (a *Agent) runFuzzing(ctx context.Context) error {

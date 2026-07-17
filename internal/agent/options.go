@@ -62,7 +62,7 @@ func (o *Options) Normalize() error {
 	validStages := map[state.Stage]bool{
 		state.StageBuilt:      true,
 		state.StageConfigured: true, state.StagePreprocessed: true,
-		state.StageComprehended: true, state.StageGenerated: true, state.StageVerified: true, state.StageFuzzing: true,
+		state.StageComprehended: true, state.StageGenerated: true, state.StageFuzzing: true,
 	}
 	if !validStages[o.StopAfter] {
 		return fmt.Errorf("invalid stop-after stage %q", o.StopAfter)

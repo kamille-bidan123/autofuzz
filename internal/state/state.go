@@ -18,7 +18,6 @@ const (
 	StagePreprocessed Stage = "preprocessed"
 	StageComprehended Stage = "comprehended"
 	StageGenerated    Stage = "generated"
-	StageVerified     Stage = "verified"
 	StageFuzzing      Stage = "fuzzing"
 	StageBlocked      Stage = "blocked"
 	StageFailed       Stage = "failed"
@@ -27,7 +26,7 @@ const (
 var stageOrder = map[Stage]int{
 	StageInit: 0, StageCloned: 1, StageBuilt: 2,
 	StageConfigured: 3, StagePreprocessed: 4, StageComprehended: 5,
-	StageGenerated: 6, StageVerified: 7, StageFuzzing: 8,
+	StageGenerated: 6, StageFuzzing: 7,
 }
 
 func (s Stage) AtLeast(other Stage) bool {
@@ -36,7 +35,7 @@ func (s Stage) AtLeast(other Stage) bool {
 
 var orderedStages = []Stage{
 	StageInit, StageCloned, StageBuilt, StageConfigured,
-	StagePreprocessed, StageComprehended, StageGenerated, StageVerified, StageFuzzing,
+	StagePreprocessed, StageComprehended, StageGenerated, StageFuzzing,
 }
 
 type BuildAttempt struct {

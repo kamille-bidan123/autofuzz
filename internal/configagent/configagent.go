@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,15 +30,16 @@ type Result struct {
 }
 
 type Request struct {
-	Name            string
-	SourceDir       string
-	BuildDir        string
-	InstallDir      string
-	TargetDir       string
-	CompileCommands string
-	StaticLibraries []string
-	FailureSummary  string
-	LogDir          string
+	Name                string
+	SourceDir           string
+	BuildDir            string
+	InstallDir          string
+	TargetDir           string
+	CompileCommands     string
+	StaticLibraries     []string
+	FailureSummary      string
+	LogDir              string
+	PromeFuzzConfigPath string // path to PromeFuzz config.toml (for the embed model config)
 }
 
 type Client struct {
@@ -68,7 +70,9 @@ func (c Client) Generate(ctx context.Context, request Request) (Report, Result, 
 	if err := os.WriteFile(filepath.Join(request.LogDir, "prompt.txt"), []byte(prompt), 0o644); err != nil {
 		return Report{}, Result{}, err
 	}
-	args := []string{c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write", "--ignore-rules", "--json",
+	args := []string{c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write",
+		"-c", "sandbox_workspace_write.network_access=true",
+		"--ignore-rules", "--json",
 		"--skip-git-repo-check", "--color", "never", "--output-schema", schemaPath,
 		"--output-last-message", responsePath, "-C", request.TargetDir}
 	if c.Model != "" {
@@ -150,9 +154,25 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 	if err != nil || !samePath(compileCommands, request.CompileCommands) {
 		return Result{}, fmt.Errorf("library.toml does not use the validated compile_commands.json")
 	}
-	if !regexp.MustCompile(`(?m)^document_paths\s*=\s*\[\s*\]\s*$`).MatchString(text) ||
-		!regexp.MustCompile(`(?m)^document_has_api_usage\s*=\s*false\s*$`).MatchString(text) {
-		return Result{}, fmt.Errorf("library.toml must disable document API usage")
+	hasDocUsage, err := boolValue(text, "document_has_api_usage")
+	if err != nil {
+		return Result{}, fmt.Errorf("library.toml has invalid document_has_api_usage")
+	}
+	docPaths, err := arrayValue(text, "document_paths")
+	if err != nil {
+		return Result{}, fmt.Errorf("library.toml has invalid document_paths")
+	}
+	if hasDocUsage {
+		if len(docPaths) == 0 {
+			return Result{}, fmt.Errorf("library.toml has document_has_api_usage=true but document_paths is empty")
+		}
+		for _, p := range docPaths {
+			if !validDocPath(p) {
+				return Result{}, fmt.Errorf("document_paths entry is neither an existing local path nor a valid URL: %s", p)
+			}
+		}
+	} else if len(docPaths) > 0 {
+		return Result{}, fmt.Errorf("library.toml has document_has_api_usage=false but document_paths is non-empty")
 	}
 	outputPath, err := stringValue(text, "output_path")
 	if err != nil || !within(request.TargetDir, outputPath) {
@@ -214,15 +234,70 @@ func stringValue(text, key string) (string, error) {
 }
 
 func arrayValue(text, key string) ([]string, error) {
-	value, err := assignment(text, key)
-	if err != nil {
-		return nil, err
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=\s*`)
+	loc := re.FindStringIndex(text)
+	if loc == nil {
+		return nil, fmt.Errorf("missing %s", key)
+	}
+	rest := text[loc[1]:]
+	start := strings.IndexByte(rest, '[')
+	if start < 0 {
+		return nil, fmt.Errorf("missing '[' for %s", key)
+	}
+	// Scan for the matching ']', respecting double-quoted strings so a ']'
+	// inside a path/URL does not end the array prematurely. This also handles
+	// multi-line TOML arrays.
+	inStr, esc, end := false, false, -1
+	for i := start + 1; i < len(rest); i++ {
+		c := rest[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+		} else if c == '"' {
+			inStr = true
+		} else if c == ']' {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil, fmt.Errorf("missing ']' for %s", key)
 	}
 	var result []string
-	if err := json.Unmarshal([]byte(value), &result); err != nil {
+	if err := json.Unmarshal([]byte(rest[start:end+1]), &result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func boolValue(text, key string) (bool, error) {
+	value, err := assignment(text, key)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid boolean value %q for %s", value, key)
+}
+
+// validDocPath accepts an http(s) URL or an existing local file/directory.
+func validDocPath(p string) bool {
+	if u, err := url.Parse(p); err == nil && u.Scheme != "" && u.Host != "" {
+		return true
+	}
+	if _, err := os.Stat(p); err == nil {
+		return true
+	}
+	return false
 }
 
 func samePath(left, right string) bool {
@@ -257,7 +332,13 @@ func buildPrompt(request Request) string {
 不要只在聊天里返回 TOML：把实际文件写出来。使用绝对路径。该文件必须包含一个 [%s] 段，以及全部 PromeFuzz 字段：language、compile_commands_path、document_paths、document_has_api_usage、output_path、header_paths、driver_build_args、consumer_case_paths、consumer_build_args、source_paths、exclude_paths、driver_headers、api_hints_path 和 api_ban_list_path。
 
 要求：
-- document_paths=[] 且 document_has_api_usage=false；
+- 关于文档检索（document_paths / document_has_api_usage）按以下流程决定：
+  1) 读取 PromeFuzz 配置 %s，找到 [comprehender] 段的 embedding_llm=<名>，再找到对应的 [llm.<名>] 段（含 llm_type / base_url / model / api_key / max_tokens）。
+  2) 若没有 embed 模型配置（embedding_llm 为空，或对应的 [llm.*] 段缺失）：保持 document_paths=[] 且 document_has_api_usage=false。
+  3) 若有 embed 配置：在工作区写一个 curl 脚本，向 <base_url>/embeddings 发 POST 请求，body 为 {"model":"<model>","input":"test"}，按需带 Authorization/api_key 头，并运行它。
+     - 若返回 HTTP 200 且响应体是合法的 OpenAI embeddings 格式（含 embedding 向量数组）：设 document_has_api_usage=true，并填充 document_paths——须同时包含源码目录里已有的本地文档（README*、docs/、*.md、*.txt、*.rst、*.html、*.pdf 等的绝对路径，可递归整目录），以及用 web_search 工具找到的该库官方文档 URL。
+     - 否则（连接失败 / 非 200 / 响应格式错误）：回退 document_paths=[] 且 document_has_api_usage=false，并在 analysis 里简述失败原因。
+  document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL。
 - compile_commands_path 必须严格等于下方已校验的路径；
 - output_path 必须在目标工作区内；
 - header_paths 必须是编译器观察到的源码/构建头文件位置，而非 AST 不一致的已安装副本；
@@ -274,7 +355,9 @@ func buildPrompt(request Request) string {
 最近的拒绝或预处理错误：
 %s
 
-写完文件后，自查它，并报告其相对目标工作区的路径。`, request.Name, configPath, request.Name, string(artifacts), previous, request.FailureSummary)
+写完文件后，自查它，并报告其相对目标工作区的路径。
+
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么，须包含 embed 测试结果与 document_paths / document_has_api_usage 的决定依据）、library_config_path（字符串，所写 library.toml 相对目标工作区的路径）、evidence（字符串数组，关键证据/校验结果）。`, request.Name, configPath, request.Name, request.PromeFuzzConfigPath, string(artifacts), previous, request.FailureSummary)
 }
 
 const responseSchema = `{
