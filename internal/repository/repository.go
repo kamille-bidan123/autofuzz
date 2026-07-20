@@ -17,7 +17,12 @@ import (
 	"autofuzz/internal/runner"
 )
 
-var sshGitHub = regexp.MustCompile(`^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$`)
+var sshGit = regexp.MustCompile(`^git@(github\.com|gitcode\.com):([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$`)
+
+var allowedGitHosts = map[string]bool{
+	"github.com":  true,
+	"gitcode.com": true,
+}
 
 func NormalizeInput(input string) (string, string, error) {
 	if info, err := os.Stat(input); err == nil && info.IsDir() {
@@ -30,7 +35,7 @@ func NormalizeInput(input string) (string, string, error) {
 	if _, err := ProjectName(input); err != nil {
 		return "", "", err
 	}
-	return input, "github", nil
+	return input, "git", nil
 }
 
 func ProjectName(rawURL string) (string, error) {
@@ -41,16 +46,20 @@ func ProjectName(rawURL string) (string, error) {
 		}
 		return filepath.Base(absolute), nil
 	}
-	if match := sshGitHub.FindStringSubmatch(rawURL); match != nil {
-		return strings.TrimSuffix(match[2], ".git"), nil
+	if match := sshGit.FindStringSubmatch(rawURL); match != nil {
+		return strings.TrimSuffix(match[3], ".git"), nil
 	}
 	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Hostname() != "github.com" {
-		return "", fmt.Errorf("only github.com repository URLs are supported")
+	if err != nil {
+		return "", fmt.Errorf("only github.com and gitcode.com repository URLs are supported")
+	}
+	host := parsed.Hostname()
+	if !allowedGitHosts[host] {
+		return "", fmt.Errorf("only github.com and gitcode.com repository URLs are supported")
 	}
 	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("expected GitHub URL in owner/repository form")
+		return "", fmt.Errorf("expected %s URL in owner/repository form", host)
 	}
 	return strings.TrimSuffix(parts[1], ".git"), nil
 }

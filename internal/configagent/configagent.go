@@ -1,17 +1,19 @@
 package configagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
+
+	"autofuzz/internal/codex"
 	"autofuzz/internal/runner"
 )
 
@@ -84,7 +86,7 @@ func (c Client) Generate(ctx context.Context, request Request) (Report, Result, 
 	args = append(args, "-")
 	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	onStdout := jsonLineSink(c.EventSink)
+	onStdout := codex.JSONLineSink(c.EventSink)
 	if _, err := c.Runner.RunInputStreaming(commandCtx, request.LogDir, "codex", request.TargetDir, nil, prompt, onStdout, nil, args...); err != nil {
 		return Report{}, Result{}, fmt.Errorf("Codex library.toml generation failed: %w", err)
 	}
@@ -92,8 +94,14 @@ func (c Client) Generate(ctx context.Context, request Request) (Report, Result, 
 	if err != nil {
 		return Report{}, Result{}, err
 	}
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
 	var report Report
-	if err := json.Unmarshal(data, &report); err != nil {
+	if err := json.Unmarshal(payload, &report); err != nil {
 		return Report{}, Result{}, fmt.Errorf("decode Codex library report: %w", err)
 	}
 	result, err := ValidateConfig(report, request)
@@ -103,26 +111,28 @@ func (c Client) Generate(ctx context.Context, request Request) (Report, Result, 
 	return report, result, nil
 }
 
-func jsonLineSink(sink func(json.RawMessage)) func(string) {
-	if sink == nil {
-		return nil
-	}
-	return func(line string) {
-		raw := json.RawMessage(strings.TrimSpace(line))
-		if !json.Valid(raw) {
-			return
-		}
-		copyOfRaw := append(json.RawMessage(nil), raw...)
-		sink(copyOfRaw)
-	}
-}
-
 func SaveReport(path string, report Report) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// libraryConfigTable mirrors the [<project>] section of a PromeFuzz
+// library.toml. Only the fields Autofuzz validates are modeled; the decoder
+// ignores unknown keys such as consumer_build_args or source_paths.
+type libraryConfigTable struct {
+	Language            string   `toml:"language"`
+	CompileCommandsPath string   `toml:"compile_commands_path"`
+	DocumentPaths       []string `toml:"document_paths"`
+	DocumentHasAPIUsage bool     `toml:"document_has_api_usage"`
+	OutputPath          string   `toml:"output_path"`
+	HeaderPaths         []string `toml:"header_paths"`
+	DriverBuildArgs     []string `toml:"driver_build_args"`
+	ConsumerCasePaths   []string `toml:"consumer_case_paths"`
+	APIBanListPath      string   `toml:"api_ban_list_path"`
+	APIHintsPath        string   `toml:"api_hints_path"`
 }
 
 func ValidateConfig(report Report, request Request) (Result, error) {
@@ -142,57 +152,45 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 	if err != nil || len(data) == 0 {
 		return Result{}, fmt.Errorf("Codex did not create a nonempty library.toml")
 	}
-	text := string(data)
-	if !strings.Contains(text, "["+request.Name+"]") && !strings.Contains(text, "[\""+request.Name+"\"]") {
+	var tables map[string]libraryConfigTable
+	if err := toml.Unmarshal(data, &tables); err != nil {
+		return Result{}, fmt.Errorf("library.toml is not valid TOML: %w", err)
+	}
+	cfg, ok := tables[request.Name]
+	if !ok {
 		return Result{}, fmt.Errorf("library.toml has no section for %s", request.Name)
 	}
-	language, err := stringValue(text, "language")
-	if err != nil || (language != "c" && language != "c++") {
+	if cfg.Language != "c" && cfg.Language != "c++" {
 		return Result{}, fmt.Errorf("library.toml has invalid language")
 	}
-	compileCommands, err := stringValue(text, "compile_commands_path")
-	if err != nil || !samePath(compileCommands, request.CompileCommands) {
+	if !samePath(cfg.CompileCommandsPath, request.CompileCommands) {
 		return Result{}, fmt.Errorf("library.toml does not use the validated compile_commands.json")
 	}
-	hasDocUsage, err := boolValue(text, "document_has_api_usage")
-	if err != nil {
-		return Result{}, fmt.Errorf("library.toml has invalid document_has_api_usage")
-	}
-	docPaths, err := arrayValue(text, "document_paths")
-	if err != nil {
-		return Result{}, fmt.Errorf("library.toml has invalid document_paths")
-	}
-	if hasDocUsage {
-		if len(docPaths) == 0 {
+	if cfg.DocumentHasAPIUsage {
+		if len(cfg.DocumentPaths) == 0 {
 			return Result{}, fmt.Errorf("library.toml has document_has_api_usage=true but document_paths is empty")
 		}
-		for _, p := range docPaths {
+		for _, p := range cfg.DocumentPaths {
 			if !validDocPath(p) {
 				return Result{}, fmt.Errorf("document_paths entry is neither an existing local path nor a valid URL: %s", p)
 			}
 		}
-	} else if len(docPaths) > 0 {
+	} else if len(cfg.DocumentPaths) > 0 {
 		return Result{}, fmt.Errorf("library.toml has document_has_api_usage=false but document_paths is non-empty")
 	}
-	outputPath, err := stringValue(text, "output_path")
-	if err != nil || !within(request.TargetDir, outputPath) {
+	if !within(request.TargetDir, cfg.OutputPath) {
 		return Result{}, fmt.Errorf("library.toml output_path is invalid")
 	}
-	headers, err := arrayValue(text, "header_paths")
-	if err != nil || len(headers) == 0 {
+	if len(cfg.HeaderPaths) == 0 {
 		return Result{}, fmt.Errorf("library.toml needs header_paths")
 	}
-	for _, path := range headers {
+	for _, path := range cfg.HeaderPaths {
 		if _, err := os.Stat(path); err != nil {
 			return Result{}, fmt.Errorf("header path does not exist: %s", path)
 		}
 	}
-	buildArgs, err := arrayValue(text, "driver_build_args")
-	if err != nil {
-		return Result{}, fmt.Errorf("invalid driver_build_args")
-	}
 	foundLibrary := false
-	for _, arg := range buildArgs {
+	for _, arg := range cfg.DriverBuildArgs {
 		for _, library := range request.StaticLibraries {
 			if samePath(arg, library) {
 				foundLibrary = true
@@ -202,91 +200,45 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 	if !foundLibrary {
 		return Result{}, fmt.Errorf("driver_build_args does not contain a validated static library")
 	}
-	consumers, err := arrayValue(text, "consumer_case_paths")
-	if err != nil {
-		return Result{}, fmt.Errorf("invalid consumer_case_paths")
-	}
-	for _, path := range consumers {
+	for _, path := range cfg.ConsumerCasePaths {
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {
 			return Result{}, fmt.Errorf("consumer path is not a directory: %s", path)
 		}
 	}
-	return Result{ConfigPath: absolute, Language: language, HeaderPaths: headers,
-		ConsumerPaths: consumers, OutputPath: outputPath}, nil
-}
-
-func assignment(text, key string) (string, error) {
-	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=\s*(.+?)\s*$`)
-	match := pattern.FindStringSubmatch(text)
-	if len(match) != 2 {
-		return "", fmt.Errorf("missing %s", key)
-	}
-	return match[1], nil
-}
-
-func stringValue(text, key string) (string, error) {
-	value, err := assignment(text, key)
-	if err != nil {
-		return "", err
-	}
-	return strconv.Unquote(value)
-}
-
-func arrayValue(text, key string) ([]string, error) {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=\s*`)
-	loc := re.FindStringIndex(text)
-	if loc == nil {
-		return nil, fmt.Errorf("missing %s", key)
-	}
-	rest := text[loc[1]:]
-	start := strings.IndexByte(rest, '[')
-	if start < 0 {
-		return nil, fmt.Errorf("missing '[' for %s", key)
-	}
-	// Scan for the matching ']', respecting double-quoted strings so a ']'
-	// inside a path/URL does not end the array prematurely. This also handles
-	// multi-line TOML arrays.
-	inStr, esc, end := false, false, -1
-	for i := start + 1; i < len(rest); i++ {
-		c := rest[i]
-		if inStr {
-			if esc {
-				esc = false
-			} else if c == '\\' {
-				esc = true
-			} else if c == '"' {
-				inStr = false
-			}
-		} else if c == '"' {
-			inStr = true
-		} else if c == ']' {
-			end = i
-			break
+	if cfg.APIBanListPath != "" {
+		var banList []string
+		if err := validateJSONFile(cfg.APIBanListPath, &banList); err != nil {
+			return Result{}, fmt.Errorf("api_ban_list_path points to %w", err)
 		}
 	}
-	if end < 0 {
-		return nil, fmt.Errorf("missing ']' for %s", key)
+	if cfg.APIHintsPath != "" {
+		var hints map[string]any
+		if err := validateJSONFile(cfg.APIHintsPath, &hints); err != nil {
+			return Result{}, fmt.Errorf("api_hints_path points to %w", err)
+		}
 	}
-	var result []string
-	if err := json.Unmarshal([]byte(rest[start:end+1]), &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return Result{ConfigPath: absolute, Language: cfg.Language, HeaderPaths: cfg.HeaderPaths,
+		ConsumerPaths: cfg.ConsumerCasePaths, OutputPath: cfg.OutputPath}, nil
 }
 
-func boolValue(text, key string) (bool, error) {
-	value, err := assignment(text, key)
+// validateJSONFile ensures path points to an existing file whose content is
+// valid JSON decodable into target. PromeFuzz json.load's api_ban_list_path
+// and api_hints_path with no graceful handling for empty/invalid files, so an
+// empty placeholder file crashes the whole preprocess stage. The empty-string
+// sentinel (the PromeFuzz convention for "unused") is handled by the caller.
+func validateJSONFile(path string, target interface{}) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return fmt.Errorf("a missing or unreadable file (%s): %w", path, err)
 	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("an empty file (%s); set the path to \"\" when unused, or write valid JSON", path)
 	}
-	return false, fmt.Errorf("invalid boolean value %q for %s", value, key)
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("invalid JSON (%s): %w", path, err)
+	}
+	return nil
 }
 
 // validDocPath accepts an http(s) URL or an existing local file/directory.
@@ -344,6 +296,7 @@ func buildPrompt(request Request) string {
 - header_paths 必须是编译器观察到的源码/构建头文件位置，而非 AST 不一致的已安装副本；
 - driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；
 - consumer_case_paths 必须是包含真实 API 用法的目录；
+- api_ban_list_path 和 api_hints_path：不用时必须设为空字符串 ""（PromeFuzz 的约定，会跳过加载）；使用时必须指向一个已存在、内容为合法 JSON 的文件。绝不要创建空占位文件——空文件不是合法 JSON，会让 PromeFuzz 在 json.load 时崩溃。api_ban_list_path 必须是字符串数组（形如 ["source/header.h:42:6"]，表示被禁函数定位）；api_hints_path 必须是对象（函数名→提示字符串）。
 - 其余字段由你根据证据自行决定。
 
 已校验产物：

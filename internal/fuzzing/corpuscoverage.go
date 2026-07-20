@@ -54,7 +54,7 @@ type UncoveredBranchWithReach struct {
 // descending and the largest maxSeeds are kept (the rest are sampled out).
 func CollectCorpusCoverage(
 	ctx context.Context,
-	binaryPath, sourceDir, driverDir, corpusSnapshotDir, logDir string,
+	binaryPath, sourceDir, buildDir, driverDir, corpusSnapshotDir, logDir string,
 	maxSeeds int,
 	logf func(string, ...any),
 ) (CorpusCoverageStatus, error) {
@@ -94,12 +94,12 @@ func CollectCorpusCoverage(
 		if err := ctx.Err(); err != nil {
 			return CorpusCoverageStatus{CorpusDir: corpusSnapshotDir}, err
 		}
-		reach, _ := runSeedCoverage(ctx, binaryPath, sourceDir, driverDir, sd.path, logDir, i)
+		reach, _ := runSeedCoverage(ctx, binaryPath, sourceDir, buildDir, driverDir, sd.path, logDir, i)
 		perSeedReach[i] = reach
 	}
 
 	// Aggregate baseline from all per-seed profiles.
-	aggregate := aggregateSeedProfiles(logDir, binaryPath, sourceDir, logf)
+	aggregate := aggregateSeedProfiles(logDir, binaryPath, sourceDir, buildDir, logf)
 
 	status := buildCorpusCoverage(seeds, perSeedReach, aggregate, sampled, corpusSnapshotDir)
 	logf("[corpus-cov] summary: executed=%d full=%d partial=%d uncovered_branches=%d\n",
@@ -200,7 +200,7 @@ func listSeedFiles(dir string) ([]seedFile, error) {
 // (e.g. ASan abort). The branch-site reach is what makes reaching_seeds
 // accurate: a seed that entered a function but returned before the branch is
 // not counted as reaching that branch.
-func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, driverDir, seedPath, logDir string, idx int) (map[string]map[[2]int]bool, bool) {
+func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, buildDir, driverDir, seedPath, logDir string, idx int) (map[string]map[[2]int]bool, bool) {
 	profrawPath := filepath.Join(logDir, fmt.Sprintf("seed-%d.profraw", idx))
 	profdataPath := filepath.Join(logDir, fmt.Sprintf("seed-%d.profdata", idx))
 	seedCtx, cancel := context.WithTimeout(ctx, defaultPerSeedTimeout)
@@ -208,7 +208,7 @@ func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, driverDir, seed
 
 	cmd := exec.CommandContext(seedCtx, binaryPath, "-runs=1", seedPath)
 	cmd.Dir = driverDir
-	cmd.Env = append(os.Environ(), "LLVM_PROFILE_FILE="+profrawPath)
+	cmd.Env = withAsanSymbolizeDisabled(append(os.Environ(), "LLVM_PROFILE_FILE="+profrawPath))
 	// Stdout/stderr left nil: output is discarded to avoid per-seed noise;
 	// crashing seeds are simply skipped (no usable profile produced).
 	_ = cmd.Run()
@@ -230,7 +230,7 @@ func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, driverDir, seed
 	if !fileExists(profdataPath) {
 		return nil, false
 	}
-	reach, err := CollectBranchReach(profdataPath, binaryPath, sourceDir)
+	reach, err := CollectBranchReach(profdataPath, binaryPath, sourceDir, buildDir)
 	if err != nil {
 		return nil, false
 	}
@@ -239,7 +239,7 @@ func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, driverDir, seed
 
 // aggregateSeedProfiles merges all seed-*.profraw into cov.profdata and runs
 // llvm-cov export once to obtain the aggregate CoverageStatus baseline.
-func aggregateSeedProfiles(logDir, binaryPath, sourceDir string, logf func(string, ...any)) CoverageStatus {
+func aggregateSeedProfiles(logDir, binaryPath, sourceDir, buildDir string, logf func(string, ...any)) CoverageStatus {
 	profrawBin := findTool("llvm-profdata")
 	if profrawBin == "" {
 		logf("[corpus-cov] llvm-profdata not found, skipping aggregate\n")
@@ -260,7 +260,7 @@ func aggregateSeedProfiles(logDir, binaryPath, sourceDir string, logf func(strin
 	if !fileExists(profdataPath) {
 		return CoverageStatus{}
 	}
-	cs, err := CollectCoverageStatus(profdataPath, binaryPath, sourceDir)
+	cs, err := CollectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir)
 	if err != nil {
 		logf("[corpus-cov] aggregate llvm-cov export: %v\n", err)
 		return CoverageStatus{}

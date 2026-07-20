@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"autofuzz/internal/codex"
 	"autofuzz/internal/runner"
 )
 
@@ -78,7 +79,7 @@ func (c Client) Build(ctx context.Context, request Request) (Result, error) {
 	args = append(args, "-")
 	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	onStdout := jsonLineSink(c.EventSink)
+	onStdout := codex.JSONLineSink(c.EventSink)
 	if _, err := c.Runner.RunInputStreaming(commandCtx, request.LogDir, "codex", request.TargetDir, nil, prompt, onStdout, nil, args...); err != nil {
 		return Result{}, fmt.Errorf("Codex autonomous build failed: %w", err)
 	}
@@ -86,25 +87,17 @@ func (c Client) Build(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read Codex build report: %w", err)
 	}
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
 	var report Report
-	if err := json.Unmarshal(data, &report); err != nil {
+	if err := json.Unmarshal(payload, &report); err != nil {
 		return Result{}, fmt.Errorf("decode Codex build report: %w", err)
 	}
 	return ValidateReport(report, request.TargetDir)
-}
-
-func jsonLineSink(sink func(json.RawMessage)) func(string) {
-	if sink == nil {
-		return nil
-	}
-	return func(line string) {
-		raw := json.RawMessage(strings.TrimSpace(line))
-		if !json.Valid(raw) {
-			return
-		}
-		copyOfRaw := append(json.RawMessage(nil), raw...)
-		sink(copyOfRaw)
-	}
 }
 
 func SaveReport(path string, report Report) error {
@@ -207,7 +200,9 @@ func buildPrompt(request Request) string {
 - 除非为了理解或打通库构建，否则不要构建测试、示例、benchmark 和共享库；
 - 最多使用 %d 个并行任务。
 
-不要只提出命令：自己执行构建、检查错误并验证产物。最终 JSON 报告中，所有产物路径都须相对工作区根目录。只报告确实存在的产物。`, request.SourceDir, request.TargetDir, request.Jobs)
+不要只提出命令：自己执行构建、检查错误并验证产物。所有产物路径都须相对工作区根目录。只报告确实存在的产物。
+
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么）、build_system（字符串，如 cmake/make/meson/autotools）、language（字符串，"c" 或 "c++"）、build_dir（字符串，相对工作区根目录）、install_dir（字符串，相对工作区根目录）、compile_commands_path（字符串，相对工作区根目录）、static_libraries（字符串数组，至少一个相对工作区根目录的 .a 路径）、evidence（字符串数组，关键证据/校验结果）。`, request.SourceDir, request.TargetDir, request.Jobs)
 }
 
 const responseSchema = `{

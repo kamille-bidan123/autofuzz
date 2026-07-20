@@ -17,7 +17,7 @@ type RunRequest struct {
 	Ref           string `json:"ref"`
 	Workspace     string `json:"workspace"`
 	PromeFuzzRoot string `json:"promefuzz"`
-	ConfigPath    string `json:"config"`
+	ConfigPath    string `json:"promefuzz_config"`
 	PythonPath    string `json:"python"`
 	PoolSize      int    `json:"pool_size"`
 	Jobs          int    `json:"jobs"`
@@ -311,4 +311,34 @@ func (m *Manager) TriggerFuzzAnalysis(id string) error {
 	}
 	agent.TriggerFuzzAnalysis()
 	return nil
+}
+
+// CoverageData returns the cached coverage snapshot from the task's corpus
+// monitor, or nil when not in the fuzzing stage.
+func (m *Manager) CoverageData(id string) any {
+	task, exists := m.Get(id)
+	if !exists {
+		return nil
+	}
+	task.mu.RLock()
+	agent := task.agent
+	task.mu.RUnlock()
+	if agent == nil {
+		return nil
+	}
+	return agent.CoverageData()
+}
+
+func (m *Manager) SnapshotComparison(id string) any {
+	task, exists := m.Get(id)
+	if !exists {
+		return nil
+	}
+	task.mu.RLock()
+	agent := task.agent
+	task.mu.RUnlock()
+	if agent == nil {
+		return nil
+	}
+	return agent.SnapshotComparison()
 }

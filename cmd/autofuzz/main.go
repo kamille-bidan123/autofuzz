@@ -17,9 +17,9 @@ func main() {
 	var stopAfter string
 	flag.StringVar(&options.Ref, "ref", "", "Git ref, tag, or branch to clone")
 	flag.StringVar(&options.Workspace, "workspace", options.Workspace, "Workspace for target repositories and results")
-	flag.StringVar(&options.PromeFuzzRoot, "promefuzz", options.PromeFuzzRoot, "Path to the PromeFuzz checkout")
-	flag.StringVar(&options.ConfigPath, "config", options.ConfigPath, "PromeFuzz config.toml path")
-	flag.StringVar(&options.PythonPath, "python", options.PythonPath, "Python executable from the PromeFuzz virtual environment")
+	flag.StringVar(&options.PromeFuzzRoot, "promefuzz", options.PromeFuzzRoot, "Path to the PromeFuzz checkout (required)")
+	flag.StringVar(&options.ConfigPath, "promefuzz-config", options.ConfigPath, "PromeFuzz config.toml path (default: <promefuzz>/config.toml)")
+	flag.StringVar(&options.PythonPath, "python", options.PythonPath, "Python executable from the PromeFuzz virtual environment (default: <promefuzz>/.venv/bin/python)")
 	flag.IntVar(&options.PoolSize, "pool-size", options.PoolSize, "PromeFuzz/Codex concurrency")
 	flag.IntVar(&options.Jobs, "jobs", options.Jobs, "Build parallelism")
 	flag.StringVar(&options.CodexCommand, "codex-command", options.CodexCommand, "Codex CLI executable used for autonomous build and configuration")
@@ -30,7 +30,7 @@ func main() {
 	flag.DurationVar(&options.FuzzInterval, "fuzz-interval", options.FuzzInterval, "Interval between fuzz/coverage assessments")
 	flag.StringVar(&stopAfter, "stop-after", string(state.StageFuzzing), "Stop after a named stage")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: autofuzz [options] <local-directory-or-github-url>\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: autofuzz [options] <local-directory-or-git-url>\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

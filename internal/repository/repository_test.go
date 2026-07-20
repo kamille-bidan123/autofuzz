@@ -8,9 +8,12 @@ import (
 
 func TestProjectName(t *testing.T) {
 	tests := map[string]string{
-		"https://github.com/DaveGamble/cJSON.git": "cJSON",
-		"https://github.com/c-ares/c-ares":        "c-ares",
-		"git@github.com:libexpat/libexpat.git":    "libexpat",
+		"https://github.com/DaveGamble/cJSON.git":      "cJSON",
+		"https://github.com/c-ares/c-ares":             "c-ares",
+		"git@github.com:libexpat/libexpat.git":         "libexpat",
+		"https://gitcode.com/testorg/sample-repo.git": "sample-repo",
+		"https://gitcode.com/testorg/sample-repo":      "sample-repo",
+		"git@gitcode.com:testorg/sample-repo.git":      "sample-repo",
 	}
 	for input, expected := range tests {
 		actual, err := ProjectName(input)

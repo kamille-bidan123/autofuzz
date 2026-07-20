@@ -105,3 +105,4 @@ func TestValidateReportRejectsEscape(t *testing.T) {
 		t.Fatal("expected path escape to be rejected")
 	}
 }
+

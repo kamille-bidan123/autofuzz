@@ -29,14 +29,25 @@ type Options struct {
 }
 
 func (o *Options) Normalize() error {
+	if o.PromeFuzzRoot == "" {
+		return fmt.Errorf("promefuzz is required")
+	}
 	var err error
+	if o.PromeFuzzRoot, err = filepath.Abs(o.PromeFuzzRoot); err != nil {
+		return fmt.Errorf("resolve promefuzz: %w", err)
+	}
+	if o.ConfigPath == "" {
+		o.ConfigPath = filepath.Join(o.PromeFuzzRoot, "config.toml")
+	}
+	if o.PythonPath == "" {
+		o.PythonPath = filepath.Join(o.PromeFuzzRoot, ".venv", "bin", "python")
+	}
 	for _, item := range []struct {
 		name  string
 		value *string
 	}{
 		{"workspace", &o.Workspace},
-		{"promefuzz", &o.PromeFuzzRoot},
-		{"config", &o.ConfigPath},
+		{"promefuzz-config", &o.ConfigPath},
 		{"python", &o.PythonPath},
 	} {
 		*item.value, err = filepath.Abs(*item.value)
@@ -72,8 +83,7 @@ func (o *Options) Normalize() error {
 
 func DefaultOptions() Options {
 	return Options{
-		Workspace: "autofuzz-work", PromeFuzzRoot: "../PromeFuzz",
-		ConfigPath: "../PromeFuzz/config.toml", PythonPath: "../PromeFuzz/.venv/bin/python",
+		Workspace: "autofuzz-work",
 		PoolSize: 5, Jobs: runtime.NumCPU(), StopAfter: state.StageFuzzing, FuzzInterval: 30 * time.Minute,
 		CodexCommand: "codex",
 	}

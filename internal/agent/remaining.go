@@ -275,6 +275,7 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 	cfg := fuzzing.FuzzConfig{
 		DriverDir:    driverDir,
 		SourceDir:    a.State.SourceDir,
+		BuildDir:     a.State.BuildDir,
 		BuildScript:  buildScript,
 		BinaryPath:   binaryPath,
 		CorpusDir:    corpusDir,
@@ -289,6 +290,7 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 		LogSink: func(message string) {
 			a.emit(runevent.New("log", string(state.StageFuzzing), "", "autofuzz", message))
 		},
+		OnMonitorChanged: a.setCorpusMonitor,
 	}
 
 	if cfg.Interval <= 0 {

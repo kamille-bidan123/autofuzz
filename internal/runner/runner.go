@@ -98,12 +98,19 @@ func (r Runner) RunInputStreaming(
 	if command.ProcessState != nil {
 		result.ExitCode = command.ProcessState.ExitCode()
 	}
+	// On any context error (timeout OR cancel), kill the entire process group
+	// (Setpgid puts the command in its own group). exec.CommandContext only
+	// kills the direct child, leaving fork workers / merge subprocesses as
+	// orphaned CPU hogs. Killing the group prevents that.
+	if ctx.Err() != nil && command.Process != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
-		if command.Process != nil {
-			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		}
 		return result, fmt.Errorf("command timed out after %s", result.Duration.Round(time.Second))
+	}
+	if ctx.Err() == context.Canceled {
+		return result, fmt.Errorf("command cancelled")
 	}
 	if err != nil {
 		return result, fmt.Errorf("command failed with exit code %d: %w", result.ExitCode, err)

@@ -35,6 +35,8 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/runs/{id}/events", server.runEvents)
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
+	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
+	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
 	server.mux.HandleFunc("GET /static/vendor/", server.serveVendor)
 	return server
 }
@@ -212,6 +214,24 @@ func (s *Server) triggerFuzz(response http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{"status": "triggered"})
+}
+
+func (s *Server) coverage(response http.ResponseWriter, request *http.Request) {
+	data := s.manager.CoverageData(request.PathValue("id"))
+	if data == nil {
+		writeJSON(response, http.StatusOK, map[string]any{"available": false})
+		return
+	}
+	writeJSON(response, http.StatusOK, data)
+}
+
+func (s *Server) snapshots(response http.ResponseWriter, request *http.Request) {
+	data := s.manager.SnapshotComparison(request.PathValue("id"))
+	if data == nil {
+		writeJSON(response, http.StatusOK, []any{})
+		return
+	}
+	writeJSON(response, http.StatusOK, data)
 }
 
 func (s *Server) runEvents(response http.ResponseWriter, request *http.Request) {

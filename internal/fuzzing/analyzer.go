@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"autofuzz/internal/codex"
 	"autofuzz/internal/runner"
 )
 
@@ -16,9 +16,8 @@ import (
 type AnalysisRequest struct {
 	FuzzStatus     FuzzStatus           `json:"fuzz_status"`
 	CoverageStatus CorpusCoverageStatus `json:"coverage_status"`
-	DriverSource   string               `json:"driver_source"`
 	SourceDir      string               `json:"source_dir"` // library source (read-only)
-	DriverDir      string               `json:"driver_dir"` // fuzz driver dir (Codex has write access)
+	DriverDir      string               `json:"driver_dir"` // fuzz driver dir (Codex has read+write access)
 }
 
 // AnalysisResponse is the structured output from Codex. Codex edits driver
@@ -52,8 +51,10 @@ type CodexAnalyzer struct {
 	LogSink   func(message string)
 }
 
-// Analyze sends fuzz status, coverage status, and driver source to Codex
-// for analysis and returns the structured response.
+// Analyze sends fuzz status and coverage status to Codex for analysis and
+// returns the structured response. Codex reads the driver sources directly
+// from DriverDir (it has read access there); the entry source is NOT inlined
+// into the prompt.
 func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir string) (AnalysisResponse, error) {
 	if c.Command == "" {
 		c.Command = "codex"
@@ -91,7 +92,7 @@ func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir 
 
 	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	onStdout := jsonLineSink(c.EventSink)
+	onStdout := codex.JSONLineSink(c.EventSink)
 	// Run Codex with cwd = DriverDir so its workspace-write sandbox can edit the
 	// synthesized driver sources directly. The library source (SourceDir) is
 	// read via its absolute path in the prompt.
@@ -104,8 +105,18 @@ func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir 
 		return AnalysisResponse{}, fmt.Errorf("read Codex analysis response: %w", err)
 	}
 
+	// Codex has no CLI flag that forces pure-JSON final-message output (the
+	// configured provider does not support OpenAI strict structured outputs),
+	// so despite --output-schema the model sometimes wraps the JSON in a
+	// "## Analysis" heading and a ```json code fence. Extract defensively.
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
 	var resp AnalysisResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	if err := json.Unmarshal(payload, &resp); err != nil {
 		return AnalysisResponse{}, fmt.Errorf("decode Codex analysis response: %w", err)
 	}
 
@@ -119,15 +130,17 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 	return fmt.Sprintf(`你是一位 fuzz 测试分析专家。
 
 你对目标库源码 %s 有读权限。
-你对 fuzz driver 目录 %s 有写权限（具体是 %s/synthesized/*.c：各个子 driver 源码 1.c、2.c …… 以及 entry.c/entry.cpp 分派器）。
+你对 fuzz driver 目录 %s 有写权限（具体是 %s/synthesized/*.c：各个子 driver 源码 1.c、2.c …… 以及 entry.c/entry.cpp 分派器；你还可以运行该目录下的 build_cov_synthesized_driver.sh 编译脚本验证你的修改能否编译成功）。
 
 下方的覆盖数据是 PER-CORPUS-SEED 的：fuzzer 没有被停止，而是把每个已保存的 corpus 输入逐个 replay 跑过带覆盖插桩的 driver。"uncovered" 列出的是从未被走过的分支；每条包含 line（行号）、function（所属函数）、condition（条件）、missing（缺失的方向）、counts（哪一侧为 0）以及 reaching_seeds：replay 时真正执行到该分支点（控制流评估过该分支）的 seed，即最接近这条卡点分支的输入。只关注 driver 已经到达却触发不了的分支：分析为何该分支条件从未被满足。
 
 步骤：
-1. 判断 fuzz 是否已到达平台期（覆盖在较长时间内停滞）。
-2. 若是，阅读库源码（%s）和合一 driver（下方的 entry 文件），理解各 API 实现以及每个 driver 如何构造输入。
-3. 若某个 fuzz driver 需要改进，用你的文件写入工具直接编辑 %s/synthesized/ 下的相关源文件（如 1.c）——调整输入构造 / API 调用顺序，使输入能走到未覆盖分支。不要输出 driver 号或建议文本，自己把代码改掉。
-4. 仅当你确实编辑了 driver 文件时才设 needs_update=true（harness 会重新合并 entry.c 并 rebuild + 重启 fuzzer）。若没改动，needs_update=false。
+1. 判断 fuzz 是否已到达平台期（覆盖在较长时间内停滞）。无论结论如何，fuzzer 都会继续运行；该信号仅用于决定本轮是否需要改 driver。
+2. 若是，阅读库源码（%s）和该 fuzz driver 目录下 synthesized/ 里的 entry.c/entry.cpp 分派器及各子 driver 源码（1.c、2.c ……），理解各 API 实现以及每个 driver 如何构造输入。
+3. 选择一条你想覆盖的未覆盖分支，想清楚改进理由：当前 driver 的输入构造 / API 调用顺序为什么走不到那条分支？你要怎么改？改完后预计能让哪条未覆盖分支（给出 function + line）变成覆盖？把这个因果推理想清楚，在最终回复的 "analysis" 字段里写明。
+4. 用你的文件写入工具直接编辑 %s/synthesized/ 下的相关源文件（如 1.c）——编辑前先把原文件复制一份 .bak 备份（如 cp 1.c 1.c.bak），然后再修改。调整输入构造 / API 调用顺序，使输入能走到你选定的未覆盖分支。不要输出 driver 号或建议文本，自己把代码改掉。
+5. 编译验证：编辑完后，运行 %s/build_cov_synthesized_driver.sh 验证能否编译成功。如果编译失败，读错误信息、修改源码、重试。如果多次重试仍编译不通过，用 .bak 文件回退你的修改（如 cp 1.c.bak 1.c），确保源码恢复到修改前的状态，设 needs_update=false，在 "analysis" 里说明编译失败的原因和回退操作。不要留下编译不过的改动。
+6. 仅当你确实编辑了 driver 文件且编译通过时才设 needs_update=true（harness 会重新合并 entry.c 并 rebuild + 重启 fuzzer）。若没改动、编译没通过（已回退）、或判断不该改，needs_update=false。
 
 ## Fuzz 运行状态
 %s
@@ -135,29 +148,14 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 ## 覆盖状态（逐 seed replay）
 %s
 
-## 合一 fuzz driver 源码（entry 文件）
-%s
-
 若 fuzz 未到达平台期：plateau_reached=false 且 needs_update=false。
-若已到达平台期但你判断改 driver 也无济于事：plateau_reached=true 且 needs_update=false。
-否则（到达平台期且你编辑了 driver）：plateau_reached=true 且 needs_update=true，并在 "analysis" 里概述你改了什么。`,
-		req.SourceDir, req.DriverDir, req.DriverDir,
-		req.SourceDir, req.DriverDir,
-		string(fuzzJSON), string(coverageJSON), req.DriverSource)
-}
+若已到达平台期但你判断当前改 driver 也无济于事：plateau_reached=true 且 needs_update=false（fuzzer 会继续运行，下一轮分析时再次评估）。
+否则（到达平台期且你编辑了 driver 并编译通过）：plateau_reached=true 且 needs_update=true，并在 "analysis" 里概述：改了哪个 driver、为什么改（理由）、预计覆盖哪条未覆盖分支（function + line）、编译验证结果。
 
-func jsonLineSink(sink func(json.RawMessage)) func(string) {
-	if sink == nil {
-		return nil
-	}
-	return func(line string) {
-		raw := json.RawMessage(strings.TrimSpace(line))
-		if !json.Valid(raw) {
-			return
-		}
-		copyOfRaw := append(json.RawMessage(nil), raw...)
-		sink(copyOfRaw)
-	}
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹、不要写 "## Analysis" 之类的标题）。harness 会用 json.Unmarshal 直接解析你的最终消息，任何 JSON 之外的文字都会导致解析失败、你的改动不会被 rebuild。字段为：plateau_reached（布尔）、analysis（字符串）、needs_update（布尔）。`,
+		req.SourceDir, req.DriverDir, req.DriverDir,
+		req.SourceDir, req.DriverDir, req.DriverDir,
+		string(fuzzJSON), string(coverageJSON))
 }
 
 func (c CodexAnalyzer) logf(format string, args ...any) {

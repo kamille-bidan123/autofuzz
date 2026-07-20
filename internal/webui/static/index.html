@@ -108,6 +108,18 @@
     .checks { grid-column: 1 / -1; display: flex; gap: 22px; padding-top: 3px; }
     .check { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; }
     .check input { width: 17px; min-height: 17px; margin: 0; }
+    .advanced-section { margin-top: 16px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fafcff; }
+    .advanced-summary {
+      padding: 11px 14px; cursor: pointer; font-weight: 800; font-size: 13px; color: var(--muted);
+      list-style: none; display: flex; align-items: center; gap: 8px; user-select: none;
+      transition: background .15s, color .15s;
+    }
+    .advanced-summary::-webkit-details-marker { display: none; }
+    .advanced-summary::before { content: "›"; font-size: 22px; font-weight: 900; transition: transform .2s; display: inline-block; }
+    .advanced-section[open] > .advanced-summary::before { transform: rotate(90deg); }
+    .advanced-section[open] > .advanced-summary { border-bottom: 1px solid var(--line); background: white; }
+    .advanced-summary:hover { color: var(--blue); background: var(--blue-soft); }
+    .advanced-section .form-grid { padding: 15px; }
     .actions { display: flex; gap: 10px; margin-top: 20px; }
     button {
       border: 0; border-radius: 11px; padding: 11px 17px; font: inherit; font-weight: 800;
@@ -159,6 +171,42 @@
     #runtimeLogs .xterm { padding: 6px; }
     #runtimeLogs .xterm .xterm-viewport { background-color: #1e1e2e !important; }
     .meta { padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    /* coverage panel */
+    .cov-summary { display: flex; gap: 16px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .cov-stat { display: flex; flex-direction: column; gap: 2px; }
+    .cov-stat .num { font-size: 22px; font-weight: 900; }
+    .cov-stat .lbl { font-size: 11px; color: var(--muted); font-weight: 700; }
+    .cov-stat.full .num { color: var(--green); }
+    .cov-stat.partial .num { color: var(--orange); }
+    .cov-updated { margin-left: auto; font-size: 11px; color: var(--muted); align-self: flex-end; }
+    /* snapshot comparison panel */
+    .snap-table { max-height: 420px; overflow: auto; padding: 8px 12px; }
+    .snap-row { display: grid; grid-template-columns: 44px 52px 100px 100px 56px 72px 56px 1fr; gap: 6px; padding: 5px 6px; border-bottom: 1px dashed var(--line); align-items: center; font-size: 11px; }
+    .snap-row.head { font-weight: 800; color: var(--muted); border-bottom: 2px solid var(--line); position: sticky; top: 0; background: var(--card); }
+    .snap-delta { font-weight: 700; }
+    .snap-delta.pos { color: var(--green); }
+    .snap-delta.neg { color: var(--orange); }
+    .snap-delta.zero { color: var(--muted); }
+    .snap-analysis { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+    .snap-analysis:hover { color: var(--text); }
+    .cov-list { max-height: 360px; overflow: auto; padding: 10px 16px; }
+    .cov-fn { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+    .cov-fn summary { padding: 9px 12px; cursor: pointer; font-size: 12.5px; font-weight: 800; display: flex; gap: 10px; align-items: center; list-style: none; }
+    .cov-fn summary::-webkit-details-marker { display: none; }
+    .cov-fn summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+    .cov-fn[open] summary::before { transform: rotate(90deg); }
+    .cov-fn summary:hover { background: var(--blue-soft); }
+    .cov-fn .fn-name { color: var(--ink); }
+    .cov-fn .fn-meta { color: var(--muted); font-weight: 600; font-size: 11px; }
+    .cov-fn .fn-badge { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: var(--orange-soft); color: #8c561b; }
+    .cov-branches { padding: 4px 12px 10px; }
+    .cov-branch { padding: 8px 10px; border-radius: 8px; background: #f9fafd; margin-bottom: 5px; font-size: 11.5px; }
+    .cov-branch .br-line { font-weight: 800; color: var(--blue); margin-right: 8px; }
+    .cov-branch .br-cond { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink); overflow-wrap: anywhere; }
+    .cov-branch .br-meta { margin-top: 4px; font-size: 10.5px; color: var(--muted); display: flex; gap: 14px; }
+    .cov-branch .br-missing { color: var(--red); font-weight: 700; }
+    .cov-branch .br-counts { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .cov-empty { padding: 30px; text-align: center; color: var(--muted); font-size: 13px; }
     @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .stages { grid-template-columns: repeat(4, 1fr); } }
     @media (max-width: 720px) { .shell { width: min(100% - 20px, 1480px); padding-top: 18px; } header { align-items: flex-start; } .form-grid, .streams { grid-template-columns: 1fr; } .stream + .stream { border-left: 0; border-top: 1px solid var(--line); } .stages { grid-template-columns: repeat(2, 1fr); } .stage:nth-child(2n)::after { display: none; } }
   </style>
@@ -178,23 +226,28 @@
       <div class="panel-head"><h2>运行配置</h2><p>配置项与 autofuzz CLI 一一对应。源码准备后会直接执行目标仓库构建代码。</p></div>
       <form id="runForm">
         <div class="form-grid">
-          <div class="field full"><label for="repository_url">本地目录或 GitHub 链接 *</label><div class="path-picker"><input id="repository_url" required placeholder="/path/to/library 或 https://github.com/...git"><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field"><label for="ref">Git ref / tag / branch</label><input id="ref" placeholder="可选"></div>
-          <div class="field"><label for="workspace">工作目录</label><div class="path-picker"><input id="workspace" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field full"><label for="promefuzz">PromeFuzz 路径</label><div class="path-picker"><input id="promefuzz" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field full"><label for="config">PromeFuzz config.toml</label><div class="path-picker"><input id="config" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field full"><label for="python">虚拟环境 Python</label><div class="path-picker"><input id="python" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field"><label for="jobs">构建并行度</label><input id="jobs" type="number" min="1" required></div>
-          <div class="field"><label for="pool_size">PromeFuzz 并发度</label><input id="pool_size" type="number" min="1" required></div>
-          <div class="field full"><label for="stop_after">停止阶段</label><select id="stop_after"><option value="built">built</option><option value="configured">configured</option><option value="preprocessed">preprocessed</option><option value="comprehended">comprehended</option><option value="generated">generated</option><option value="fuzzing">fuzzing</option></select></div>
-          <div class="field full"><label for="codex_command">Codex CLI 命令</label><div class="path-picker"><input id="codex_command" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
-          <div class="field"><label for="codex_model">Codex 模型</label><input id="codex_model" placeholder="留空使用默认值"></div>
-          <div class="field"><label for="codex_profile">Codex profile</label><input id="codex_profile" placeholder="可选"></div>
-          <div class="checks">
-            <label class="check"><input id="resume" type="checkbox">从已有状态恢复</label>
-            <label class="check"><input id="verbose" type="checkbox">服务端同步输出日志</label>
-          </div>
+          <div class="field full"><label for="repository_url">本地目录或 GitHub/GitCode 链接 *</label><div class="path-picker"><input id="repository_url" required placeholder="/path/to/library 或 https://github.com/...git 或 https://gitcode.com/...git"><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
+          <div class="field full"><label for="promefuzz">PromeFuzz 路径 *</label><div class="path-picker"><input id="promefuzz" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
         </div>
+        <details class="advanced-section">
+          <summary class="advanced-summary">高级参数</summary>
+          <div class="form-grid">
+            <div class="field"><label for="ref">Git ref / tag / branch</label><input id="ref" placeholder="可选"></div>
+            <div class="field"><label for="workspace">工作目录</label><div class="path-picker"><input id="workspace" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
+            <div class="field full"><label for="promefuzz_config">PromeFuzz config.toml</label><div class="path-picker"><input id="promefuzz_config" placeholder="留空使用 <promefuzz>/config.toml"><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
+            <div class="field full"><label for="python">虚拟环境 Python</label><div class="path-picker"><input id="python" placeholder="留空使用 <promefuzz>/.venv/bin/python"><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
+            <div class="field"><label for="jobs">构建并行度</label><input id="jobs" type="number" min="1" required></div>
+            <div class="field"><label for="pool_size">PromeFuzz 并发度</label><input id="pool_size" type="number" min="1" required></div>
+            <div class="field full"><label for="stop_after">停止阶段</label><select id="stop_after"><option value="built">built</option><option value="configured">configured</option><option value="preprocessed">preprocessed</option><option value="comprehended">comprehended</option><option value="generated">generated</option><option value="fuzzing">fuzzing</option></select></div>
+            <div class="field full"><label for="codex_command">Codex CLI 命令</label><div class="path-picker"><input id="codex_command" required><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
+            <div class="field"><label for="codex_model">Codex 模型</label><input id="codex_model" placeholder="留空使用默认值"></div>
+            <div class="field"><label for="codex_profile">Codex profile</label><input id="codex_profile" placeholder="可选"></div>
+            <div class="checks">
+              <label class="check"><input id="resume" type="checkbox">从已有状态恢复</label>
+              <label class="check"><input id="verbose" type="checkbox">服务端同步输出日志</label>
+            </div>
+          </div>
+        </details>
         <div class="actions"><button id="startButton" class="primary" type="submit">启动 Autofuzz</button><button id="cancelButton" class="danger" type="button" disabled>取消</button><button id="triggerFuzzButton" class="debug" type="button" disabled title="在 fuzzing 阶段手动触发 LLM 分析优化">🔬 触发分析</button></div>
         <div id="formMessage" class="notice">Web 服务默认仅监听本机。对于不可信仓库，请在一次性容器或隔离虚拟机中运行。</div>
       </form>
@@ -205,6 +258,17 @@
         <div class="panel-head"><h2>执行阶段</h2><p>旋转图标表示当前正在执行的阶段；橙色 Codex 阶段会产生结构化 JSON 事件。</p></div>
         <div id="stages" class="stages"></div>
         <div id="runMeta" class="meta">尚未创建任务</div>
+      </section>
+
+      <section class="panel" id="covPanel" style="display:none">
+        <div class="panel-head"><h2>覆盖数据</h2><p>后台每分钟 llvm-cov export;显示当前 driver 版本的函数级覆盖,部分覆盖的函数可展开查看未覆盖分支。</p></div>
+        <div id="covSummary" class="cov-summary"></div>
+        <div id="covList" class="cov-list"><div class="cov-empty">覆盖数据将在 fuzzing 阶段开始后可用</div></div>
+      </section>
+
+      <section class="panel" id="snapPanel" style="display:none">
+        <div class="panel-head"><h2>Driver 版本对比</h2><p>每次 rebuild 后覆盖率的变化;数据来自各快照的 aggregate.profdata 导出 + crash/corpus 计数 + LLM 分析文本。</p></div>
+        <div id="snapTable" class="snap-table"><div class="cov-empty">fuzzing 阶段开始后可用</div></div>
       </section>
 
       <section class="panel streams">
@@ -232,6 +296,9 @@
   let eventSource = null;
   let codexCount = 0;
   let logCount = 0;
+  let covPollTimer = null;
+  let snapPollTimer = null;
+  let waitingForAnalysis = false;
 
   const $ = id => document.getElementById(id);
 
@@ -302,7 +369,7 @@
     return {
       repository_url: $('repository_url').value.trim(), ref: $('ref').value.trim(),
       workspace: $('workspace').value.trim(), promefuzz: $('promefuzz').value.trim(),
-      config: $('config').value.trim(), python: $('python').value.trim(),
+      promefuzz_config: $('promefuzz_config').value.trim(), python: $('python').value.trim(),
       pool_size: Number($('pool_size').value), jobs: Number($('jobs').value),
       codex_command: $('codex_command').value.trim(),
       codex_model: $('codex_model').value.trim(), codex_profile: $('codex_profile').value.trim(),
@@ -369,6 +436,24 @@
       appendCodex(event);
     } else if (event.kind === 'log') {
       appendLog(event);
+      // The "已触发 LLM 分析,等待结果…" status is set when the user clicks
+      // the trigger button and never cleared otherwise. Detect the analysis-end
+      // log markers and clear it + re-enable the trigger button so the user
+      // sees the analysis actually finished (or failed/hung).
+      if (waitingForAnalysis) {
+        const m = event.message || '';
+        if (m.includes('plateau=') || m.includes('Codex analysis error') || m.includes('Codex edited driver sources')) {
+          waitingForAnalysis = false;
+          $('triggerFuzzButton').disabled = false;
+          if (m.includes('Codex analysis error')) {
+            $('formMessage').textContent = 'LLM 分析失败,见日志';
+          } else if (m.includes('Codex edited driver sources')) {
+            $('formMessage').textContent = 'LLM 分析完成,正在 rebuild driver';
+          } else {
+            $('formMessage').textContent = 'LLM 分析完成';
+          }
+        }
+      }
     } else if (event.kind === 'run') {
         appendLog(event);
         if (event.status === 'running') setRunStatus('running', '运行中');
@@ -379,8 +464,128 @@
 
   function finishUI(status, label) {
     setRunStatus(status, label); $('startButton').disabled = false; $('cancelButton').disabled = true; $('triggerFuzzButton').disabled = true;
+    waitingForAnalysis = false;
     if (eventSource) { eventSource.close(); eventSource = null; }
+    if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
+    if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
     if (taskId) refreshSnapshot();
+  }
+
+  async function pollCoverage() {
+    if (!taskId) return;
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/coverage`);
+      if (!response.ok) return;
+      const data = await response.json();
+      renderCoverage(data);
+    } catch (e) { /* ignore fetch errors, will retry next tick */ }
+  }
+
+  async function pollSnapshots() {
+    if (!taskId) return;
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/snapshots`);
+      if (!response.ok) return;
+      const data = await response.json();
+      renderSnapshots(data);
+    } catch (e) { /* ignore */ }
+  }
+
+  function renderSnapshots(snaps) {
+    const panel = $('snapPanel');
+    const table = $('snapTable');
+    if (!snaps || snaps.length === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+    const deltaCls = d => d > 0 ? 'pos' : d < 0 ? 'neg' : 'zero';
+    const deltaStr = d => d === 0 ? '' : (d > 0 ? `+${d}` : `${d}`);
+    let html = '<div class="snap-row head"><div>v</div><div>时间</div><div>已执行(±)</div><div>未覆盖(±)</div><div>crash</div><div>unique</div><div>corpus</div><div>LLM 改了什么</div></div>';
+    snaps.forEach(s => {
+      const a = s.analysis || '(无分析)';
+      const aShort = a.length > 80 ? a.slice(0, 80) + '…' : a;
+      html += `<div class="snap-row"><div>v${s.seq}</div><div>${s.timestamp}</div>` +
+        `<div>${s.executed_functions||0} <span class="snap-delta ${deltaCls(s.delta_executed)}">${deltaStr(s.delta_executed)}</span></div>` +
+        `<div>${s.uncovered_count||0} <span class="snap-delta ${deltaCls(-s.delta_uncovered)}">${deltaStr(-s.delta_uncovered)}</span></div>` +
+        `<div>${s.crash_count||0}</div><div>${s.unique_crash_count||0}</div><div>${s.corpus_count||0}</div>` +
+        `<div class="snap-analysis" title="${a.replace(/"/g,'&quot;')}">${aShort}</div></div>`;
+    });
+    table.innerHTML = html;
+  }
+
+  function renderCoverage(data) {
+    const panel = $('covPanel');
+    const summary = $('covSummary');
+    const list = $('covList');
+    if (!data || !data.available) {
+      panel.style.display = data && data.timestamp ? 'block' : 'none';
+      if (data && data.timestamp) {
+        summary.replaceChildren();
+        list.replaceChildren();
+        const empty = document.createElement('div'); empty.className = 'cov-empty';
+        empty.textContent = '等待 corpus monitor 采集覆盖数据…';
+        list.appendChild(empty);
+      }
+      return;
+    }
+    panel.style.display = 'block';
+    const cov = data.coverage || {};
+    const s = cov.summary || {};
+    summary.replaceChildren();
+    const stats = [
+      {cls:'full', num:s.full_functions||0, lbl:'完全覆盖函数'},
+      {cls:'partial', num:s.partial_functions||0, lbl:'部分覆盖函数'},
+      {cls:'', num:s.executed_functions||0, lbl:'已执行函数'},
+      {cls:'', num:data.seed_count||0, lbl:'已 replay seed'}
+    ];
+    stats.forEach(st => {
+      const el = document.createElement('div'); el.className = 'cov-stat ' + st.cls;
+      const num = document.createElement('div'); num.className = 'num'; num.textContent = st.num;
+      const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = st.lbl;
+      el.append(num, lbl); summary.appendChild(el);
+    });
+    const updated = document.createElement('div'); updated.className = 'cov-updated';
+    updated.textContent = '更新于 ' + new Date(data.timestamp).toLocaleTimeString();
+    summary.appendChild(updated);
+
+    const partials = cov.partial || [];
+    if (partials.length === 0) {
+      list.replaceChildren();
+      const empty = document.createElement('div'); empty.className = 'cov-empty';
+      empty.textContent = '所有已执行函数均为完全覆盖,无部分覆盖函数';
+      list.appendChild(empty);
+      return;
+    }
+    list.replaceChildren();
+    partials.forEach(pf => {
+      const details = document.createElement('details'); details.className = 'cov-fn';
+      const summaryEl = document.createElement('summary');
+      const badge = document.createElement('span'); badge.className = 'fn-badge';
+      const brCount = (pf.uncovered_branches || []).length;
+      badge.textContent = brCount + ' 条未覆盖';
+      const name = document.createElement('span'); name.className = 'fn-name'; name.textContent = pf.function;
+      const meta = document.createElement('span'); meta.className = 'fn-meta';
+      meta.textContent = (pf.file||'').split('/').pop() + ' · 调用 ' + (pf.entry_count||0) + ' 次';
+      summaryEl.append(name, meta, badge);
+      details.appendChild(summaryEl);
+
+      const branches = document.createElement('div'); branches.className = 'cov-branches';
+      (pf.uncovered_branches || []).forEach(br => {
+        const row = document.createElement('div'); row.className = 'cov-branch';
+        const line = document.createElement('span'); line.className = 'br-line';
+        line.textContent = 'L' + (br.location ? br.location[0] : '?');
+        const cond = document.createElement('div'); cond.className = 'br-cond';
+        cond.textContent = br.condition || '(unknown condition)';
+        const metaRow = document.createElement('div'); metaRow.className = 'br-meta';
+        if (br.missing) { const m = document.createElement('span'); m.className = 'br-missing'; m.textContent = '缺失: ' + br.missing; metaRow.appendChild(m); }
+        if (br.counts) { const c = document.createElement('span'); c.className = 'br-counts'; c.textContent = JSON.stringify(br.counts); metaRow.appendChild(c); }
+        row.append(line, cond, metaRow);
+        branches.appendChild(row);
+      });
+      details.appendChild(branches);
+      list.appendChild(details);
+    });
   }
 
   async function refreshSnapshot() {
@@ -400,7 +605,7 @@
   $('runForm').addEventListener('submit', async event => {
     event.preventDefault();
     $('startButton').disabled = true; $('formMessage').textContent = '正在创建任务…';
-    codexCount = 0; logCount = 0; $('codexCount').textContent = '0 条'; $('logCount').textContent = '0 行';
+    codexCount = 0; logCount = 0; waitingForAnalysis = false; $('codexCount').textContent = '0 条'; $('logCount').textContent = '0 行';
     clearStream('codexEvents', '等待 Codex CLI JSONL 事件'); clearStream('runtimeLogs', '等待运行日志'); renderStages([]);
     try {
       const response = await fetch('/api/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(requestBody())});
@@ -409,6 +614,10 @@
       taskId = result.id; renderStages(result.stages); setRunStatus('running', '运行中');
       $('cancelButton').disabled = false; $('formMessage').textContent = `任务 ${taskId} 已启动`;
       $('runMeta').textContent = `任务 ${taskId} · workspace: ${result.target_dir}`; connectEvents(taskId);
+      pollCoverage();
+      covPollTimer = setInterval(pollCoverage, 15000);
+      pollSnapshots();
+      snapPollTimer = setInterval(pollSnapshots, 30000);
     } catch (error) {
       $('startButton').disabled = false; setRunStatus('failed', '启动失败'); $('formMessage').textContent = error.message;
     }
@@ -432,6 +641,7 @@
         $('formMessage').textContent = result.error || '触发失败';
         $('triggerFuzzButton').disabled = false;
       } else {
+        waitingForAnalysis = true;
         $('formMessage').textContent = '已触发 LLM 分析，等待结果…';
       }
     } catch (error) {

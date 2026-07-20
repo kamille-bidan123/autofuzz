@@ -40,6 +40,25 @@ func snapshotDriver(srcSynthesizedDir, dstDir string) error {
 	return nil
 }
 
+// copyFile copies a single regular file from src to dst, preserving the
+// source's permission bits (so an executable binary stays executable and a
+// shell script keeps its +x). It is best-effort like snapshotDriver: callers
+// log the error rather than aborting the snapshot.
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, info.Mode().Perm())
+}
+
 // appendHistory appends one JSON record per analysis cycle to
 // fuzzing-history.jsonl. This is the only persistent per-cycle artifact;
 // coverage/profiles and codex prompt/response are ephemeral.
@@ -109,6 +128,24 @@ func gatherSnapshotCrashes(logsDir string) []snapshotCrash {
 }
 
 var asanFrameRe = regexp.MustCompile(`(?m)^\s*#\d+\s+0x[0-9a-f]+\s+in\s+(\S+)`)
+var asanTypeRe = regexp.MustCompile(`AddressSanitizer:\s+(\S+)`)
+
+// CrashAnalysisEntry is one unique crash in a snapshot's crash-analysis.json.
+type CrashAnalysisEntry struct {
+	File  string `json:"file"`
+	Type  string `json:"type"`
+	Stack string `json:"stack"`
+}
+
+// parseASanType extracts the ASan error type (e.g. "heap-use-after-free",
+// "SEGV", "heap-buffer-overflow") from the crash stderr.
+func parseASanType(stderr string) string {
+	m := asanTypeRe.FindStringSubmatch(stderr)
+	if m == nil {
+		return "unknown"
+	}
+	return m[1]
+}
 
 // parseASanStack returns the top ASan frame function names as a dedup signature.
 func parseASanStack(stderr string) string {
@@ -127,9 +164,11 @@ func parseASanStack(stderr string) string {
 	return "stack: " + strings.Join(fns, " <- ")
 }
 
-// replayCrash runs the (final) binary once on a crash input. reproduced=true if
-// it crashes (non-zero exit); the ASan stack top frames are captured for dedup.
-func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (reproduced bool, stack string) {
+// replayCrash runs the given binary once on a crash input. Returns whether it
+// crashed (non-zero exit), the ASan error type, and the symbolized stack
+// signature (top 5 frames) for dedup. ASan symbolization is kept ON (not
+// symbolize=0) because the stack function names are needed for dedup.
+func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (reproduced bool, crashType string, stack string) {
 	replayCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(replayCtx, binary, "-runs=1", crashPath)
@@ -139,12 +178,12 @@ func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (repr
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
 	if replayCtx.Err() == context.DeadlineExceeded {
-		return false, "(timeout)"
+		return false, "timeout", "(timeout)"
 	}
 	if runErr != nil {
-		return true, parseASanStack(stderr.String())
+		return true, parseASanType(stderr.String()), parseASanStack(stderr.String())
 	}
-	return false, ""
+	return false, "", ""
 }
 
 type crashReportEntry struct {
@@ -169,7 +208,7 @@ func triageCrashes(cfg FuzzConfig, finalSeq int) error {
 	var report []crashReportEntry
 	reproCount := 0
 	for _, c := range crashes {
-		reproduces, stack := replayCrash(ctx, cfg.BinaryPath, cfg.DriverDir, c.path)
+		reproduces, _, stack := replayCrash(ctx, cfg.BinaryPath, cfg.DriverDir, c.path)
 		// dedup signature: reproducing -> ASan stack; non-reproducing -> content hash
 		sig := stack
 		if !reproduces {

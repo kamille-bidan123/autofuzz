@@ -22,10 +22,14 @@ type Agent struct {
 	StatePath string
 	LogsDir   string
 
-	eventMu        sync.RWMutex
-	eventSink      runevent.Sink
-	activeStage    state.Stage
-	fuzzController *fuzzing.FuzzController
+	eventMu         sync.RWMutex
+	eventSink       runevent.Sink
+	activeStage     state.Stage
+	fuzzController  *fuzzing.FuzzController
+	corpusMonitorMu sync.RWMutex
+	corpusMonitor   *fuzzing.CorpusMonitor
+	snapshotCmpMu   sync.RWMutex
+	snapshotCmp     map[int]fuzzing.CoverageStatus // frozen past-snapshot exports (cached)
 }
 
 func New(options Options) (*Agent, error) {
@@ -65,6 +69,7 @@ func New(options Options) (*Agent, error) {
 	agent := &Agent{
 		Options: options, State: runState,
 		TargetDir: targetDir, StatePath: statePath, LogsDir: filepath.Join(targetDir, "logs"),
+		snapshotCmp: map[int]fuzzing.CoverageStatus{},
 	}
 	agent.Runner = runner.Runner{Verbose: options.Verbose, OnLine: agent.onCommandLine}
 	return agent, nil
@@ -78,7 +83,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	if !a.State.Stage.AtLeast(state.StageCloned) || !validPreparedSource(a.State) {
-		a.stageStarted(state.StageCloned, "正在复制本地源码或浅克隆 GitHub 仓库")
+		a.stageStarted(state.StageCloned, "正在复制本地源码或浅克隆 Git 仓库")
 		commit, err := repository.Prepare(ctx, a.Runner, a.Options.RepositoryURL, a.State.SourceKind, a.Options.Ref, a.State.SourceDir, filepath.Join(a.LogsDir, "clone"))
 		if err != nil {
 			a.State.Stage = state.StageFailed
@@ -116,4 +121,22 @@ func shortCommit(commit string) string {
 		return commit[:12]
 	}
 	return commit
+}
+
+func (a *Agent) setCorpusMonitor(m *fuzzing.CorpusMonitor) {
+	a.corpusMonitorMu.Lock()
+	a.corpusMonitor = m
+	a.corpusMonitorMu.Unlock()
+}
+
+// CoverageData returns the cached llvm-cov export result from the corpus
+// monitor, or nil when no monitor is active (e.g. not in the fuzzing stage).
+func (a *Agent) CoverageData() any {
+	a.corpusMonitorMu.RLock()
+	m := a.corpusMonitor
+	a.corpusMonitorMu.RUnlock()
+	if m == nil {
+		return nil
+	}
+	return m.CoverageCache()
 }

@@ -1,6 +1,6 @@
 # Autofuzz
 
-Autofuzz 是一个使用 Go 编写的自动化编排工具。它接收一个本地 C/C++ 库目录或 GitHub 仓库链接，由 Codex Agent 自主完成项目分析、构建和 PromeFuzz 配置，再自动执行 API 分析、fuzz driver 生成和运行验证。
+Autofuzz 是一个使用 Go 编写的自动化编排工具。它接收一个本地 C/C++ 库目录或 GitHub/GitCode 仓库链接，由 Codex Agent 自主完成项目分析、构建和 PromeFuzz 配置，再自动执行 API 分析、fuzz driver 生成和运行验证。
 
 Autofuzz 是独立项目，不会向 PromeFuzz 源码目录添加代码。所有 PromeFuzz 阶段都通过其现有 Python 虚拟环境以子进程方式执行。
 
@@ -8,8 +8,8 @@ Autofuzz 是独立项目，不会向 PromeFuzz 源码目录添加代码。所有
 
 Autofuzz 当前可以：
 
-1. 接收本地目录或 GitHub 仓库链接。
-2. 将本地源码复制到独立工作目录，或浅克隆 GitHub 仓库。
+1. 接收本地目录或 GitHub/GitCode 仓库链接。
+2. 将本地源码复制到独立工作目录，或浅克隆 GitHub/GitCode 仓库。
 3. 由 workspace-write Codex Agent 阅读项目、执行构建命令、分析失败并自行重试。
 4. 由第二个 Codex Agent 直接创建和修复 `library.toml`。
 5. 导出并验证 `compile_commands.json`。
@@ -54,7 +54,7 @@ go build -buildvcs=false -o bin/autofuzz-web ./cmd/autofuzz-web
 
 ## Web 控制台
 
-Autofuzz 提供一个只依赖 Go 标准库的简单 Web 界面，不需要 Node.js 或单独构建前端资源。启动服务：
+Autofuzz 提供一个简单的 Web 界面，不需要 Node.js 或单独构建前端资源。启动服务：
 
 ```bash
 cd /home/tsj/fuzz_agent/autofuzz
@@ -110,8 +110,6 @@ cd /home/tsj/fuzz_agent/autofuzz
 
 ./bin/autofuzz \
   --promefuzz ../PromeFuzz \
-  --config ../PromeFuzz/config.toml \
-  --python ../PromeFuzz/.venv/bin/python \
   ./testdata/sampleclib
 ```
 
@@ -130,8 +128,6 @@ HTTPS 链接示例：
 ```bash
 ./bin/autofuzz \
   --promefuzz ../PromeFuzz \
-  --config ../PromeFuzz/config.toml \
-  --python ../PromeFuzz/.venv/bin/python \
   https://github.com/DaveGamble/cJSON.git
 ```
 
@@ -149,7 +145,33 @@ HTTPS 链接示例：
   https://github.com/DaveGamble/cJSON.git
 ```
 
-Autofuzz 默认执行浅克隆，不递归下载 submodule，并在状态文件中记录实际使用的 commit。
+## 使用 GitCode 仓库
+
+Autofuzz 同样支持 [GitCode](https://gitcode.com) 仓库链接，用法与 GitHub 一致。
+
+HTTPS 链接示例：
+
+```bash
+./bin/autofuzz \
+  --promefuzz ../PromeFuzz \
+  https://gitcode.com/owner/repo.git
+```
+
+也支持 GitCode SSH 链接：
+
+```bash
+./bin/autofuzz git@gitcode.com:owner/repo.git
+```
+
+指定分支、标签或其他 Git ref：
+
+```bash
+./bin/autofuzz \
+  --ref <ref> \
+  https://gitcode.com/owner/repo.git
+```
+
+Autofuzz 默认执行浅克隆，不递归下载 submodule，并在状态文件中记录实际使用的 commit。GitHub 和 GitCode 的处理方式完全一致。
 
 ## 安全提示
 
@@ -183,7 +205,7 @@ Go 不再生成或执行结构化 Plan，也没有命令白名单和固定构建
 
 Autofuzz 按以下阶段推进：
 
-1. `cloned`：复制本地源码或克隆 GitHub 仓库。
+1. `cloned`：复制本地源码或克隆 GitHub/GitCode 仓库。
 2. `built`：Codex 自主分析并构建项目，Go 验收 ASan 编译数据库和静态库。
 3. `configured`：Codex 直接写 `library.toml`，Go 验收关键字段和路径。
 4. `preprocessed`：运行 PromeFuzz API 提取；0 API 时要求 Codex 修复配置。
@@ -240,9 +262,9 @@ verified
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--workspace` | `autofuzz-work` | 保存源码副本、构建结果和日志的目录 |
-| `--promefuzz` | `../PromeFuzz` | PromeFuzz 项目路径 |
-| `--config` | `../PromeFuzz/config.toml` | PromeFuzz 主配置路径 |
-| `--python` | `../PromeFuzz/.venv/bin/python` | PromeFuzz 虚拟环境中的 Python |
+| `--promefuzz` | （必填） | PromeFuzz 项目路径 |
+| `--promefuzz-config` | `<promefuzz>/config.toml` | PromeFuzz 主配置路径 |
+| `--python` | `<promefuzz>/.venv/bin/python` | PromeFuzz 虚拟环境中的 Python |
 | `--ref` | 空 | Git 分支、标签或 ref |
 | `--jobs` | CPU 核心数 | 编译并行度 |
 | `--pool-size` | `5` | PromeFuzz/Codex 并发度 |
@@ -313,7 +335,7 @@ env GOCACHE=/tmp/autofuzz-go-cache go vet ./...
 测试范围包括：
 
 - 本地目录复制、排除规则和内容哈希。
-- GitHub URL 解析。
+- GitHub/GitCode URL 解析。
 - 状态保存、加载和失败恢复。
 - 自主构建报告的路径边界、ASan 编译数据库和静态库验收。
 - Codex 直接生成的 TOML 必需字段、路径和静态库引用验收。
@@ -351,7 +373,7 @@ env GOCACHE=/tmp/autofuzz-go-cache go vet ./...
 - `config.toml` 中的 LLM 类型为已配置的 Codex CLI 类型。
 - Codex CLI 已登录并可以独立执行。
 - embedding 服务地址和模型名称正确。
-- Autofuzz 的 `--config` 与 `--python` 指向正确文件。
+- Autofuzz 的 `--promefuzz-config` 与 `--python` 指向正确文件。
 
 ### 生成 driver 后验证失败
 

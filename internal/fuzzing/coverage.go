@@ -1,12 +1,14 @@
 package fuzzing
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CoverageStatus describes the function-level coverage of a fuzz run.
@@ -44,16 +46,18 @@ type UncoveredBranch struct {
 
 // CollectCoverageStatus runs llvm-cov export on the given profdata file
 // produced by the coverage-instrumented synthesized driver and parses
-// the results into a CoverageStatus.
-func CollectCoverageStatus(profdataPath, binaryPath, sourceDir string) (CoverageStatus, error) {
-	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, "")
+// the results into a CoverageStatus. buildDir covers out-of-tree builds
+// where the library sources were copied into the build directory (so
+// llvm-cov reports them under build/ rather than source/).
+func CollectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir string) (CoverageStatus, error) {
+	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, "")
 }
 
 // CollectCoverageStatusWithDriverDir is like CollectCoverageStatus but also
 // accepts the fuzz driver directory so that driver-source functions are
 // not filtered out.
-func CollectCoverageStatusWithDriverDir(profdataPath, binaryPath, sourceDir, driverDir string) (CoverageStatus, error) {
-	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, driverDir)
+func CollectCoverageStatusWithDriverDir(profdataPath, binaryPath, sourceDir, buildDir, driverDir string) (CoverageStatus, error) {
+	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driverDir)
 }
 
 // CollectBranchReach runs llvm-cov export and returns, per function name
@@ -65,21 +69,26 @@ func CollectCoverageStatusWithDriverDir(profdataPath, binaryPath, sourceDir, dri
 // Unlike CollectCoverageStatus it does not extract condition text, so it is
 // cheaper per seed; branch detail (condition/counts) still comes from the one
 // aggregate CollectCoverageStatus call.
-func CollectBranchReach(profdataPath, binaryPath, sourceDir string) (map[string]map[[2]int]bool, error) {
+func CollectBranchReach(profdataPath, binaryPath, sourceDir, buildDir string) (map[string]map[[2]int]bool, error) {
 	covBin := findCovTool()
 	if covBin == "" {
 		return nil, fmt.Errorf("llvm-cov not found")
 	}
-	exportCmd := exec.Command(covBin, "export", "-instr-profile="+profdataPath,
+	// Use a timeout so a stuck llvm-cov export (e.g. under CPU contention)
+	// does not block the monitor's goroutine indefinitely, preventing
+	// monitor.Stop() from returning on cancel.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	exportCmd := exec.CommandContext(ctx, covBin, "export", "-instr-profile="+profdataPath,
 		binaryPath, "--format=text")
 	exportOutput, err := exportCmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("llvm-cov export failed: %w\nstdout/stderr: %s", err, string(exportOutput))
 	}
-	return parseBranchReach(exportOutput, sourceDir)
+	return parseBranchReach(exportOutput, sourceDir, buildDir)
 }
 
-func parseBranchReach(data []byte, sourceDir string) (map[string]map[[2]int]bool, error) {
+func parseBranchReach(data []byte, sourceDir, buildDir string) (map[string]map[[2]int]bool, error) {
 	var root exportRoot
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse llvm-cov export JSON: %w", err)
@@ -93,7 +102,10 @@ func parseBranchReach(data []byte, sourceDir string) (map[string]map[[2]int]bool
 		if len(fn.Filenames) > 0 {
 			fnFile = fn.Filenames[0]
 		}
-		if !isPathUnder(fnFile, sourceDir) {
+		// buildDir is guarded against "" because isPathUnder falls back to
+		// the process CWD for an empty base, which would silently accept
+		// unrelated files.
+		if !isPathUnder(fnFile, sourceDir) && !(buildDir != "" && isPathUnder(fnFile, buildDir)) {
 			continue
 		}
 		if fn.Count == 0 {
@@ -116,7 +128,7 @@ func parseBranchReach(data []byte, sourceDir string) (map[string]map[[2]int]bool
 	return out, nil
 }
 
-func collectCoverageStatus(profdataPath, binaryPath, sourceDir, driverDir string) (CoverageStatus, error) {
+func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driverDir string) (CoverageStatus, error) {
 	status := CoverageStatus{
 		Full:    []FunctionCoverage{},
 		Partial: []PartialFunctionCoverage{},
@@ -126,14 +138,18 @@ func collectCoverageStatus(profdataPath, binaryPath, sourceDir, driverDir string
 	if covBin == "" {
 		return status, fmt.Errorf("llvm-cov not found")
 	}
-	exportCmd := exec.Command(covBin, "export", "-instr-profile="+profdataPath,
+	// Use a timeout so a stuck llvm-cov export does not block the monitor's
+	// coverageLoop goroutine indefinitely, preventing monitor.Stop() on cancel.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	exportCmd := exec.CommandContext(ctx, covBin, "export", "-instr-profile="+profdataPath,
 		binaryPath, "--format=text")
 	exportOutput, err := exportCmd.CombinedOutput()
 	if err != nil {
 		return status, fmt.Errorf("llvm-cov export failed: %w\nstdout/stderr: %s", err, string(exportOutput))
 	}
 
-	funcs, err := parseExportJSON(exportOutput, sourceDir, driverDir)
+	funcs, err := parseExportJSON(exportOutput, sourceDir, buildDir, driverDir)
 	if err != nil {
 		return status, err
 	}
@@ -191,7 +207,7 @@ type exportRoot struct {
 	Data []exportData `json:"data"`
 }
 
-func parseExportJSON(data []byte, sourceDir, driverDir string) ([]funcCoverageData, error) {
+func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]funcCoverageData, error) {
 	var root exportRoot
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse llvm-cov export JSON: %w", err)
@@ -207,7 +223,13 @@ func parseExportJSON(data []byte, sourceDir, driverDir string) ([]funcCoverageDa
 		if len(fn.Filenames) > 0 {
 			fnFile = fn.Filenames[0]
 		}
-		if !isPathUnder(fnFile, sourceDir) && !isPathUnder(fnFile, driverDir) {
+		// Accept functions whose source lives under the library source dir,
+		// the out-of-tree build dir (sources copied into build/), or the
+		// driver dir. buildDir is guarded against "" because isPathUnder
+		// falls back to the process CWD for an empty base.
+		if !isPathUnder(fnFile, sourceDir) &&
+			!(buildDir != "" && isPathUnder(fnFile, buildDir)) &&
+			!isPathUnder(fnFile, driverDir) {
 			continue
 		}
 
