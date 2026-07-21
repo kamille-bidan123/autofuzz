@@ -349,11 +349,11 @@ func isPathUnder(path, base string) bool {
 	if path == "" || base == "" {
 		return false
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := canonicalCoveragePath(path)
 	if err != nil {
 		return false
 	}
-	absBase, err := filepath.Abs(base)
+	absBase, err := canonicalCoveragePath(base)
 	if err != nil {
 		return false
 	}
@@ -362,4 +362,23 @@ func isPathUnder(path, base string) bool {
 		return false
 	}
 	return !strings.HasPrefix(rel, "..")
+}
+
+// canonicalCoveragePath returns a physical absolute path when the path exists.
+// LLVM records the source spelling passed by the build system in its coverage
+// mapping. GN source-root layouts commonly reach the task source directory
+// through an intermediate symlink (for example third_party/libexif -> source),
+// so a lexical filepath.Rel comparison would otherwise discard valid coverage.
+func canonicalCoveragePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	// Preserve the previous lexical behavior for paths which no longer exist,
+	// such as historical coverage whose source tree has been moved or removed.
+	return filepath.Clean(abs), nil
 }

@@ -2,6 +2,7 @@ package fuzzing
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -104,5 +105,46 @@ func TestParseBranchReachBuildDir(t *testing.T) {
 	}
 	if _, ok := withoutBuild["src_fn"]; !ok {
 		t.Fatalf("src_fn should still be reached, got %v", withoutBuild)
+	}
+}
+
+// TestParseExportJSONSymlinkedSourcePath covers GN source-root mappings such
+// as third_party/libexif -> source. Clang records the symlinked spelling in the
+// coverage mapping, while the task state retains the physical source path.
+func TestParseExportJSONSymlinkedSourcePath(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "libexif"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(sourceDir, "libexif", "exif-data.c")
+	if err := os.WriteFile(realFile, []byte("int exif_data(void) { return 1; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	thirdPartyDir := filepath.Join(root, "third_party")
+	if err := os.MkdirAll(thirdPartyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(thirdPartyDir, "libexif")
+	if err := os.Symlink(sourceDir, aliasDir); err != nil {
+		t.Fatal(err)
+	}
+	aliasedFile := filepath.Join(aliasDir, "libexif", "exif-data.c")
+
+	data := mustMarshalExport(t, []exportFunc{{
+		Name:      "exif_data",
+		Filenames: []string{aliasedFile},
+		Count:     1,
+	}})
+	got, err := parseExportJSON(data, sourceDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].name != "exif_data" {
+		t.Fatalf("expected symlinked source function to be retained, got %#v", got)
+	}
+	if !isPathUnder(aliasedFile, sourceDir) {
+		t.Fatal("symlinked source file should be recognized under the physical source directory")
 	}
 }

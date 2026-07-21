@@ -138,8 +138,8 @@
       position: relative; min-height: 126px; padding: 14px; border-radius: 16px;
       border: 1px solid var(--line); background: #fbfcff; transition: .2s ease;
     }
-    .stage::after { content: "›"; position: absolute; right: -11px; top: 43px; z-index: 2; color: #a8b4c9; font-size: 28px; font-weight: 900; }
-    .stage:nth-child(4)::after, .stage:last-child::after { display: none; }
+    .stage.linear-stage::after { content: "›"; position: absolute; right: -11px; top: 43px; z-index: 2; color: #a8b4c9; font-size: 28px; font-weight: 900; }
+    .stage.linear-stage:nth-child(4)::after { display: none; }
     .stage.running { border-color: #94b8ff; background: var(--blue-soft); box-shadow: 0 8px 20px rgba(55,124,246,.13); transform: translateY(-2px); }
     .stage.completed { border-color: #a9dfc2; background: #effaf4; }
     .stage.failed { border-color: #ffb6be; background: #fff2f3; }
@@ -154,9 +154,28 @@
     .stage-name { font-size: 14px; font-weight: 900; line-height: 1.35; }
     .stage-owner { display: inline-block; margin-top: 8px; font-size: 10px; font-weight: 800; color: var(--muted); }
     .stage[data-owner="Codex CLI"] .stage-owner { color: #ac620f; background: var(--orange-soft); border-radius: 999px; padding: 3px 7px; }
-    .streams { display: grid; grid-template-columns: 1.15fr .85fr; min-height: 420px; }
+    .stage-detail { margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+    .stage-result { margin-top: 5px; color: #7a5a19; font-size: 10px; font-weight: 700; line-height: 1.35; }
+    .stage.warning { border-color: #f0cb7b; background: #fff9e9; }
+    .stage-cycle { grid-column: span 2; min-width: 0; display: grid; grid-template-columns: minmax(125px, 1fr) 82px minmax(125px, 1fr); gap: 10px; align-items: stretch; }
+    .cycle-track { display: flex; flex-direction: column; justify-content: center; gap: 18px; color: var(--muted); font-size: 9px; font-weight: 800; text-align: center; }
+    .cycle-arrow { padding: 5px 2px; border-radius: 999px; background: #f0f3f9; transition: .2s ease; }
+    .cycle-arrow.active { color: white; background: var(--purple); box-shadow: 0 5px 12px rgba(123,97,223,.22); }
+    .flow-history { border-top: 1px solid var(--line); padding: 16px 20px 20px; }
+    .flow-history-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+    .flow-history-head h3 { margin: 0; font-size: 13px; }
+    .flow-history-head span { color: var(--muted); font-size: 10px; }
+    .flow-history-list { display: grid; gap: 8px; max-height: 300px; overflow: auto; }
+    .flow-empty { padding: 18px; border-radius: 10px; background: #f7f9fd; color: var(--muted); text-align: center; font-size: 11px; }
+    .flow-row { display: grid; grid-template-columns: 72px 76px 62px 84px minmax(180px, 1fr); gap: 9px; align-items: start; padding: 10px 11px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcff; font-size: 10.5px; }
+    .flow-row.current { border-color: #b9cfff; background: var(--blue-soft); }
+    .flow-row.failed { border-color: #ffc5ca; background: #fff5f6; }
+    .flow-tag { display: inline-block; width: max-content; padding: 2px 6px; border-radius: 999px; background: #edf1f8; color: var(--muted); font-size: 9px; font-weight: 800; }
+    .flow-tag.manual { background: var(--purple-soft); color: var(--purple); }
+    .flow-tag.updated { background: #e8f8ef; color: var(--green); }
+    .flow-summary { color: #45516a; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .streams { display: grid; grid-template-columns: 1.15fr .85fr; gap: 22px; min-height: 420px; }
     .stream { min-width: 0; }
-    .stream + .stream { border-left: 1px solid var(--line); }
     .stream-title { display: flex; align-items: center; justify-content: space-between; padding: 14px 17px; border-bottom: 1px solid var(--line); }
     .stream-title h3 { margin: 0; font-size: 14px; }
     .stream-title span { color: var(--muted); font-size: 11px; }
@@ -284,7 +303,7 @@
     .list-notice { min-height: 20px; margin: 10px 0 14px; color: var(--muted); font-size: 12px; }
     @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .stages { grid-template-columns: repeat(4, 1fr); } }
     @media (max-width: 900px) { .task-list-head { display: none; } .task-row { grid-template-columns: 1fr auto; } .task-repo { grid-column: 1 / -1; } .task-stage, .task-time { display: none; } .task-actions { grid-column: 2; grid-row: 1; } }
-    @media (max-width: 720px) { .shell { width: min(100% - 20px, 1480px); padding-top: 18px; } header { align-items: flex-start; } .form-grid, .streams { grid-template-columns: 1fr; } .stream + .stream { border-left: 0; border-top: 1px solid var(--line); } .stages { grid-template-columns: repeat(2, 1fr); } .stage:nth-child(2n)::after { display: none; } .detail-toolbar { align-items: flex-start; flex-wrap: wrap; } .detail-toolbar .run-status { margin-left: 0; } .detail-actions { width: 100%; } .modal { padding: 10px; } .modal-card { max-height: calc(100vh - 20px); } }
+    @media (max-width: 720px) { .shell { width: min(100% - 20px, 1480px); padding-top: 18px; } header { align-items: flex-start; } .form-grid, .streams { grid-template-columns: 1fr; } .stages { grid-template-columns: repeat(2, 1fr); } .stage.linear-stage:nth-child(2n)::after { display: none; } .stage-cycle { grid-column: span 2; grid-template-columns: 1fr 64px 1fr; } .flow-row { grid-template-columns: 62px 66px 52px; } .flow-summary { grid-column: 1 / -1; } .detail-toolbar { align-items: flex-start; flex-wrap: wrap; } .detail-toolbar .run-status { margin-left: 0; } .detail-actions { width: 100%; } .modal { padding: 10px; } .modal-card { max-height: calc(100vh - 20px); } }
   </style>
 </head>
 <body>
@@ -313,13 +332,17 @@
       <button id="backTaskList" class="back-button" type="button">← 返回任务列表</button>
       <div class="detail-title"><h2 id="taskDetailName">Task 详情</h2><p id="taskDetailRepo"></p></div>
       <div id="runStatus" class="run-status">未启动</div>
-      <div class="detail-actions"><button id="cancelButton" class="danger" type="button" disabled>停止</button><button id="triggerFuzzButton" class="debug" type="button" disabled title="在 fuzzing 阶段手动触发 LLM 分析优化">🔬 触发分析</button></div>
+      <div class="detail-actions"><button id="resumeButton" class="primary" type="button" hidden disabled>恢复</button><button id="cancelButton" class="danger" type="button" disabled>停止</button><button id="triggerFuzzButton" class="debug" type="button" disabled title="在 fuzzing 阶段手动触发 LLM 分析优化">🔬 触发分析</button></div>
     </div>
     <div id="detailMessage" class="list-notice"></div>
     <main id="taskOverview" class="content">
       <section class="panel">
-        <div class="panel-head"><h2>执行阶段</h2><p>旋转图标表示当前正在执行的阶段；橙色 Codex 阶段会产生结构化 JSON 事件。</p></div>
+        <div class="panel-head"><h2>执行阶段</h2><p>持续 Fuzz 与 LLM 优化分析构成循环；分析可由时间间隔或右上角按钮触发。</p></div>
         <div id="stages" class="stages"></div>
+        <div class="flow-history">
+          <div class="flow-history-head"><h3>Fuzz / LLM 优化记录</h3><span id="fuzzFlowCount">0 轮</span></div>
+          <div id="fuzzFlowHistory" class="flow-history-list"><div class="flow-empty">进入 fuzzing 阶段后显示每轮优化分析</div></div>
+        </div>
         <div id="runMeta" class="meta">尚未选择任务</div>
       </section>
 
@@ -334,16 +357,16 @@
         <div id="snapTable" class="snap-table"><div class="cov-empty">fuzzing 阶段开始后可用</div></div>
       </section>
 
-      <section class="panel streams">
-        <div class="stream">
-          <div class="stream-title"><h3>🤖 Codex CLI 实时事件</h3><span id="codexCount">0 条</span></div>
-          <div id="codexEvents" class="event-list"><div class="empty">built / configured 阶段的<br>Codex JSONL 事件将在这里出现</div></div>
-        </div>
-        <div class="stream">
-          <div class="stream-title"><h3>运行日志</h3><span id="logCount">0 行</span></div>
+      <div class="streams">
+        <section id="codexEventPanel" class="panel stream" aria-labelledby="codexEventTitle">
+          <div class="stream-title"><h3 id="codexEventTitle">🤖 Codex CLI 实时事件</h3><span id="codexCount">0 条</span></div>
+          <div id="codexEvents" class="event-list"><div class="empty">built / configured / fuzzing 阶段的<br>Codex JSONL 事件将在这里出现</div></div>
+        </section>
+        <section id="runtimeLogPanel" class="panel stream" aria-labelledby="runtimeLogTitle">
+          <div class="stream-title"><h3 id="runtimeLogTitle">运行日志</h3><span id="logCount">0 行</span></div>
           <div id="runtimeLogs" class="event-list"><div class="empty">等待 Autofuzz 启动</div></div>
-        </div>
-      </section>
+        </section>
+      </div>
     </main>
     <section id="snapshotDiffView" class="snapshot-diff-view" hidden>
       <div class="diff-page-head">
@@ -403,7 +426,10 @@
   let logCount = 0;
   let covPollTimer = null;
   let snapPollTimer = null;
-  let waitingForAnalysis = false;
+  let currentFuzzFlow = null;
+  let fuzzFlowHistory = [];
+  let currentTaskStatus = '';
+  let fuzzStageStatus = 'pending';
   let taskSelectionVersion = 0;
   let listPollTimer = null;
   let diffRequestVersion = 0;
@@ -445,22 +471,42 @@
     term.writeln('\x1b[2m等待 Autofuzz 启动...\x1b[0m');
     window.addEventListener('resize', () => { try { termFit.fit(); } catch(e) {} });
   }
+  function makeStageCard(id, name, owner, index, extraClass = '') {
+    const card = document.createElement('div');
+    card.className = `stage ${extraClass}`;
+    card.dataset.stage = id; card.dataset.owner = owner;
+    card.innerHTML = `<div class="stage-top"><span class="stage-index"></span><span class="spinner"></span></div><div class="stage-name"></div><span class="stage-owner"></span><div class="stage-detail"></div><div class="stage-result"></div>`;
+    card.querySelector('.stage-index').textContent = index;
+    card.querySelector('.stage-name').textContent = name;
+    card.querySelector('.stage-owner').textContent = owner;
+    return card;
+  }
+
   function renderStages(stages) {
     const statuses = Object.fromEntries((stages || []).map(stage => [stage.id, stage.status]));
-    $('stages').replaceChildren(...stageDefs.map(([id, name, owner], index) => {
-      const card = document.createElement('div');
-      card.className = 'stage ' + (statuses[id] || 'pending');
-      card.dataset.stage = id; card.dataset.owner = owner;
-      card.innerHTML = `<div class="stage-top"><span class="stage-index">${index + 1}</span><span class="spinner"></span></div><div class="stage-name"></div><span class="stage-owner"></span>`;
-      card.querySelector('.stage-name').textContent = name;
-      card.querySelector('.stage-owner').textContent = owner;
+    const cards = stageDefs.slice(0, 6).map(([id, name, owner], index) => {
+      const card = makeStageCard(id, name, owner, index + 1, `linear-stage ${statuses[id] || 'pending'}`);
       return card;
-    }));
+    });
+    const cycle = document.createElement('div'); cycle.className = 'stage-cycle';
+    const fuzz = makeStageCard('fuzzing', '持续 Fuzz 测试', 'libFuzzer', 7, statuses.fuzzing || 'pending');
+    const track = document.createElement('div'); track.className = 'cycle-track';
+    track.innerHTML = '<div class="cycle-arrow cycle-forward">定时 / 手动 →</div><div class="cycle-arrow cycle-back">← 继续 / 重建</div>';
+    const analysis = makeStageCard('fuzz_analysis', 'LLM 优化分析', 'Codex CLI', '↻', 'pending');
+    analysis.dataset.flowCard = 'analysis';
+    cycle.append(fuzz, track, analysis); cards.push(cycle);
+    $('stages').replaceChildren(...cards);
+    fuzzStageStatus = statuses.fuzzing || 'pending';
+    renderFuzzFlow(currentFuzzFlow);
   }
 
   function setStageStatus(id, status) {
     const card = document.querySelector(`[data-stage="${CSS.escape(id)}"]`);
-    if (card) card.className = 'stage ' + status;
+    if (card) {
+      card.classList.remove('pending', 'running', 'completed', 'failed', 'warning');
+      card.classList.add(status);
+    }
+    if (id === 'fuzzing') fuzzStageStatus = status;
   }
 
   function setRunStatus(status, text) {
@@ -469,13 +515,116 @@
     element.textContent = text;
   }
 
+  function updateDetailActions(status) {
+    const resumable = status === 'stopped' || status === 'interrupted' || status === 'failed';
+    $('resumeButton').hidden = !resumable;
+    $('resumeButton').disabled = !resumable;
+    $('cancelButton').disabled = status !== 'running';
+    if (status !== 'running') $('triggerFuzzButton').disabled = true;
+  }
+
   function updateTriggerButton(stage, status) {
+    if (stage === 'fuzzing') fuzzStageStatus = status;
     const btn = $('triggerFuzzButton');
-    if (stage === 'fuzzing' && status === 'running') {
-      btn.disabled = false;
+    const phase = currentFuzzFlow?.phase;
+    const analysisBusy = phase && phase !== 'fuzzing';
+    btn.disabled = !(currentTaskStatus === 'running' && fuzzStageStatus === 'running' && !analysisBusy);
+  }
+
+  const flowPhaseLabels = {
+    starting: '正在准备初始 fuzz driver', fuzzing: '等待下一轮分析',
+    collecting: '正在收集覆盖与运行状态', analyzing: 'Codex 正在分析优化机会',
+    applying: '正在校验分析结果与源码变化', rebuilding: '正在重建并重启 driver'
+  };
+
+  function renderFuzzFlow(flow) {
+    currentFuzzFlow = flow || null;
+    const fuzz = document.querySelector('[data-stage="fuzzing"]');
+    const analysis = document.querySelector('[data-flow-card="analysis"]');
+    if (!fuzz || !analysis) return;
+    fuzz.className = 'stage ' + fuzzStageStatus;
+    const phase = flow?.phase || '';
+    const live = currentTaskStatus === 'running';
+    const active = live && ['collecting', 'analyzing', 'applying', 'rebuilding'].includes(phase);
+    const failed = flow?.status === 'failed';
+    analysis.className = 'stage ' + (failed ? 'failed' : active ? 'running' : flow?.last_result?.error ? 'warning' : 'pending');
+    const fuzzDetail = fuzz.querySelector('.stage-detail');
+    const analysisDetail = analysis.querySelector('.stage-detail');
+    const analysisResult = analysis.querySelector('.stage-result');
+    if (!flow) {
+      fuzzDetail.textContent = '';
+      analysisDetail.textContent = fuzzStageStatus === 'running' ? '等待流程状态' : '进入 fuzzing 后启用';
+      analysisResult.textContent = '';
     } else {
-      btn.disabled = true;
+      if (phase === 'rebuilding' || phase === 'starting') fuzzDetail.textContent = flow.message || flowPhaseLabels[phase];
+      else fuzzDetail.textContent = `driver v${flow.driver_seq || 0} 持续运行`;
+      analysisDetail.textContent = !live && phase && phase !== 'fuzzing' ? `任务已${statusLabels[currentTaskStatus] || currentTaskStatus}，上次停在：${flowPhaseLabels[phase] || phase}` : flowPhaseLabels[phase] || flow.message || '等待下一轮分析';
+      const last = flow.last_result;
+      if (last?.error) analysisResult.textContent = `上轮失败：${last.error}`;
+      else if (last) analysisResult.textContent = last.needs_update ? `第 ${last.iteration} 轮已修改并${last.regenerated ? '完成重建' : '等待重建'}` : `第 ${last.iteration} 轮完成，无需修改`;
+      else analysisResult.textContent = '';
     }
+    document.querySelector('.cycle-forward')?.classList.toggle('active', active && phase !== 'rebuilding');
+    document.querySelector('.cycle-back')?.classList.toggle('active', phase === 'rebuilding');
+    updateTriggerButton('fuzzing', fuzzStageStatus);
+  }
+
+  function flowResultAsHistory(result) {
+    return {
+      iteration: result.iteration, seq: result.driver_seq, trigger: result.trigger,
+      analysis: result.analysis || '', plateau_reached: result.plateau_reached,
+      needs_update: result.needs_update, regenerated: result.regenerated,
+      error: result.error || '', started_at: result.started_at, finished_at: result.finished_at,
+      duration_seconds: result.started_at && result.finished_at ? (new Date(result.finished_at) - new Date(result.started_at)) / 1000 : 0
+    };
+  }
+
+  function upsertFlowHistory(entry) {
+    if (!entry || !entry.iteration) return;
+    const index = fuzzFlowHistory.findIndex(item => item.iteration === entry.iteration);
+    if (index >= 0) fuzzFlowHistory[index] = {...fuzzFlowHistory[index], ...entry};
+    else fuzzFlowHistory.push(entry);
+    fuzzFlowHistory.sort((a, b) => a.iteration - b.iteration);
+    if (fuzzFlowHistory.length > 50) fuzzFlowHistory = fuzzFlowHistory.slice(-50);
+  }
+
+  function renderFuzzFlowHistory() {
+    const container = $('fuzzFlowHistory');
+    const rows = [...fuzzFlowHistory].reverse();
+    const flow = currentFuzzFlow;
+    const active = currentTaskStatus === 'running' && flow && ['collecting', 'analyzing', 'applying', 'rebuilding'].includes(flow.phase);
+    $('fuzzFlowCount').textContent = `${rows.length} 轮`;
+    if (!rows.length && !active) {
+      container.innerHTML = '<div class="flow-empty">尚无 LLM 优化分析记录</div>';
+      return;
+    }
+    container.replaceChildren();
+    if (active) {
+      const current = document.createElement('div'); current.className = 'flow-row current';
+      current.innerHTML = `<div><strong>第 ${flow.iteration} 轮</strong></div><div><span class="flow-tag ${flow.trigger === 'manual' ? 'manual' : ''}">${flow.trigger === 'manual' ? '手动触发' : '定时触发'}</span></div><div>v${flow.driver_seq || 0}</div><div>${escapeHtml(flowPhaseLabels[flow.phase] || flow.message || '进行中')}</div><div class="flow-summary">${escapeHtml(flow.message || '')}</div>`;
+      container.appendChild(current);
+    }
+    rows.forEach(item => {
+      const row = document.createElement('div'); row.className = `flow-row${item.error ? ' failed' : ''}`;
+      const outcome = item.error ? '分析失败' : item.needs_update ? (item.regenerated ? '已修改并重建' : '已修改') : item.plateau_reached ? '平台期·未修改' : '未到平台期';
+      const duration = item.duration_seconds ? `${Math.max(0, item.duration_seconds).toFixed(1)}s` : '-';
+      row.innerHTML = `<div><strong>第 ${item.iteration} 轮</strong></div><div><span class="flow-tag ${item.trigger === 'manual' ? 'manual' : ''}">${item.trigger === 'manual' ? '手动触发' : item.trigger === 'interval' ? '定时触发' : '未知触发'}</span></div><div>v${item.seq || 0}</div><div><span class="flow-tag ${item.regenerated ? 'updated' : ''}">${escapeHtml(outcome)}</span><br>${duration}</div><div class="flow-summary">${escapeHtml(item.error || item.analysis || '(无分析摘要)')}</div>`;
+      container.appendChild(row);
+    });
+  }
+
+  async function loadFuzzFlow(id = taskId) {
+    if (!id) return;
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/fuzz-flow?limit=50`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (taskId !== id) return;
+      fuzzFlowHistory = data.history || [];
+      renderFuzzFlow(data.current || null);
+      if (data.current?.last_result) upsertFlowHistory(flowResultAsHistory(data.current.last_result));
+      renderFuzzFlowHistory();
+    } catch (e) { /* flow state is optional for pre-fuzzing tasks */ }
   }
 
   function requestBody() {
@@ -547,30 +696,24 @@
       appendLog(event);
     } else if (event.kind === 'codex') {
       appendCodex(event);
+    } else if (event.kind === 'fuzz_flow') {
+      const flow = event.data || null;
+      renderFuzzFlow(flow);
+      if (flow?.last_result && (flow.phase === 'fuzzing' || flow.status === 'failed')) {
+        upsertFlowHistory(flowResultAsHistory(flow.last_result));
+      }
+      renderFuzzFlowHistory();
+      if (flow?.status === 'failed') $('detailMessage').textContent = `LLM 优化分析失败：${flow.message || '见日志'}`;
+      else if (flow?.phase === 'rebuilding') $('detailMessage').textContent = 'LLM 已修改 driver，正在重建并重启 fuzz';
+      else if (flow?.phase === 'fuzzing' && currentTaskStatus === 'running') $('detailMessage').textContent = '持续 Fuzz 运行中，等待下一轮优化分析';
     } else if (event.kind === 'log') {
       appendLog(event);
-      // The "已触发 LLM 分析,等待结果…" status is set when the user clicks
-      // the trigger button and never cleared otherwise. Detect the analysis-end
-      // log markers and clear it + re-enable the trigger button so the user
-      // sees the analysis actually finished (or failed/hung).
-      if (waitingForAnalysis) {
-        const m = event.message || '';
-        if (m.includes('plateau=') || m.includes('Codex analysis error') || m.includes('Codex edited driver sources')) {
-          waitingForAnalysis = false;
-          $('triggerFuzzButton').disabled = false;
-          if (m.includes('Codex analysis error')) {
-            $('detailMessage').textContent = 'LLM 分析失败,见日志';
-          } else if (m.includes('Codex edited driver sources')) {
-            $('detailMessage').textContent = 'LLM 分析完成,正在 rebuild driver';
-          } else {
-            $('detailMessage').textContent = 'LLM 分析完成';
-          }
-        }
-      }
     } else if (event.kind === 'run') {
         appendLog(event);
+        currentTaskStatus = event.status;
+        updateDetailActions(event.status);
         if (event.status === 'running') setRunStatus('running', '运行中');
-        if (event.status === 'stopping') { setRunStatus('stopping', '停止中'); $('cancelButton').disabled = true; }
+        if (event.status === 'stopping') setRunStatus('stopping', '停止中');
         if (event.status === 'completed') finishUI('completed', '已完成');
         if (event.status === 'failed') finishUI('failed', '运行失败');
         if (event.status === 'stopped') finishUI('stopped', '已停止');
@@ -579,8 +722,8 @@
   }
 
   function finishUI(status, label) {
-    setRunStatus(status, label); $('cancelButton').disabled = true; $('triggerFuzzButton').disabled = true;
-    waitingForAnalysis = false;
+    currentTaskStatus = status;
+    setRunStatus(status, label); updateDetailActions(status);
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
     if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
@@ -704,11 +847,16 @@
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
     if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
-    waitingForAnalysis = false;
     taskId = id;
+    currentFuzzFlow = null;
+    fuzzFlowHistory = [];
+    currentTaskStatus = '';
     $('detailMessage').textContent = '';
     renderStages([]);
+    renderFuzzFlowHistory();
     setRunStatus('', '加载中');
+    $('resumeButton').hidden = true;
+    $('resumeButton').disabled = true;
     $('cancelButton').disabled = true;
     $('triggerFuzzButton').disabled = true;
     $('covPanel').style.display = 'none';
@@ -726,9 +874,11 @@
       $('taskDetailName').textContent = snap.request?.repository_url?.split('/').filter(Boolean).pop()?.replace(/\.git$/, '') || id;
       $('taskDetailRepo').textContent = snap.request?.repository_url || '';
       $('runMeta').textContent = `任务 ${id} · workspace: ${snap.target_dir || ''}${snap.error ? ' · 错误: ' + snap.error : ''}`;
+      currentTaskStatus = snap.status;
       setRunStatus(snap.status, statusLabels[snap.status] || snap.status);
+      updateDetailActions(snap.status);
+      loadFuzzFlow(id);
       if (snap.status === 'running' || snap.status === 'stopping') {
-        $('cancelButton').disabled = snap.status !== 'running';
         const runningStage = (snap.stages || []).find(stage => stage.status === 'running');
         updateTriggerButton(runningStage?.id, runningStage?.status);
         connectEvents(id);
@@ -1017,6 +1167,24 @@
     }
   });
 
+  $('resumeButton').addEventListener('click', async () => {
+    if (!taskId) return;
+    const id = taskId;
+    $('resumeButton').disabled = true;
+    $('detailMessage').textContent = '正在恢复任务…';
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/start`, {method: 'POST'});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || '任务恢复失败');
+      await selectTask(id);
+      await loadTaskList();
+    } catch (error) {
+      if (taskId !== id) return;
+      $('detailMessage').textContent = error.message;
+      updateDetailActions(currentTaskStatus);
+    }
+  });
+
   $('cancelButton').addEventListener('click', async () => {
     if (!taskId) return;
     if (!confirm('确认停止此 Task？之后可以从当前状态恢复。')) return;
@@ -1035,14 +1203,13 @@
       const result = await response.json();
       if (!response.ok) {
         $('detailMessage').textContent = result.error || '触发失败';
-        $('triggerFuzzButton').disabled = false;
+        updateTriggerButton('fuzzing', fuzzStageStatus);
       } else {
-        waitingForAnalysis = true;
-        $('detailMessage').textContent = '已触发 LLM 分析，等待结果…';
+        $('detailMessage').textContent = '已触发 LLM 分析，等待流程启动…';
       }
     } catch (error) {
       $('detailMessage').textContent = '触发失败: ' + error.message;
-      $('triggerFuzzButton').disabled = false;
+      updateTriggerButton('fuzzing', fuzzStageStatus);
     }
   });
 

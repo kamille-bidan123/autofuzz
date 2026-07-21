@@ -36,6 +36,7 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("POST /api/runs/{id}/start", server.startRun)
 	server.mux.HandleFunc("GET /api/runs/{id}/events", server.runEvents)
 	server.mux.HandleFunc("GET /api/runs/{id}/history", server.runHistory)
+	server.mux.HandleFunc("GET /api/runs/{id}/fuzz-flow", server.fuzzFlow)
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
@@ -282,6 +283,11 @@ func (s *Server) snapshotDiff(response http.ResponseWriter, request *http.Reques
 func (s *Server) runHistory(response http.ResponseWriter, request *http.Request) {
 	data := s.manager.HistoricalHistory(request.PathValue("id"))
 	writeJSON(response, http.StatusOK, data)
+}
+
+func (s *Server) fuzzFlow(response http.ResponseWriter, request *http.Request) {
+	limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
+	writeJSON(response, http.StatusOK, s.manager.FuzzFlowData(request.PathValue("id"), limit))
 }
 
 func (s *Server) runEvents(response http.ResponseWriter, request *http.Request) {

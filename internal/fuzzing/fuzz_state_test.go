@@ -57,6 +57,20 @@ func TestLoadFuzzStateMissing(t *testing.T) {
 	}
 }
 
+func TestFuzzControllerTriggerReportsQueueState(t *testing.T) {
+	controller := FuzzController{Trigger: make(chan struct{}, 1)}
+	if !controller.TriggerAnalysis() {
+		t.Fatal("first trigger was not queued")
+	}
+	if controller.TriggerAnalysis() {
+		t.Fatal("second trigger unexpectedly queued while one was pending")
+	}
+	<-controller.Trigger
+	if !controller.TriggerAnalysis() {
+		t.Fatal("trigger was not accepted after queue drained")
+	}
+}
+
 func TestDriverSourceHashOnlyTracksCompiledSources(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{

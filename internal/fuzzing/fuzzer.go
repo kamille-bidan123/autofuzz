@@ -52,6 +52,10 @@ type FuzzConfig struct {
 	// (nil when stopped). Allows the web UI to access real-time coverage data
 	// via the monitor's CoverageCache().
 	OnMonitorChanged func(*CorpusMonitor)
+
+	// FlowSink receives structured state transitions for the repeating
+	// fuzz/analyze/rebuild loop. The same snapshots are persisted to disk.
+	FlowSink func(FuzzFlowSnapshot)
 }
 
 // logf prints a formatted message to the LogSink (if set) or stdout.
@@ -88,11 +92,14 @@ func StartFuzzingPhase(ctx context.Context, cfg FuzzConfig) FuzzController {
 }
 
 // TriggerAnalysis sends a non-blocking signal to the fuzz loop to
-// immediately skip the remaining wait and run the LLM analysis.
-func (c FuzzController) TriggerAnalysis() {
+// immediately skip the remaining wait and run the LLM analysis. It reports
+// whether a new trigger was queued.
+func (c FuzzController) TriggerAnalysis() bool {
 	select {
 	case c.Trigger <- struct{}{}:
+		return true
 	default:
+		return false
 	}
 }
 
@@ -100,10 +107,12 @@ func (c FuzzController) TriggerAnalysis() {
 type FuzzIteration struct {
 	Iteration   int                  `json:"iteration"`
 	Seq         int                  `json:"seq"` // driver version that ran this cycle
+	Trigger     string               `json:"trigger,omitempty"`
 	FuzzStatus  FuzzStatus           `json:"fuzz_status"`
 	Coverage    CorpusCoverageStatus `json:"coverage_status"`
 	Analysis    AnalysisResponse     `json:"analysis"`
 	Regenerated bool                 `json:"regenerated"`
+	Error       string               `json:"error,omitempty"`
 	StartedAt   time.Time            `json:"started_at"`
 	FinishedAt  time.Time            `json:"finished_at"`
 }
@@ -126,6 +135,7 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	}
 
 	statePath := filepath.Join(cfg.LogsDir, "fuzzing-state.json")
+	flowPath := filepath.Join(cfg.LogsDir, "fuzz-flow.json")
 	synthesizedDir := filepath.Join(cfg.DriverDir, "synthesized")
 
 	iteration := 0 // analysis cycle counter (~per interval)
@@ -133,6 +143,28 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	needRebuild := true
 	lastBuiltHash := ""
 	var currentSnapshot string
+	flow, _ := LoadFuzzFlow(flowPath)
+	if flow == nil {
+		flow = &FuzzFlowSnapshot{}
+	}
+	var pendingHistory *FuzzIteration
+	emitFlow := func(phase FuzzFlowPhase, status, trigger, message string) {
+		flow.Iteration = iteration
+		if phase == FuzzFlowRebuilding && flow.LastResult != nil {
+			flow.Iteration = flow.LastResult.Iteration
+		}
+		flow.DriverSeq = seq
+		flow.Phase = phase
+		flow.Status = status
+		flow.Trigger = trigger
+		flow.Message = message
+		if err := flow.Save(flowPath); err != nil {
+			cfg.logf("[fuzzing] flow state save failed: %v\n", err)
+		}
+		if cfg.FlowSink != nil {
+			cfg.FlowSink(*flow)
+		}
+	}
 
 	// Resume the fuzzing phase if a checkpoint exists, else scan prior
 	// snapshots. We avoid overwriting an existing snapshot when the driver
@@ -201,12 +233,36 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		if needRebuild {
 			seq++
 			snapDir = snapshotDirPath(cfg.LogsDir, seq)
+			phase := FuzzFlowStarting
+			message := fmt.Sprintf("正在准备 fuzz driver v%d", seq)
+			if flow.LastResult != nil && flow.LastResult.NeedsUpdate && !flow.LastResult.Regenerated {
+				phase = FuzzFlowRebuilding
+				message = fmt.Sprintf("正在重建 fuzz driver v%d", seq)
+			}
+			emitFlow(phase, "running", flow.Trigger, message)
 			if err := os.MkdirAll(snapDir, 0o755); err != nil {
+				emitFlow(phase, "failed", flow.Trigger, err.Error())
 				return err
 			}
 			cfg.logf("[fuzzing] iteration %d: building driver v%d (snapshot %s)\n", iteration, seq, snapDir)
 			if err := cfg.buildCovDriver(ctx, snapDir); err != nil {
+				emitFlow(phase, "failed", flow.Trigger, err.Error())
 				return err
+			}
+			if flow.LastResult != nil && flow.LastResult.NeedsUpdate && !flow.LastResult.Regenerated {
+				flow.LastResult.Regenerated = true
+				if pendingHistory != nil {
+					pendingHistory.Regenerated = true
+					appendHistory(cfg.LogsDir, *pendingHistory)
+					pendingHistory = nil
+				} else {
+					result := flow.LastResult
+					appendHistory(cfg.LogsDir, FuzzIteration{
+						Iteration: result.Iteration, Seq: result.DriverSeq, Trigger: result.Trigger,
+						Analysis:    AnalysisResponse{PlateauReached: result.PlateauReached, Analysis: result.Analysis, NeedsUpdate: result.NeedsUpdate},
+						Regenerated: true, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt,
+					})
+				}
 			}
 			// Snapshot the driver sources that this binary was built from, so
 			// any crash found while this driver runs can later be reproduced by
@@ -269,11 +325,15 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 				cfg.OnMonitorChanged(monitor)
 			}
 			fuzzerRunning = true
+			flow.CycleStarted = nil
+			emitFlow(FuzzFlowFuzzing, "idle", "", fmt.Sprintf("fuzz driver v%d 持续运行，等待下一轮分析", seq))
 		}
 
 		// Run for the configured interval (or until manually triggered).
 		// The fuzzer keeps running; we do NOT stop it to collect coverage.
+		triggerSource := "interval"
 		if triggered {
+			triggerSource = "manual"
 			cfg.logf("[fuzzing] iteration %d: skipping fuzz wait (triggered during INIT)\n", iteration)
 		} else {
 			cfg.logf("[fuzzing] iteration %d: fuzzing for %s (or click trigger button)\n", iteration, cfg.Interval)
@@ -283,6 +343,7 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 				cfg.logf("[fuzzing] iteration %d: interval elapsed, proceeding to analysis\n", iteration)
 			case <-cfg.TriggerCh:
 				timer.Stop()
+				triggerSource = "manual"
 				cfg.logf("[fuzzing] iteration %d: manually triggered, proceeding to analysis\n", iteration)
 			case <-fuzzCtx.Done():
 				timer.Stop()
@@ -307,6 +368,9 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 				return ctx.Err()
 			}
 		}
+		cycleStarted := time.Now()
+		flow.CycleStarted = &cycleStarted
+		emitFlow(FuzzFlowCollecting, "running", triggerSource, "正在采集 fuzz 状态与覆盖数据")
 
 		// Collect fuzz status from the (still-running) tracker.
 		fuzzStatus := statusTracker.Snapshot()
@@ -333,6 +397,7 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		// Codex reads the driver sources directly from DriverDir/synthesized/
 		// (it has read access there); the entry source is NOT inlined.
 		cfg.logf("[fuzzing] iteration %d: asking Codex for analysis\n", iteration)
+		emitFlow(FuzzFlowAnalyzing, "running", triggerSource, "Codex 正在分析覆盖停滞并评估 driver 优化")
 		analyzer := CodexAnalyzer{
 			Command:   cfg.CodexCommand,
 			Model:     cfg.CodexModel,
@@ -355,13 +420,19 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		_ = os.RemoveAll(analysisTmp) // codex prompt/response are ephemeral
 		if aErr != nil {
 			cfg.logf("[fuzzing] Codex analysis error: %v\n", aErr)
-			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: AnalysisResponse{}, Regenerated: false, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
+			finishedAt := time.Now()
+			flow.LastResult = &FuzzFlowResult{Iteration: iteration, DriverSeq: seq, Trigger: triggerSource, StartedAt: cycleStarted, FinishedAt: finishedAt, Error: aErr.Error()}
+			emitFlow(FuzzFlowAnalyzing, "failed", triggerSource, aErr.Error())
+			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, Trigger: triggerSource, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: AnalysisResponse{}, Regenerated: false, Error: aErr.Error(), StartedAt: cycleStarted, FinishedAt: finishedAt})
 			persist()
+			flow.CycleStarted = nil
+			emitFlow(FuzzFlowFuzzing, "idle", "", fmt.Sprintf("上轮分析失败，fuzz driver v%d 继续运行", seq))
 			continue
 		}
 
 		cfg.logf("[fuzzing] iteration %d: plateau=%v needs_update=%v\n",
 			iteration, analysisResp.PlateauReached, analysisResp.NeedsUpdate)
+		emitFlow(FuzzFlowApplying, "running", triggerSource, "正在校验 Codex 分析结果与 driver 源码变化")
 
 		// A model response is not sufficient evidence that the driver changed.
 		// Only compiled source files affect the binary; backup or note files must
@@ -377,13 +448,23 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			}
 		}
 
-		appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: false, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
+		finishedAt := time.Now()
+		flow.LastResult = &FuzzFlowResult{
+			Iteration: iteration, DriverSeq: seq, Trigger: triggerSource,
+			StartedAt: cycleStarted, FinishedAt: finishedAt,
+			PlateauReached: analysisResp.PlateauReached, NeedsUpdate: analysisResp.NeedsUpdate,
+			Analysis: analysisResp.Analysis,
+		}
 
 		// Codex edits the synthesized driver sources directly (it has write
 		// access to DriverDir). Preserve those files exactly and rebuild+restart
 		// the fuzzer with the new driver (new snapshot + crash dir).
 		if analysisResp.NeedsUpdate {
 			cfg.logf("[fuzzing] iteration %d: Codex edited driver sources, scheduling rebuild\n", iteration)
+			record := FuzzIteration{Iteration: iteration, Seq: seq, Trigger: triggerSource, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: false, StartedAt: cycleStarted, FinishedAt: finishedAt}
+			appendHistory(cfg.LogsDir, record)
+			pendingHistory = &record
+			emitFlow(FuzzFlowRebuilding, "running", triggerSource, "Codex 已修改 driver，正在安排重建与重启")
 
 			// Stop the corpus monitor and fuzzer before rebuilding the driver.
 			if monitor != nil {
@@ -398,14 +479,13 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			}
 			fuzzerRunning = false
 
-			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: true, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
-
 			// Driver changed: rebuild and restart the fuzzer on the next loop
 			// (new seq, new snapshot, crashes go to the new snapshot dir).
 			needRebuild = true
 			persist()
 			continue
 		}
+		appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, Trigger: triggerSource, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: false, StartedAt: cycleStarted, FinishedAt: finishedAt})
 
 		// No driver update needed. Whether or not plateau is reached, the
 		// fuzzer keeps running into the next interval. Crash triage is
@@ -416,6 +496,8 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			cfg.logf("[fuzzing] iteration %d: no plateau yet, continuing\n", iteration)
 		}
 		persist()
+		flow.CycleStarted = nil
+		emitFlow(FuzzFlowFuzzing, "idle", "", fmt.Sprintf("fuzz driver v%d 持续运行，等待下一轮分析", seq))
 	}
 }
 

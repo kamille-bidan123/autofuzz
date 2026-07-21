@@ -79,12 +79,13 @@ Web 表单覆盖当前 Autofuzz CLI 的业务配置项：目标仓库、Git ref�
 
 ```text
 准备源码 → 自主构建 → 生成 library.toml → API 预处理
-         → API 理解 → 选择并生成 Driver → 最终编译验证
+         → API 理解 → All-cover 全量生成 → 持续 Fuzz
+                                      持续 Fuzz ⇄ LLM 优化分析
 ```
 
-正在运行的阶段显示旋转图标，成功和失败阶段分别显示对应状态。页面使用 Server-Sent Events（SSE）持续接收事件，不需要轮询。
+正在运行的阶段显示旋转图标，成功和失败阶段分别显示对应状态。持续 Fuzz 与 LLM 优化分析在页面中显示为循环卡组；每次定时或手动分析都会显示覆盖采集、Codex 分析、结果校验和 driver 重建状态，并在下方保留每轮摘要。流程快照写入 `logs/fuzzing/fuzz-flow.json`，刷新页面或重启 Web 服务后仍可恢复。页面使用 Server-Sent Events（SSE）持续接收事件，不需要轮询。
 
-Autofuzz 直接启动的两个 Codex Agent 阶段使用：
+Autofuzz 直接启动的 Codex Agent 调用使用：
 
 ```bash
 codex exec --json ...
@@ -96,6 +97,7 @@ Codex CLI 的 JSONL stdout 会实时显示在独立的事件面板，同时继�
 
 - `built`：Codex 自主分析和构建。
 - `configured`：Codex 创建或修复 `library.toml`。
+- `fuzzing`：Codex 分析覆盖停滞、直接优化 driver，并在需要时触发重建。
 
 `comprehended` 和 `generated` 中的 LLM 调用由 PromeFuzz Python 进程内部创建。Autofuzz 无法直接取得这些 Codex 子进程的 JSONL，因此页面将其显示为 PromeFuzz 普通日志。PromeFuzz 子进程使用 `PYTHONUNBUFFERED=1`，日志会尽可能实时转发。
 
@@ -348,7 +350,7 @@ env GOCACHE=/tmp/autofuzz-go-cache go vet ./...
 - Codex 可以修改 disposable 源码副本和执行仓库构建脚本，必须在隔离环境中处理不可信仓库。
 - 当前要求目标项目可以生成静态库。
 - 不会自动安装缺少的编译器、构建工具或系统依赖。
-- API 数量超过 300 时，不自动运行计算成本较高的语义相关性分析。
+- API 数量超过 2000 时，不自动运行计算成本较高的语义相关性分析。
 - API 数量超过 1000 时，认为头文件范围过宽并停止，暂不自动缩小范围。
 - 每次生成一个聚焦的初始 driver，不自动启动 all-cover 模式。
 - 目标项目依赖 submodule 时，需要后续增加 submodule 策略或手动准备本地源码。

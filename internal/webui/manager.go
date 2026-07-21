@@ -460,7 +460,9 @@ func (m *Manager) TriggerFuzzAnalysis(id string) error {
 	if agent == nil {
 		return fmt.Errorf("agent not available")
 	}
-	agent.TriggerFuzzAnalysis()
+	if !agent.TriggerFuzzAnalysis() {
+		return fmt.Errorf("fuzz analysis is not ready or a trigger is already queued")
+	}
 	return nil
 }
 
@@ -838,12 +840,51 @@ func (m *Manager) Delete(id string) error {
 
 // HistoryEntry is one iteration's summary from fuzzing-history.jsonl.
 type HistoryEntry struct {
-	Iteration   int    `json:"iteration"`
-	Seq         int    `json:"seq"`
-	Analysis    string `json:"analysis"`
-	Regenerated bool   `json:"regenerated"`
-	StartedAt   string `json:"started_at"`
-	FinishedAt  string `json:"finished_at"`
+	Iteration      int     `json:"iteration"`
+	Seq            int     `json:"seq"`
+	Trigger        string  `json:"trigger,omitempty"`
+	Analysis       string  `json:"analysis"`
+	PlateauReached bool    `json:"plateau_reached"`
+	NeedsUpdate    bool    `json:"needs_update"`
+	Regenerated    bool    `json:"regenerated"`
+	Error          string  `json:"error,omitempty"`
+	DurationSecs   float64 `json:"duration_seconds"`
+	StartedAt      string  `json:"started_at"`
+	FinishedAt     string  `json:"finished_at"`
+}
+
+type FuzzFlowResponse struct {
+	Current *fuzzing.FuzzFlowSnapshot `json:"current,omitempty"`
+	History []HistoryEntry            `json:"history"`
+}
+
+// FuzzFlowData restores the current repeating fuzz/LLM activity and recent
+// completed analysis rounds from the task workspace.
+func (m *Manager) FuzzFlowData(id string, limit int) FuzzFlowResponse {
+	targetDir := ""
+	if task, exists := m.Get(id); exists {
+		task.mu.RLock()
+		targetDir = task.targetDir
+		task.mu.RUnlock()
+	} else if workspace, name := historicalEntry(id); workspace != "" {
+		targetDir = filepath.Join(workspace, name)
+	}
+	if targetDir == "" {
+		return FuzzFlowResponse{History: []HistoryEntry{}}
+	}
+	logsDir := filepath.Join(targetDir, "logs", "fuzzing")
+	current, _ := fuzzing.LoadFuzzFlow(filepath.Join(logsDir, "fuzz-flow.json"))
+	history := readHistoryFile(filepath.Join(logsDir, "fuzzing-history.jsonl"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if len(history) > limit {
+		history = append([]HistoryEntry(nil), history[len(history)-limit:]...)
+	}
+	return FuzzFlowResponse{Current: current, History: history}
 }
 
 // HistoricalHistory reads fuzzing-history.jsonl from a task's workspace and
@@ -882,26 +923,44 @@ func readHistoryFile(path string) []HistoryEntry {
 			continue
 		}
 		var rec struct {
-			Iteration int `json:"iteration"`
-			Seq       int `json:"seq"`
+			Iteration int    `json:"iteration"`
+			Seq       int    `json:"seq"`
+			Trigger   string `json:"trigger"`
 			Analysis  struct {
-				Analysis string `json:"analysis"`
+				Analysis       string `json:"analysis"`
+				PlateauReached bool   `json:"plateau_reached"`
+				NeedsUpdate    bool   `json:"needs_update"`
 			} `json:"analysis"`
 			Regenerated bool   `json:"regenerated"`
+			Error       string `json:"error"`
 			StartedAt   string `json:"started_at"`
 			FinishedAt  string `json:"finished_at"`
 		}
 		if json.Unmarshal(line, &rec) != nil {
 			continue
 		}
-		entries = append(entries, HistoryEntry{
-			Iteration:   rec.Iteration,
-			Seq:         rec.Seq,
-			Analysis:    rec.Analysis.Analysis,
-			Regenerated: rec.Regenerated,
-			StartedAt:   rec.StartedAt,
-			FinishedAt:  rec.FinishedAt,
-		})
+		entry := HistoryEntry{
+			Iteration:      rec.Iteration,
+			Seq:            rec.Seq,
+			Trigger:        rec.Trigger,
+			Analysis:       rec.Analysis.Analysis,
+			PlateauReached: rec.Analysis.PlateauReached,
+			NeedsUpdate:    rec.Analysis.NeedsUpdate,
+			Regenerated:    rec.Regenerated,
+			Error:          rec.Error,
+			StartedAt:      rec.StartedAt,
+			FinishedAt:     rec.FinishedAt,
+		}
+		if started, err := time.Parse(time.RFC3339Nano, rec.StartedAt); err == nil {
+			if finished, err := time.Parse(time.RFC3339Nano, rec.FinishedAt); err == nil {
+				entry.DurationSecs = finished.Sub(started).Seconds()
+			}
+		}
+		if len(entries) > 0 && entries[len(entries)-1].Iteration == entry.Iteration {
+			entries[len(entries)-1] = entry
+		} else {
+			entries = append(entries, entry)
+		}
 	}
 	return entries
 }

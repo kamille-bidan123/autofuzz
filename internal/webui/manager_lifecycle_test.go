@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"autofuzz/internal/agent"
+	"autofuzz/internal/fuzzing"
 	"autofuzz/internal/state"
 )
 
@@ -122,6 +123,29 @@ func TestPersistedRunningTaskAppearsInterruptedAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, task, "stopped")
+}
+
+func TestFuzzFlowDataRestoresAfterManagerRestart(t *testing.T) {
+	request := lifecycleTestRequest(t)
+	manager := NewManager(context.Background())
+	pending, err := manager.Create(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowPath := filepath.Join(pending.TargetDir, "logs", "fuzzing", "fuzz-flow.json")
+	want := &fuzzing.FuzzFlowSnapshot{
+		Iteration: 5, DriverSeq: 2, Phase: fuzzing.FuzzFlowApplying,
+		Status: "running", Trigger: "interval", Message: "正在校验分析结果",
+	}
+	if err := want.Save(flowPath); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewManager(context.Background())
+	got := restarted.FuzzFlowData(pending.ID, 50)
+	if got.Current == nil || got.Current.Iteration != want.Iteration || got.Current.Phase != want.Phase {
+		t.Fatalf("unexpected restored fuzz flow: %#v", got.Current)
+	}
 }
 
 func TestFailedTaskCanResumeWithSameID(t *testing.T) {

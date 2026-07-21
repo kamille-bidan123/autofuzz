@@ -98,7 +98,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 	}
 	if !a.State.Stage.AtLeast(state.StageComprehended) || !fileExists(filepath.Join(a.State.OutputPath, "comprehender", "semantic_relev.pkl")) {
 		a.stageStarted(state.StageComprehended, "PromeFuzz 正在执行 funcpurp 和 funcrel")
-		if apiAssessment.Count > 300 {
+		if apiAssessment.Count > 2000 {
 			return a.block(state.StageComprehended, fmt.Errorf("%d APIs would make semantic relevance too expensive; narrow public headers", apiAssessment.Count))
 		}
 		if err := a.promeFuzzClient().Comprehend(ctx, a.State.LibraryConfigPath, a.Options.PoolSize); err != nil {
@@ -286,6 +286,15 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 		Runner:       a.Runner,
 		LogsDir:      fuzzLogsDir,
 		EventSink:    a.codexEventSinkFuzzing(),
+		FlowSink: func(snapshot fuzzing.FuzzFlowSnapshot) {
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				return
+			}
+			event := runevent.New("fuzz_flow", string(state.StageFuzzing), snapshot.Status, "fuzz-loop", snapshot.Message)
+			event.Data = data
+			a.emit(event)
+		},
 		LogSink: func(message string) {
 			a.emit(runevent.New("log", string(state.StageFuzzing), "", "autofuzz", message))
 		},
@@ -297,9 +306,13 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 	}
 
 	ctrl := fuzzing.StartFuzzingPhase(ctx, cfg)
+	a.fuzzControllerMu.Lock()
 	a.fuzzController = &ctrl
+	a.fuzzControllerMu.Unlock()
 	err := <-ctrl.Done
+	a.fuzzControllerMu.Lock()
 	a.fuzzController = nil
+	a.fuzzControllerMu.Unlock()
 	return err
 }
 func (a *Agent) codexEventSinkFuzzing() func(json.RawMessage) {
@@ -317,8 +330,12 @@ func (a *Agent) codexEventSinkFuzzing() func(json.RawMessage) {
 	}
 }
 
-func (a *Agent) TriggerFuzzAnalysis() {
-	if a.fuzzController != nil {
-		a.fuzzController.TriggerAnalysis()
+func (a *Agent) TriggerFuzzAnalysis() bool {
+	a.fuzzControllerMu.RLock()
+	controller := a.fuzzController
+	a.fuzzControllerMu.RUnlock()
+	if controller != nil {
+		return controller.TriggerAnalysis()
 	}
+	return false
 }

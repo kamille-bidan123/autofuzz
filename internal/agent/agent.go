@@ -22,14 +22,15 @@ type Agent struct {
 	StatePath string
 	LogsDir   string
 
-	eventMu         sync.RWMutex
-	eventSink       runevent.Sink
-	activeStage     state.Stage
-	fuzzController  *fuzzing.FuzzController
-	corpusMonitorMu sync.RWMutex
-	corpusMonitor   *fuzzing.CorpusMonitor
-	snapshotCmpMu   sync.RWMutex
-	snapshotCmp     map[int]fuzzing.CoverageStatus // frozen past-snapshot exports (cached)
+	eventMu          sync.RWMutex
+	eventSink        runevent.Sink
+	activeStage      state.Stage
+	fuzzControllerMu sync.RWMutex
+	fuzzController   *fuzzing.FuzzController
+	corpusMonitorMu  sync.RWMutex
+	corpusMonitor    *fuzzing.CorpusMonitor
+	snapshotCmpMu    sync.RWMutex
+	snapshotCmp      map[int]fuzzing.CoverageStatus // frozen past-snapshot exports (cached)
 }
 
 func New(options Options) (*Agent, error) {
