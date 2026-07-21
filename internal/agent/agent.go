@@ -140,3 +140,14 @@ func (a *Agent) CoverageData() any {
 	}
 	return m.CoverageCache()
 }
+
+// NewHistoricalAgent creates a minimal Agent for reading historical task
+// data from disk (SnapshotComparison, coverage export). No live fuzzing.
+func NewHistoricalAgent(targetDir string, runState *state.RunState, logsDir string) *Agent {
+	return &Agent{
+		TargetDir:   targetDir,
+		State:       runState,
+		LogsDir:     logsDir,
+		snapshotCmp: map[int]fuzzing.CoverageStatus{},
+	}
+}

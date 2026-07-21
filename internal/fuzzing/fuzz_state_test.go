@@ -57,6 +57,49 @@ func TestLoadFuzzStateMissing(t *testing.T) {
 	}
 }
 
+func TestDriverSourceHashOnlyTracksCompiledSources(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"1.c":       "int driver_one(void) { return 1; }\n",
+		"entry.cpp": "int main() { return 0; }\n",
+		"1.c.bak":   "old backup\n",
+		"notes.txt": "generated notes\n",
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	baseline, err := driverSourceHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"1.c.bak": "new backup\n", "notes.txt": "new notes\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unchanged, err := driverSourceHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged != baseline {
+		t.Fatalf("non-source files changed driver hash: before=%s after=%s", baseline, unchanged)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "1.c"), []byte("int driver_one(void) { return 2; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := driverSourceHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == baseline {
+		t.Fatal("compiled source change did not change driver hash")
+	}
+}
+
 func TestHighestSnapshotSeq(t *testing.T) {
 	logsDir := t.TempDir()
 	// no snapshots dir at all

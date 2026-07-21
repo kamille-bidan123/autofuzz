@@ -35,7 +35,7 @@ const analysisSchema = `{
   "required":["plateau_reached","analysis","needs_update"],
   "properties":{
     "plateau_reached":{"type":"boolean"},
-    "analysis":{"type":"string"},
+    "analysis":{"type":"string","description":"必须使用简体中文描述本轮判断、driver 修改内容、修改原因、目标分支和编译验证结果；函数名、文件名、API 名及代码标识符可保留英文"},
     "needs_update":{"type":"boolean"}
   }
 }`
@@ -137,10 +137,10 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 步骤：
 1. 判断 fuzz 是否已到达平台期（覆盖在较长时间内停滞）。无论结论如何，fuzzer 都会继续运行；该信号仅用于决定本轮是否需要改 driver。
 2. 若是，阅读库源码（%s）和该 fuzz driver 目录下 synthesized/ 里的 entry.c/entry.cpp 分派器及各子 driver 源码（1.c、2.c ……），理解各 API 实现以及每个 driver 如何构造输入。
-3. 选择一条你想覆盖的未覆盖分支，想清楚改进理由：当前 driver 的输入构造 / API 调用顺序为什么走不到那条分支？你要怎么改？改完后预计能让哪条未覆盖分支（给出 function + line）变成覆盖？把这个因果推理想清楚，在最终回复的 "analysis" 字段里写明。
+3. 选择一条你想覆盖的未覆盖分支，想清楚改进理由：当前 driver 的输入构造 / API 调用顺序为什么走不到那条分支？你要怎么改？改完后预计能让哪条未覆盖分支（给出 function + line）变成覆盖？把这个因果推理想清楚，在最终回复的 "analysis" 字段里用简体中文写明。
 4. 用你的文件写入工具直接编辑 %s/synthesized/ 下的相关源文件（如 1.c）——编辑前先把原文件复制一份 .bak 备份（如 cp 1.c 1.c.bak），然后再修改。调整输入构造 / API 调用顺序，使输入能走到你选定的未覆盖分支。不要输出 driver 号或建议文本，自己把代码改掉。
 5. 编译验证：编辑完后，运行 %s/build_cov_synthesized_driver.sh 验证能否编译成功。如果编译失败，读错误信息、修改源码、重试。如果多次重试仍编译不通过，用 .bak 文件回退你的修改（如 cp 1.c.bak 1.c），确保源码恢复到修改前的状态，设 needs_update=false，在 "analysis" 里说明编译失败的原因和回退操作。不要留下编译不过的改动。
-6. 仅当你确实编辑了 driver 文件且编译通过时才设 needs_update=true（harness 会重新合并 entry.c 并 rebuild + 重启 fuzzer）。若没改动、编译没通过（已回退）、或判断不该改，needs_update=false。
+6. 仅当你确实编辑了 driver 文件且编译通过时才设 needs_update=true（harness 会保留当前 synthesized 目录，直接重新编译并重启 fuzzer；不会运行 synthesize_into_one）。若没改动、编译没通过（已回退）、或判断不该改，needs_update=false。
 
 ## Fuzz 运行状态
 %s
@@ -148,11 +148,13 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 ## 覆盖状态（逐 seed replay）
 %s
 
-若 fuzz 未到达平台期：plateau_reached=false 且 needs_update=false。
-若已到达平台期但你判断当前改 driver 也无济于事：plateau_reached=true 且 needs_update=false（fuzzer 会继续运行，下一轮分析时再次评估）。
-否则（到达平台期且你编辑了 driver 并编译通过）：plateau_reached=true 且 needs_update=true，并在 "analysis" 里概述：改了哪个 driver、为什么改（理由）、预计覆盖哪条未覆盖分支（function + line）、编译验证结果。
+若 fuzz 未到达平台期：plateau_reached=false 且 needs_update=false，并在 "analysis" 里用简体中文说明尚未到达平台期的判断依据。
+若已到达平台期但你判断当前改 driver 也无济于事：plateau_reached=true 且 needs_update=false，并在 "analysis" 里用简体中文说明不修改的原因（fuzzer 会继续运行，下一轮分析时再次评估）。
+否则（到达平台期且你编辑了 driver 并编译通过）：plateau_reached=true 且 needs_update=true，并在 "analysis" 里用简体中文概述：改了哪个 driver、为什么改（理由）、预计覆盖哪条未覆盖分支（function + line）、编译验证结果。
 
-最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹、不要写 "## Analysis" 之类的标题）。harness 会用 json.Unmarshal 直接解析你的最终消息，任何 JSON 之外的文字都会导致解析失败、你的改动不会被 rebuild。字段为：plateau_reached（布尔）、analysis（字符串）、needs_update（布尔）。`,
+"analysis" 字段必须使用简体中文完整描述本轮判断和实际改动；函数名、文件名、API 名、分支条件以及代码标识符可以保留英文。不要把整段 analysis 写成英文。
+
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹、不要写 "## Analysis" 之类的标题）。harness 会用 json.Unmarshal 直接解析你的最终消息，任何 JSON 之外的文字都会导致解析失败、你的改动不会被 rebuild。字段为：plateau_reached（布尔）、analysis（简体中文字符串）、needs_update（布尔）。`,
 		req.SourceDir, req.DriverDir, req.DriverDir,
 		req.SourceDir, req.DriverDir, req.DriverDir,
 		string(fuzzJSON), string(coverageJSON))

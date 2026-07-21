@@ -1,15 +1,15 @@
 package fuzzing
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"autofuzz/internal/repository"
 )
 
 // FuzzState is the resumable fuzzing-phase checkpoint, persisted to
@@ -62,12 +62,44 @@ func (s *FuzzState) Save(path string) error {
 }
 
 // driverSourceHash returns a content fingerprint of the synthesized driver
-// sources (the .c files the binary is built from). It is used to detect
+// sources the binary is built from. It is used to detect
 // whether the live driver source has changed since the last build, so resume
 // can reuse the existing binary when nothing changed and build a new snapshot
 // only when it did.
 func driverSourceHash(synthesizedDir string) (string, error) {
-	return repository.TreeHash(synthesizedDir)
+	entries, err := os.ReadDir(synthesizedDir)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	for _, entry := range entries {
+		if entry.IsDir() || !isCompiledDriverSource(entry.Name()) {
+			continue
+		}
+		_, _ = io.WriteString(hash, entry.Name()+"\x00")
+		file, err := os.Open(filepath.Join(synthesizedDir, entry.Name()))
+		if err != nil {
+			return "", err
+		}
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return "", copyErr
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func isCompiledDriverSource(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".c", ".cc", ".cpp", ".cxx":
+		return true
+	default:
+		return false
+	}
 }
 
 // highestSnapshotSeq scans logs/driver-snapshots/fuzz-NNN/ and returns the

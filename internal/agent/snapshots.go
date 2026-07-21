@@ -196,9 +196,9 @@ func countUncovered(cs fuzzing.CoverageStatus) int {
 	return n
 }
 
-// readAnalysisBySeq reads fuzzing-history.jsonl and returns the latest LLM
-// analysis text per driver version (seq). Each line is a FuzzIteration; the
-// last record with a given seq wins (the most recent analysis for that version).
+// readAnalysisBySeq reads fuzzing-history.jsonl and associates each successful
+// driver update with the version it produced. Analysis recorded while vN runs
+// describes the source change that is built and snapshotted as vN+1.
 func readAnalysisBySeq(path string) map[int]string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -211,16 +211,17 @@ func readAnalysisBySeq(path string) map[int]string {
 			continue
 		}
 		var rec struct {
-			Seq      int `json:"seq"`
-			Analysis struct {
+			Seq         int  `json:"seq"`
+			Regenerated bool `json:"regenerated"`
+			Analysis    struct {
 				Analysis string `json:"analysis"`
 			} `json:"analysis"`
 		}
 		if json.Unmarshal([]byte(line), &rec) != nil {
 			continue
 		}
-		if rec.Analysis.Analysis != "" {
-			out[rec.Seq] = rec.Analysis.Analysis
+		if rec.Regenerated && rec.Analysis.Analysis != "" {
+			out[rec.Seq+1] = rec.Analysis.Analysis
 		}
 	}
 	return out

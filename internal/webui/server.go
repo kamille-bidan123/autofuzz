@@ -30,13 +30,18 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /", server.index)
 	server.mux.HandleFunc("GET /api/defaults", server.defaults)
 	server.mux.HandleFunc("GET /api/browse", server.browse)
-	server.mux.HandleFunc("POST /api/runs", server.startRun)
+	server.mux.HandleFunc("POST /api/runs", server.createRun)
+	server.mux.HandleFunc("GET /api/runs", server.listRuns)
 	server.mux.HandleFunc("GET /api/runs/{id}", server.runSnapshot)
+	server.mux.HandleFunc("POST /api/runs/{id}/start", server.startRun)
 	server.mux.HandleFunc("GET /api/runs/{id}/events", server.runEvents)
+	server.mux.HandleFunc("GET /api/runs/{id}/history", server.runHistory)
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
+	server.mux.HandleFunc("GET /api/runs/{id}/snapshots/{seq}/diff", server.snapshotDiff)
+	server.mux.HandleFunc("DELETE /api/runs/{id}", server.deleteRun)
 	server.mux.HandleFunc("GET /static/vendor/", server.serveVendor)
 	return server
 }
@@ -174,7 +179,7 @@ func homeDirectory() string {
 	return "/"
 }
 
-func (s *Server) startRun(response http.ResponseWriter, request *http.Request) {
+func (s *Server) createRun(response http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
 	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -183,9 +188,18 @@ func (s *Server) startRun(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
 		return
 	}
-	task, err := s.manager.Start(input)
+	snapshot, err := s.manager.Create(input)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusCreated, snapshot)
+}
+
+func (s *Server) startRun(response http.ResponseWriter, request *http.Request) {
+	task, err := s.manager.StartTask(request.PathValue("id"))
+	if err != nil {
+		writeError(response, http.StatusConflict, err.Error())
 		return
 	}
 	writeJSON(response, http.StatusAccepted, task.Snapshot())
@@ -193,11 +207,28 @@ func (s *Server) startRun(response http.ResponseWriter, request *http.Request) {
 
 func (s *Server) runSnapshot(response http.ResponseWriter, request *http.Request) {
 	task, exists := s.manager.Get(request.PathValue("id"))
-	if !exists {
+	if exists {
+		writeJSON(response, http.StatusOK, task.Snapshot())
+		return
+	}
+	snap := s.manager.HistoricalSnapshot(request.PathValue("id"))
+	if snap == nil {
 		writeError(response, http.StatusNotFound, "task not found")
 		return
 	}
-	writeJSON(response, http.StatusOK, task.Snapshot())
+	writeJSON(response, http.StatusOK, snap)
+}
+
+func (s *Server) listRuns(response http.ResponseWriter, request *http.Request) {
+	writeJSON(response, http.StatusOK, s.manager.List())
+}
+
+func (s *Server) deleteRun(response http.ResponseWriter, request *http.Request) {
+	if err := s.manager.Delete(request.PathValue("id")); err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) cancelRun(response http.ResponseWriter, request *http.Request) {
@@ -205,7 +236,7 @@ func (s *Server) cancelRun(response http.ResponseWriter, request *http.Request) 
 		writeError(response, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(response, http.StatusAccepted, map[string]string{"status": "cancelling"})
+	writeJSON(response, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
 
 func (s *Server) triggerFuzz(response http.ResponseWriter, request *http.Request) {
@@ -231,6 +262,25 @@ func (s *Server) snapshots(response http.ResponseWriter, request *http.Request) 
 		writeJSON(response, http.StatusOK, []any{})
 		return
 	}
+	writeJSON(response, http.StatusOK, data)
+}
+
+func (s *Server) snapshotDiff(response http.ResponseWriter, request *http.Request) {
+	sequence, err := strconv.Atoi(request.PathValue("seq"))
+	if err != nil || sequence <= 1 {
+		writeError(response, http.StatusBadRequest, "invalid driver version")
+		return
+	}
+	result, err := s.manager.DriverDiff(request.PathValue("id"), sequence)
+	if err != nil {
+		writeError(response, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) runHistory(response http.ResponseWriter, request *http.Request) {
+	data := s.manager.HistoricalHistory(request.PathValue("id"))
 	writeJSON(response, http.StatusOK, data)
 }
 

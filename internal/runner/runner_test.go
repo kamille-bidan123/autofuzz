@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +38,39 @@ func TestRunInputStreamingForwardsLinesAndPreservesLogs(t *testing.T) {
 	}
 	if string(stdout) != "one\ntwo" {
 		t.Fatalf("stdout log = %q", stdout)
+	}
+}
+
+func TestRunForwardsCommandAndCarriageReturnProgress(t *testing.T) {
+	logDir := t.TempDir()
+	type receivedLine struct {
+		command string
+		stream  string
+		line    string
+	}
+	var lines []receivedLine
+	run := Runner{OnLine: func(command, stream, line string) {
+		lines = append(lines, receivedLine{command: command, stream: stream, line: line})
+	}}
+	_, err := run.Run(
+		context.Background(), logDir, "promefuzz", logDir, nil,
+		"sh", "-c", "printf 'step 1\\rstep 2\\r\\ndone\\n'",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(lines) != 4 {
+		t.Fatalf("received lines = %#v", lines)
+	}
+	if lines[0].command != "promefuzz" || lines[0].stream != "command" ||
+		!strings.Contains(lines[0].line, `argv="sh" "-c"`) {
+		t.Fatalf("command event = %#v", lines[0])
+	}
+	for index, want := range []string{"step 1", "step 2", "done"} {
+		got := lines[index+1]
+		if got.stream != "stdout" || got.line != want {
+			t.Fatalf("output event %d = %#v, want %q", index, got, want)
+		}
 	}
 }

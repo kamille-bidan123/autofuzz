@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -86,6 +87,9 @@ func (r Runner) RunInputStreaming(
 
 	metadata := fmt.Sprintf("cwd: %s\nargv: %s\n", dir, quoteArgv(argv))
 	_ = os.WriteFile(filepath.Join(logDir, name+".command.log"), []byte(metadata), 0o644)
+	if r.OnLine != nil {
+		r.OnLine(name, "command", fmt.Sprintf("cwd=%s argv=%s", dir, quoteArgv(argv)))
+	}
 
 	started := time.Now()
 	err = command.Start()
@@ -133,9 +137,10 @@ func combineLineCallbacks(command, stream string, global func(string, string, st
 }
 
 type lineWriter struct {
-	writers  []io.Writer
-	callback func(string)
-	pending  []byte
+	writers       []io.Writer
+	callback      func(string)
+	pending       []byte
+	afterCarriage bool
 }
 
 func (w *lineWriter) Write(data []byte) (int, error) {
@@ -149,22 +154,31 @@ func (w *lineWriter) Write(data []byte) (int, error) {
 	}
 	w.pending = append(w.pending, data...)
 	for {
-		index := strings.IndexByte(string(w.pending), '\n')
+		if w.afterCarriage && len(w.pending) > 0 {
+			if w.pending[0] == '\n' {
+				w.pending = w.pending[1:]
+			}
+			w.afterCarriage = false
+		}
+		index := bytes.IndexAny(w.pending, "\r\n")
 		if index < 0 {
 			break
 		}
-		line := strings.TrimSuffix(string(w.pending[:index]), "\r")
+		delimiter := w.pending[index]
+		line := string(w.pending[:index])
 		w.pending = w.pending[index+1:]
 		w.callback(line)
+		w.afterCarriage = delimiter == '\r'
 	}
 	return len(data), nil
 }
 
 func (w *lineWriter) Flush() {
 	if w.callback != nil && len(w.pending) > 0 {
-		w.callback(strings.TrimSuffix(string(w.pending), "\r"))
+		w.callback(string(w.pending))
 	}
 	w.pending = nil
+	w.afterCarriage = false
 }
 
 func quoteArgv(argv []string) string {

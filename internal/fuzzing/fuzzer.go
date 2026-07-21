@@ -32,7 +32,6 @@ type FuzzConfig struct {
 	Runner       runner.Runner
 	LogsDir      string
 	EventSink    func(json.RawMessage)
-	PythonPath   string // for the synthesize_into_one script
 	// MaxSeeds caps how many corpus seeds are replayed per analysis cycle
 	// (largest by size). 0 means DefaultMaxCorpusSeeds.
 	MaxSeeds int
@@ -364,13 +363,27 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		cfg.logf("[fuzzing] iteration %d: plateau=%v needs_update=%v\n",
 			iteration, analysisResp.PlateauReached, analysisResp.NeedsUpdate)
 
+		// A model response is not sufficient evidence that the driver changed.
+		// Only compiled source files affect the binary; backup or note files must
+		// not create a duplicate driver version.
+		if analysisResp.NeedsUpdate {
+			updatedHash, hashErr := driverSourceHash(synthesizedDir)
+			if hashErr != nil {
+				cfg.logf("[fuzzing] iteration %d: cannot verify driver source update: %v; keeping current version\n", iteration, hashErr)
+				analysisResp.NeedsUpdate = false
+			} else if updatedHash == lastBuiltHash {
+				cfg.logf("[fuzzing] iteration %d: Codex reported an update but compiled driver sources are unchanged; keeping v%d\n", iteration, seq)
+				analysisResp.NeedsUpdate = false
+			}
+		}
+
 		appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: false, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
 
 		// Codex edits the synthesized driver sources directly (it has write
-		// access to DriverDir). If it reports edits, re-merge entry.c and
-		// rebuild+restart the fuzzer with the new driver (new snapshot + crash dir).
+		// access to DriverDir). Preserve those files exactly and rebuild+restart
+		// the fuzzer with the new driver (new snapshot + crash dir).
 		if analysisResp.NeedsUpdate {
-			cfg.logf("[fuzzing] iteration %d: Codex edited driver sources, re-synthesizing\n", iteration)
+			cfg.logf("[fuzzing] iteration %d: Codex edited driver sources, scheduling rebuild\n", iteration)
 
 			// Stop the corpus monitor and fuzzer before rebuilding the driver.
 			if monitor != nil {
@@ -385,44 +398,24 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			}
 			fuzzerRunning = false
 
-			// Re-synthesize the merged driver (entry.c). Logs are ephemeral.
-			synthesizeScript := filepath.Join(cfg.DriverDir, "synthesize_into_one")
-			if fileExists(synthesizeScript) {
-				synTmp, err := os.MkdirTemp(cfg.LogsDir, "synth-")
-				if err != nil {
-					return err
-				}
-				synCtx, synCancel := context.WithTimeout(ctx, 2*time.Minute)
-				_, runErr := cfg.Runner.Run(synCtx, synTmp, "synthesize", cfg.DriverDir, nil,
-					cfg.PythonPath, synthesizeScript, cfg.DriverDir)
-				synCancel()
-				_ = os.RemoveAll(synTmp)
-				if runErr != nil {
-					cfg.logf("[fuzzing] re-synthesis failed: %v\n", runErr)
-					needRebuild = true
-					persist()
-					continue
-				}
-			}
-
 			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: iteration, Seq: seq, FuzzStatus: fuzzStatus, Coverage: corpusCov, Analysis: analysisResp, Regenerated: true, StartedAt: time.Now().Add(-time.Duration(fuzzStatus.DurationSeconds) * time.Second), FinishedAt: time.Now()})
 
-		// Driver changed: rebuild and restart the fuzzer on the next loop
-		// (new seq, new snapshot, crashes go to the new snapshot dir).
-		needRebuild = true
-		persist()
-		continue
-	}
+			// Driver changed: rebuild and restart the fuzzer on the next loop
+			// (new seq, new snapshot, crashes go to the new snapshot dir).
+			needRebuild = true
+			persist()
+			continue
+		}
 
-	// No driver update needed. Whether or not plateau is reached, the
-	// fuzzer keeps running into the next interval. Crash triage is
-	// deferred to phase exit (ctx cancel or fuzzer exit).
-	if analysisResp.PlateauReached {
-		cfg.logf("[fuzzing] iteration %d: plateau reached but no driver update, continuing to fuzz\n", iteration)
-	} else {
-		cfg.logf("[fuzzing] iteration %d: no plateau yet, continuing\n", iteration)
-	}
-	persist()
+		// No driver update needed. Whether or not plateau is reached, the
+		// fuzzer keeps running into the next interval. Crash triage is
+		// deferred to phase exit (ctx cancel or fuzzer exit).
+		if analysisResp.PlateauReached {
+			cfg.logf("[fuzzing] iteration %d: plateau reached but no driver update, continuing to fuzz\n", iteration)
+		} else {
+			cfg.logf("[fuzzing] iteration %d: no plateau yet, continuing\n", iteration)
+		}
+		persist()
 	}
 }
 

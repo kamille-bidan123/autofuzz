@@ -28,6 +28,24 @@ func TestDefaultsEndpoint(t *testing.T) {
 	}
 }
 
+func TestIndexShowsTaskListBeforeTaskDetails(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, marker := range []string{`id="taskListView"`, `id="createModal"`, `id="taskDetailView"`, `snap-version-button`, `/start`} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("index is missing %s", marker)
+		}
+	}
+	if strings.Contains(body, `id="taskSelBtn"`) || strings.Contains(body, "localStorage") {
+		t.Fatal("index still contains the old task auto-selection UI")
+	}
+}
+
 func TestSSEIncludesCodexJSONData(t *testing.T) {
 	task := &Task{
 		id: "test", status: "completed", createdAt: time.Now(), stages: map[string]string{},

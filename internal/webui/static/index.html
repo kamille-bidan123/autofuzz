@@ -132,6 +132,7 @@
     .debug { color: var(--purple); background: var(--purple-soft); }
     .notice { margin-top: 16px; padding: 11px 13px; border-radius: 11px; background: #fff8e8; color: #815e21; font-size: 12px; line-height: 1.55; }
     .content { display: grid; gap: 22px; min-width: 0; }
+    .content[hidden] { display: none !important; }
     .stages { padding: 20px; display: grid; grid-template-columns: repeat(4, minmax(125px, 1fr)); gap: 12px; }
     .stage {
       position: relative; min-height: 126px; padding: 14px; border-radius: 16px;
@@ -181,14 +182,31 @@
     .cov-updated { margin-left: auto; font-size: 11px; color: var(--muted); align-self: flex-end; }
     /* snapshot comparison panel */
     .snap-table { max-height: 420px; overflow: auto; padding: 8px 12px; }
-    .snap-row { display: grid; grid-template-columns: 44px 52px 100px 100px 56px 72px 56px 1fr; gap: 6px; padding: 5px 6px; border-bottom: 1px dashed var(--line); align-items: center; font-size: 11px; }
+    .snap-row { display: grid; grid-template-columns: 44px 52px 100px 100px 56px 72px 56px 1fr; gap: 6px; padding: 8px 6px; border-bottom: 1px dashed var(--line); align-items: start; font-size: 11px; }
     .snap-row.head { font-weight: 800; color: var(--muted); border-bottom: 2px solid var(--line); position: sticky; top: 0; background: var(--card); }
     .snap-delta { font-weight: 700; }
     .snap-delta.pos { color: var(--green); }
     .snap-delta.neg { color: var(--orange); }
     .snap-delta.zero { color: var(--muted); }
-    .snap-analysis { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+    .snap-analysis { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
     .snap-analysis:hover { color: var(--text); }
+    .snap-row.clickable { cursor: pointer; transition: background .15s ease; }
+    .snap-row.clickable:hover { background: var(--blue-soft); }
+    .snap-version-button { border: 0; background: transparent; color: var(--blue); padding: 2px 0; cursor: pointer; font: inherit; font-weight: 900; }
+    .snap-version-button::after { content: " ↗"; font-size: 9px; }
+    .snap-version-button:hover { text-decoration: underline; }
+    .snapshot-diff-view { display: block; width: 100%; }
+    .snapshot-diff-view[hidden] { display: none !important; }
+    .diff-page-head { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .diff-page-head h2 { margin: 0; font-size: 18px; }
+    .diff-page-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .diff-code { margin: 0; max-height: 72vh; overflow: auto; padding: 14px 0; background: #0d1117; color: #c9d1d9; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, "Cascadia Code", monospace; tab-size: 2; }
+    .diff-line { display: block; min-width: max-content; padding: 0 16px; white-space: pre; }
+    .diff-line.added { background: rgba(46, 160, 67, .22); color: #aff5b4; }
+    .diff-line.removed { background: rgba(248, 81, 73, .22); color: #ffdcd7; }
+    .diff-line.hunk { background: rgba(56, 139, 253, .15); color: #a5d6ff; }
+    .diff-line.file { color: #d2a8ff; font-weight: 800; }
+    .diff-empty { padding: 60px 20px; text-align: center; color: var(--muted); }
     .cov-list { max-height: 360px; overflow: auto; padding: 10px 16px; }
     .cov-fn { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
     .cov-fn summary { padding: 9px 12px; cursor: pointer; font-size: 12.5px; font-weight: 800; display: flex; gap: 10px; align-items: center; list-style: none; }
@@ -207,8 +225,66 @@
     .cov-branch .br-missing { color: var(--red); font-weight: 700; }
     .cov-branch .br-counts { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .cov-empty { padding: 30px; text-align: center; color: var(--muted); font-size: 13px; }
+    /* task selector dropdown */
+    .task-sel { position: relative; margin-left: auto; }
+    .task-sel-btn { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .task-sel-btn:hover { border-color: var(--blue); }
+    .task-dropdown { position: absolute; right: 0; top: 100%; margin-top: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.15); min-width: 320px; max-height: 420px; overflow: auto; z-index: 200; display: none; }
+    .task-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px dashed var(--line); display: flex; align-items: center; gap: 8px; }
+    .task-item:hover { background: var(--blue-soft); }
+    .task-item .ti-name { font-weight: 700; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .task-item .ti-stage { font-size: 10px; color: var(--muted); }
+    .task-badge { font-size: 10px; padding: 2px 7px; border-radius: 4px; font-weight: 700; }
+    .task-badge.running { background: #e3f2fd; color: #1976d2; }
+    .task-badge.completed { background: #e8f5e9; color: #2e7d32; }
+    .task-badge.failed, .task-badge.interrupted { background: #fbe9e7; color: #c62828; }
+    .task-badge.missing { background: #f5f5f5; color: #999; }
+    .task-del { font-size: 14px; color: var(--muted); cursor: pointer; padding: 0 4px; }
+    .task-del:hover { color: var(--red); }
+    .page-view { display: block; }
+    .page-view[hidden] { display: none; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    .page-head h2 { margin: 0; font-size: 22px; }
+    .page-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+    .task-list-panel { overflow: hidden; }
+    .task-list-head, .task-row { display: grid; grid-template-columns: minmax(150px, 1.1fr) minmax(220px, 2fr) 110px 100px 140px 190px; align-items: center; gap: 14px; }
+    .task-list-head { padding: 10px 18px; background: #f7f9fc; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .task-row { padding: 15px 18px; border-bottom: 1px solid var(--line); cursor: pointer; transition: background .15s ease; }
+    .task-row:last-child { border-bottom: 0; }
+    .task-row:hover { background: #f8faff; }
+    .task-name { min-width: 0; font-size: 13px; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-repo { min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-stage, .task-time { color: var(--muted); font-size: 12px; }
+    .task-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+    .task-action { border: 1px solid var(--line); background: white; border-radius: 7px; padding: 6px 11px; cursor: pointer; font-size: 12px; font-weight: 800; }
+    .task-action:hover { border-color: var(--blue); color: var(--blue); }
+    .task-action.primary { background: var(--blue); border-color: var(--blue); color: white; }
+    .task-action.danger { border-color: #ffc9cf; color: var(--red); }
+    .task-action:disabled { opacity: .55; cursor: default; }
+    .task-empty { padding: 70px 20px; text-align: center; color: var(--muted); }
+    .task-badge.pending { background: #f1f3f6; color: #596579; }
+    .task-badge.stopping { background: #fff5df; color: #9b6712; }
+    .task-badge.stopped, .task-badge.interrupted { background: #fff3e8; color: #aa5c13; }
+    .run-status.pending { color: #596579; background: #f1f3f6; }
+    .run-status.stopping, .run-status.stopped, .run-status.interrupted { color: #9b6712; background: #fff5df; border-color: #f0d497; }
+    .detail-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .detail-toolbar .run-status { margin-left: auto; }
+    .back-button { border: 0; background: transparent; color: var(--blue); cursor: pointer; padding: 6px 0; font-weight: 800; }
+    .detail-title { min-width: 0; }
+    .detail-title h2 { margin: 0; font-size: 20px; }
+    .detail-title p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .detail-actions { display: flex; gap: 8px; }
+    .modal { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 24px; background: rgba(16, 27, 48, .48); }
+    .modal[hidden] { display: none; }
+    .modal-card { width: min(820px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--card); border-radius: 16px; box-shadow: 0 24px 70px rgba(15, 28, 50, .28); }
+    .modal-head { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; background: white; border-bottom: 1px solid var(--line); }
+    .modal-head h2 { margin: 0; font-size: 18px; }
+    .modal-close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 24px; }
+    .modal-body { padding: 20px; }
+    .list-notice { min-height: 20px; margin: 10px 0 14px; color: var(--muted); font-size: 12px; }
     @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .stages { grid-template-columns: repeat(4, 1fr); } }
-    @media (max-width: 720px) { .shell { width: min(100% - 20px, 1480px); padding-top: 18px; } header { align-items: flex-start; } .form-grid, .streams { grid-template-columns: 1fr; } .stream + .stream { border-left: 0; border-top: 1px solid var(--line); } .stages { grid-template-columns: repeat(2, 1fr); } .stage:nth-child(2n)::after { display: none; } }
+    @media (max-width: 900px) { .task-list-head { display: none; } .task-row { grid-template-columns: 1fr auto; } .task-repo { grid-column: 1 / -1; } .task-stage, .task-time { display: none; } .task-actions { grid-column: 2; grid-row: 1; } }
+    @media (max-width: 720px) { .shell { width: min(100% - 20px, 1480px); padding-top: 18px; } header { align-items: flex-start; } .form-grid, .streams { grid-template-columns: 1fr; } .stream + .stream { border-left: 0; border-top: 1px solid var(--line); } .stages { grid-template-columns: repeat(2, 1fr); } .stage:nth-child(2n)::after { display: none; } .detail-toolbar { align-items: flex-start; flex-wrap: wrap; } .detail-toolbar .run-status { margin-left: 0; } .detail-actions { width: 100%; } .modal { padding: 10px; } .modal-card { max-height: calc(100vh - 20px); } }
   </style>
 </head>
 <body>
@@ -218,12 +294,71 @@
       <div class="logo">⚙</div>
       <div><h1>Autofuzz 控制台</h1><p class="subtitle">从源码仓库到可验证 fuzz driver 的全自动流水线</p></div>
     </div>
-    <div id="runStatus" class="run-status">未启动</div>
   </header>
 
-  <div class="layout">
-    <section class="panel form-panel">
-      <div class="panel-head"><h2>运行配置</h2><p>配置项与 autofuzz CLI 一一对应。源码准备后会直接执行目标仓库构建代码。</p></div>
+  <section id="taskListView" class="page-view">
+    <div class="page-head">
+      <div><h2>Task 列表</h2><p>创建、启动并查看所有 Autofuzz 任务。</p></div>
+      <button id="openCreateModal" class="primary" type="button">＋ 创建 Task</button>
+    </div>
+    <div id="listMessage" class="list-notice"></div>
+    <section class="panel task-list-panel">
+      <div class="task-list-head"><span>Task</span><span>仓库</span><span>阶段</span><span>状态</span><span>创建时间</span><span style="text-align:right">操作</span></div>
+      <div id="taskList"><div class="task-empty">正在加载 Task…</div></div>
+    </section>
+  </section>
+
+  <section id="taskDetailView" class="page-view" hidden>
+    <div class="detail-toolbar">
+      <button id="backTaskList" class="back-button" type="button">← 返回任务列表</button>
+      <div class="detail-title"><h2 id="taskDetailName">Task 详情</h2><p id="taskDetailRepo"></p></div>
+      <div id="runStatus" class="run-status">未启动</div>
+      <div class="detail-actions"><button id="cancelButton" class="danger" type="button" disabled>停止</button><button id="triggerFuzzButton" class="debug" type="button" disabled title="在 fuzzing 阶段手动触发 LLM 分析优化">🔬 触发分析</button></div>
+    </div>
+    <div id="detailMessage" class="list-notice"></div>
+    <main id="taskOverview" class="content">
+      <section class="panel">
+        <div class="panel-head"><h2>执行阶段</h2><p>旋转图标表示当前正在执行的阶段；橙色 Codex 阶段会产生结构化 JSON 事件。</p></div>
+        <div id="stages" class="stages"></div>
+        <div id="runMeta" class="meta">尚未选择任务</div>
+      </section>
+
+      <section class="panel" id="covPanel" style="display:none">
+        <div class="panel-head"><h2>覆盖数据</h2><p>后台每分钟 llvm-cov export;显示当前 driver 版本的函数级覆盖,部分覆盖的函数可展开查看未覆盖分支。</p></div>
+        <div id="covSummary" class="cov-summary"></div>
+        <div id="covList" class="cov-list"><div class="cov-empty">覆盖数据将在 fuzzing 阶段开始后可用</div></div>
+      </section>
+
+      <section class="panel" id="snapPanel" style="display:none">
+        <div class="panel-head"><h2>Driver 版本对比</h2><p>每次 rebuild 后覆盖率的变化；点击 v2 及之后的版本或整行可查看与上一版本的源码 Diff。</p></div>
+        <div id="snapTable" class="snap-table"><div class="cov-empty">fuzzing 阶段开始后可用</div></div>
+      </section>
+
+      <section class="panel streams">
+        <div class="stream">
+          <div class="stream-title"><h3>🤖 Codex CLI 实时事件</h3><span id="codexCount">0 条</span></div>
+          <div id="codexEvents" class="event-list"><div class="empty">built / configured 阶段的<br>Codex JSONL 事件将在这里出现</div></div>
+        </div>
+        <div class="stream">
+          <div class="stream-title"><h3>运行日志</h3><span id="logCount">0 行</span></div>
+          <div id="runtimeLogs" class="event-list"><div class="empty">等待 Autofuzz 启动</div></div>
+        </div>
+      </section>
+    </main>
+    <section id="snapshotDiffView" class="snapshot-diff-view" hidden>
+      <div class="diff-page-head">
+        <button id="backSnapshotDiff" class="back-button" type="button">← 返回 Task 详情</button>
+        <div><h2 id="snapshotDiffTitle">Driver Diff</h2><p id="snapshotDiffMeta"></p></div>
+      </div>
+      <section class="panel"><div id="driverDiff" class="diff-empty">正在加载 Driver 差异…</div></section>
+    </section>
+  </section>
+</div>
+
+<div id="createModal" class="modal" hidden>
+  <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="createModalTitle">
+    <div class="modal-head"><h2 id="createModalTitle">创建 Task</h2><button id="closeCreateModal" class="modal-close" type="button" aria-label="关闭">×</button></div>
+    <div class="modal-body">
       <form id="runForm">
         <div class="form-grid">
           <div class="field full"><label for="repository_url">本地目录或 GitHub/GitCode 链接 *</label><div class="path-picker"><input id="repository_url" required placeholder="/path/to/library 或 https://github.com/...git 或 https://gitcode.com/...git"><button type="button" class="pp-btn" tabindex="-1">📂</button><div class="pp-dropdown"></div></div></div>
@@ -248,41 +383,11 @@
             </div>
           </div>
         </details>
-        <div class="actions"><button id="startButton" class="primary" type="submit">启动 Autofuzz</button><button id="cancelButton" class="danger" type="button" disabled>取消</button><button id="triggerFuzzButton" class="debug" type="button" disabled title="在 fuzzing 阶段手动触发 LLM 分析优化">🔬 触发分析</button></div>
+        <div class="actions"><button id="createTaskButton" class="primary" type="submit">创建 Task</button><button id="cancelCreateTask" type="button">取消</button></div>
         <div id="formMessage" class="notice">Web 服务默认仅监听本机。对于不可信仓库，请在一次性容器或隔离虚拟机中运行。</div>
       </form>
-    </section>
-
-    <main class="content">
-      <section class="panel">
-        <div class="panel-head"><h2>执行阶段</h2><p>旋转图标表示当前正在执行的阶段；橙色 Codex 阶段会产生结构化 JSON 事件。</p></div>
-        <div id="stages" class="stages"></div>
-        <div id="runMeta" class="meta">尚未创建任务</div>
-      </section>
-
-      <section class="panel" id="covPanel" style="display:none">
-        <div class="panel-head"><h2>覆盖数据</h2><p>后台每分钟 llvm-cov export;显示当前 driver 版本的函数级覆盖,部分覆盖的函数可展开查看未覆盖分支。</p></div>
-        <div id="covSummary" class="cov-summary"></div>
-        <div id="covList" class="cov-list"><div class="cov-empty">覆盖数据将在 fuzzing 阶段开始后可用</div></div>
-      </section>
-
-      <section class="panel" id="snapPanel" style="display:none">
-        <div class="panel-head"><h2>Driver 版本对比</h2><p>每次 rebuild 后覆盖率的变化;数据来自各快照的 aggregate.profdata 导出 + crash/corpus 计数 + LLM 分析文本。</p></div>
-        <div id="snapTable" class="snap-table"><div class="cov-empty">fuzzing 阶段开始后可用</div></div>
-      </section>
-
-      <section class="panel streams">
-        <div class="stream">
-          <div class="stream-title"><h3>🤖 Codex CLI 实时事件</h3><span id="codexCount">0 条</span></div>
-          <div id="codexEvents" class="event-list"><div class="empty">built / configured 阶段的<br>Codex JSONL 事件将在这里出现</div></div>
-        </div>
-        <div class="stream">
-          <div class="stream-title"><h3>运行日志</h3><span id="logCount">0 行</span></div>
-          <div id="runtimeLogs" class="event-list"><div class="empty">等待 Autofuzz 启动</div></div>
-        </div>
-      </section>
-    </main>
-  </div>
+    </div>
+  </section>
 </div>
 
 <script>
@@ -299,6 +404,14 @@
   let covPollTimer = null;
   let snapPollTimer = null;
   let waitingForAnalysis = false;
+  let taskSelectionVersion = 0;
+  let listPollTimer = null;
+  let diffRequestVersion = 0;
+
+  const statusLabels = {
+    pending: '待启动', running: '运行中', stopping: '停止中', stopped: '已停止',
+    interrupted: '已中断', completed: '已完成', failed: '运行失败', missing: '数据缺失'
+  };
 
   const $ = id => document.getElementById(id);
 
@@ -446,47 +559,231 @@
           waitingForAnalysis = false;
           $('triggerFuzzButton').disabled = false;
           if (m.includes('Codex analysis error')) {
-            $('formMessage').textContent = 'LLM 分析失败,见日志';
+            $('detailMessage').textContent = 'LLM 分析失败,见日志';
           } else if (m.includes('Codex edited driver sources')) {
-            $('formMessage').textContent = 'LLM 分析完成,正在 rebuild driver';
+            $('detailMessage').textContent = 'LLM 分析完成,正在 rebuild driver';
           } else {
-            $('formMessage').textContent = 'LLM 分析完成';
+            $('detailMessage').textContent = 'LLM 分析完成';
           }
         }
       }
     } else if (event.kind === 'run') {
         appendLog(event);
         if (event.status === 'running') setRunStatus('running', '运行中');
+        if (event.status === 'stopping') { setRunStatus('stopping', '停止中'); $('cancelButton').disabled = true; }
         if (event.status === 'completed') finishUI('completed', '已完成');
         if (event.status === 'failed') finishUI('failed', '运行失败');
+        if (event.status === 'stopped') finishUI('stopped', '已停止');
+        if (event.status === 'interrupted') finishUI('interrupted', '已中断');
     }
   }
 
   function finishUI(status, label) {
-    setRunStatus(status, label); $('startButton').disabled = false; $('cancelButton').disabled = true; $('triggerFuzzButton').disabled = true;
+    setRunStatus(status, label); $('cancelButton').disabled = true; $('triggerFuzzButton').disabled = true;
     waitingForAnalysis = false;
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
     if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
     if (taskId) refreshSnapshot();
+    loadTaskList();
   }
 
-  async function pollCoverage() {
-    if (!taskId) return;
+  async function loadTaskList() {
     try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/coverage`);
+      const res = await fetch('/api/runs');
+      if (!res.ok) throw new Error('Task 列表读取失败');
+      const tasks = await res.json();
+      renderTaskList(tasks || []);
+    } catch (error) {
+      $('listMessage').textContent = error.message;
+    }
+  }
+
+  function renderTaskList(tasks) {
+    const list = $('taskList');
+    if (!tasks.length) {
+      list.innerHTML = '<div class="task-empty">暂无 Task，点击右上角“创建 Task”开始配置。</div>';
+      return;
+    }
+    list.replaceChildren(...tasks.map(task => {
+      const row = document.createElement('div');
+      row.className = 'task-row';
+      row.addEventListener('click', () => showTaskDetail(task.id));
+
+      const name = document.createElement('div'); name.className = 'task-name'; name.textContent = task.name || task.id;
+      const repo = document.createElement('div'); repo.className = 'task-repo'; repo.textContent = task.repository_url || '-'; repo.title = task.repository_url || '';
+      const stage = document.createElement('div'); stage.className = 'task-stage'; stage.textContent = task.current_stage || '-';
+      const status = document.createElement('div');
+      const badge = document.createElement('span'); badge.className = `task-badge ${task.status}`; badge.textContent = statusLabels[task.status] || task.status;
+      status.appendChild(badge);
+      const createdAt = document.createElement('div'); createdAt.className = 'task-time'; createdAt.textContent = task.created_at ? new Date(task.created_at).toLocaleString() : '-';
+      const actions = document.createElement('div'); actions.className = 'task-actions';
+      actions.addEventListener('click', event => event.stopPropagation());
+
+      const remove = document.createElement('button'); remove.className = 'task-action danger'; remove.type = 'button'; remove.textContent = '删除';
+      remove.addEventListener('click', () => deleteTask(task.id)); actions.appendChild(remove);
+      if (task.status === 'pending') actions.appendChild(taskAction('开始', 'primary', () => startTask(task.id)));
+      if (task.status === 'running') actions.appendChild(taskAction('停止', 'danger', () => stopTask(task.id)));
+      if (task.status === 'stopping') { const button = taskAction('停止中', '', () => {}); button.disabled = true; actions.appendChild(button); }
+      if (task.status === 'stopped' || task.status === 'interrupted' || task.status === 'failed') actions.appendChild(taskAction('恢复', 'primary', () => startTask(task.id)));
+
+      row.append(name, repo, stage, status, createdAt, actions);
+      return row;
+    }));
+  }
+
+  function taskAction(label, className, handler) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = `task-action ${className}`; button.textContent = label;
+    button.addEventListener('click', handler);
+    return button;
+  }
+
+  async function startTask(id) {
+    $('listMessage').textContent = '正在启动 Task…';
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/start`, {method: 'POST'});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Task 启动失败');
+      $('listMessage').textContent = `Task ${id} 已启动`;
+      await loadTaskList();
+    } catch (error) {
+      $('listMessage').textContent = error.message;
+    }
+  }
+
+  async function stopTask(id) {
+    if (!confirm('确认停止此 Task？之后可以从当前状态恢复。')) return;
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/cancel`, {method: 'POST'});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Task 停止失败');
+      $('listMessage').textContent = `Task ${id} 正在停止`;
+      await loadTaskList();
+    } catch (error) {
+      $('listMessage').textContent = error.message;
+    }
+  }
+
+  function showTaskList() {
+    taskSelectionVersion++;
+    diffRequestVersion++;
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
+    if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
+    taskId = null;
+    $('taskDetailView').hidden = true;
+    $('taskListView').hidden = false;
+    loadTaskList();
+    if (listPollTimer) clearInterval(listPollTimer);
+    listPollTimer = setInterval(loadTaskList, 5000);
+  }
+
+  function showTaskDetail(id) {
+    if (listPollTimer) { clearInterval(listPollTimer); listPollTimer = null; }
+    $('taskListView').hidden = true;
+    $('taskDetailView').hidden = false;
+    setSnapshotDiffVisible(false);
+    selectTask(id);
+    setTimeout(() => { try { termFit.fit(); } catch(e) {} }, 0);
+  }
+
+  async function deleteTask(id) {
+    if (!confirm('确认删除此任务记录？(不会删除工作目录数据)')) return;
+    const response = await fetch(`/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const result = await response.json();
+    if (!response.ok) { $('listMessage').textContent = result.error || '删除失败'; return; }
+    if (taskId === id) showTaskList();
+    else loadTaskList();
+  }
+
+  $('backTaskList').addEventListener('click', showTaskList);
+
+  async function selectTask(id) {
+    const selectionVersion = ++taskSelectionVersion;
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    if (covPollTimer) { clearInterval(covPollTimer); covPollTimer = null; }
+    if (snapPollTimer) { clearInterval(snapPollTimer); snapPollTimer = null; }
+    waitingForAnalysis = false;
+    taskId = id;
+    $('detailMessage').textContent = '';
+    renderStages([]);
+    setRunStatus('', '加载中');
+    $('cancelButton').disabled = true;
+    $('triggerFuzzButton').disabled = true;
+    $('covPanel').style.display = 'none';
+    $('snapPanel').style.display = 'none';
+    clearStream('codexEvents', '正在加载任务事件');
+    clearStream('runtimeLogs', '正在加载任务日志');
+    logCount = 0; codexCount = 0; $('logCount').textContent = '0 行'; $('codexCount').textContent = '0 条';
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}`);
+      if (selectionVersion !== taskSelectionVersion || taskId !== id) return;
+      if (!response.ok) throw new Error('任务快照读取失败');
+      const snap = await response.json();
+      if (selectionVersion !== taskSelectionVersion || taskId !== id) return;
+      renderStages(snap.stages || []);
+      $('taskDetailName').textContent = snap.request?.repository_url?.split('/').filter(Boolean).pop()?.replace(/\.git$/, '') || id;
+      $('taskDetailRepo').textContent = snap.request?.repository_url || '';
+      $('runMeta').textContent = `任务 ${id} · workspace: ${snap.target_dir || ''}${snap.error ? ' · 错误: ' + snap.error : ''}`;
+      setRunStatus(snap.status, statusLabels[snap.status] || snap.status);
+      if (snap.status === 'running' || snap.status === 'stopping') {
+        $('cancelButton').disabled = snap.status !== 'running';
+        const runningStage = (snap.stages || []).find(stage => stage.status === 'running');
+        updateTriggerButton(runningStage?.id, runningStage?.status);
+        connectEvents(id);
+        pollCoverage(id); covPollTimer = setInterval(() => pollCoverage(id), 15000);
+        pollSnapshots(id); snapPollTimer = setInterval(() => pollSnapshots(id), 30000);
+      } else if (snap.status !== 'pending') {
+        fetchTaskHistory(id);
+        pollCoverage(id);
+        pollSnapshots(id);
+      }
+    } catch (error) {
+      if (selectionVersion !== taskSelectionVersion || taskId !== id) return;
+      setRunStatus('failed', '加载失败');
+      $('detailMessage').textContent = error.message;
+    }
+  }
+
+  async function fetchTaskHistory(id) {
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(id)}/history`);
+      if (!res.ok) return;
+      const entries = await res.json();
+      if (taskId !== id) return;
+      if (!entries || entries.length === 0) return;
+      if (!term) return;
+      term.writeln('\x1b[36m=== fuzzing 迭代历史 ===\x1b[0m');
+      entries.forEach(e => {
+        const ts = e.started_at ? e.started_at.slice(11, 19) : '--:--:--';
+        const tag = e.regenerated ? ' [rebuild]' : '';
+        const a = e.analysis ? e.analysis.slice(0, 120) : '(无分析)';
+        term.writeln(`\x1b[33m[${ts}]\x1b[0m iter=${e.iteration} v${e.seq}${tag} ${a}`);
+        logCount++; $('logCount').textContent = `${logCount} 行`;
+      });
+      term.writeln(`\x1b[36m=== 共 ${entries.length} 条迭代记录 ===\x1b[0m`);
+    } catch (e) {}
+  }
+
+  async function pollCoverage(id = taskId) {
+    if (!id) return;
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/coverage`);
       if (!response.ok) return;
       const data = await response.json();
+      if (taskId !== id) return;
       renderCoverage(data);
     } catch (e) { /* ignore fetch errors, will retry next tick */ }
   }
 
-  async function pollSnapshots() {
-    if (!taskId) return;
+  async function pollSnapshots(id = taskId) {
+    if (!id) return;
     try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/snapshots`);
+      const response = await fetch(`/api/runs/${encodeURIComponent(id)}/snapshots`);
       if (!response.ok) return;
       const data = await response.json();
+      if (taskId !== id) return;
       renderSnapshots(data);
     } catch (e) { /* ignore */ }
   }
@@ -504,15 +801,87 @@
     let html = '<div class="snap-row head"><div>v</div><div>时间</div><div>已执行(±)</div><div>未覆盖(±)</div><div>crash</div><div>unique</div><div>corpus</div><div>LLM 改了什么</div></div>';
     snaps.forEach(s => {
       const a = s.analysis || '(无分析)';
-      const aShort = a.length > 80 ? a.slice(0, 80) + '…' : a;
-      html += `<div class="snap-row"><div>v${s.seq}</div><div>${s.timestamp}</div>` +
+      const clickable = s.seq > 1 ? ' clickable' : '';
+      const version = s.seq > 1 ? `<button type="button" class="snap-version-button" data-diff-seq="${s.seq}">v${s.seq}</button>` : `<span>v${s.seq}</span>`;
+      html += `<div class="snap-row${clickable}" data-diff-seq="${s.seq}"><div>${version}</div><div>${s.timestamp}</div>` +
         `<div>${s.executed_functions||0} <span class="snap-delta ${deltaCls(s.delta_executed)}">${deltaStr(s.delta_executed)}</span></div>` +
         `<div>${s.uncovered_count||0} <span class="snap-delta ${deltaCls(-s.delta_uncovered)}">${deltaStr(-s.delta_uncovered)}</span></div>` +
         `<div>${s.crash_count||0}</div><div>${s.unique_crash_count||0}</div><div>${s.corpus_count||0}</div>` +
-        `<div class="snap-analysis" title="${a.replace(/"/g,'&quot;')}">${aShort}</div></div>`;
+        `<div class="snap-analysis">${escapeHtml(a)}</div></div>`;
     });
     table.innerHTML = html;
   }
+
+  $('snapTable').addEventListener('click', event => {
+    const target = event.target.closest('[data-diff-seq]');
+    if (!target || !target.closest('.snap-row.clickable')) return;
+    openSnapshotDiff(Number(target.dataset.diffSeq));
+  });
+
+  async function openSnapshotDiff(targetSeq) {
+    if (!taskId || targetSeq <= 1) return;
+    const selectedTaskId = taskId;
+    const requestVersion = ++diffRequestVersion;
+    setSnapshotDiffVisible(true);
+    $('snapshotDiffTitle').textContent = `v${targetSeq - 1} → v${targetSeq} Driver 差异`;
+    $('snapshotDiffMeta').textContent = `Task ${selectedTaskId} · 对比 synthesized driver 源码`;
+    const container = $('driverDiff');
+    container.className = 'diff-empty';
+    container.textContent = '正在加载 Driver 差异…';
+    requestAnimationFrame(() => $('snapshotDiffView').scrollIntoView({behavior: 'smooth', block: 'start'}));
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(selectedTaskId)}/snapshots/${targetSeq}/diff`);
+      const result = await response.json();
+      if (requestVersion !== diffRequestVersion || taskId !== selectedTaskId) return;
+      if (!response.ok) throw new Error(result.error || 'Driver diff 读取失败');
+      $('snapshotDiffTitle').textContent = `v${result.base_seq} → v${result.target_seq} Driver 差异`;
+      renderDriverDiff(result.diff || '');
+    } catch (error) {
+      if (requestVersion !== diffRequestVersion || taskId !== selectedTaskId) return;
+      container.className = 'diff-empty';
+      container.textContent = error.message;
+    }
+  }
+
+  function renderDriverDiff(diff) {
+    const container = $('driverDiff');
+    if (!diff.trim()) {
+      container.className = 'diff-empty';
+      container.textContent = '两个版本的 synthesized driver 源码完全一致；该历史版本可能由旧版重生成流程产生。';
+      return;
+    }
+    const code = document.createElement('pre');
+    code.className = 'diff-code';
+    diff.replace(/\n$/, '').split('\n').forEach(text => {
+      const line = document.createElement('span');
+      line.className = 'diff-line';
+      if (text.startsWith('diff ') || text.startsWith('--- ') || text.startsWith('+++ ')) line.classList.add('file');
+      else if (text.startsWith('@@')) line.classList.add('hunk');
+      else if (text.startsWith('+')) line.classList.add('added');
+      else if (text.startsWith('-')) line.classList.add('removed');
+      line.textContent = text;
+      code.appendChild(line);
+    });
+    container.className = '';
+    container.replaceChildren(code);
+  }
+
+  function showSnapshotOverview() {
+    diffRequestVersion++;
+    setSnapshotDiffVisible(false);
+    requestAnimationFrame(() => $('snapPanel').scrollIntoView({behavior: 'smooth', block: 'start'}));
+  }
+
+  function setSnapshotDiffVisible(visible) {
+    const overview = $('taskOverview');
+    const diffView = $('snapshotDiffView');
+    overview.hidden = visible;
+    overview.style.display = visible ? 'none' : 'grid';
+    diffView.hidden = !visible;
+    diffView.style.display = visible ? 'block' : 'none';
+  }
+
+  $('backSnapshotDiff').addEventListener('click', showSnapshotOverview);
 
   function renderCoverage(data) {
     const panel = $('covPanel');
@@ -588,64 +957,91 @@
     });
   }
 
-  async function refreshSnapshot() {
-    const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}`);
+  async function refreshSnapshot(id = taskId) {
+    if (!id) return;
+    const response = await fetch(`/api/runs/${encodeURIComponent(id)}`);
     if (!response.ok) return;
-    const snapshot = await response.json(); renderStages(snapshot.stages);
+    const snapshot = await response.json();
+    if (taskId !== id) return;
+    renderStages(snapshot.stages);
     $('runMeta').textContent = `任务 ${snapshot.id} · workspace: ${snapshot.target_dir}${snapshot.error ? ' · 错误: ' + snapshot.error : ''}`;
   }
 
   function connectEvents(id) {
     if (eventSource) eventSource.close();
-    eventSource = new EventSource(`/api/runs/${encodeURIComponent(id)}/events`);
-    eventSource.addEventListener('autofuzz', message => handleEvent(JSON.parse(message.data)));
-    eventSource.onerror = () => { if ($('runStatus').classList.contains('running')) $('formMessage').textContent = '事件流连接中断，浏览器会自动重连。'; };
+    const source = new EventSource(`/api/runs/${encodeURIComponent(id)}/events`);
+    eventSource = source;
+    source.addEventListener('autofuzz', message => {
+      if (taskId !== id || eventSource !== source) return;
+      handleEvent(JSON.parse(message.data));
+    });
+    source.onerror = () => {
+      if (taskId === id && eventSource === source && $('runStatus').classList.contains('running')) {
+        $('detailMessage').textContent = '事件流连接中断，浏览器会自动重连。';
+      }
+    };
   }
+
+  function openCreateModal() {
+    $('createModal').hidden = false;
+    $('formMessage').textContent = '填写运行配置后创建 Task；创建后需在列表中手动点击“开始”。';
+    setTimeout(() => $('repository_url').focus(), 0);
+  }
+
+  function closeCreateModal() {
+    $('createModal').hidden = true;
+    ppCloseAll();
+  }
+
+  $('openCreateModal').addEventListener('click', openCreateModal);
+  $('closeCreateModal').addEventListener('click', closeCreateModal);
+  $('cancelCreateTask').addEventListener('click', closeCreateModal);
+  $('createModal').addEventListener('click', event => { if (event.target === $('createModal')) closeCreateModal(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('createModal').hidden) closeCreateModal(); });
 
   $('runForm').addEventListener('submit', async event => {
     event.preventDefault();
-    $('startButton').disabled = true; $('formMessage').textContent = '正在创建任务…';
-    codexCount = 0; logCount = 0; waitingForAnalysis = false; $('codexCount').textContent = '0 条'; $('logCount').textContent = '0 行';
-    clearStream('codexEvents', '等待 Codex CLI JSONL 事件'); clearStream('runtimeLogs', '等待运行日志'); renderStages([]);
+    $('createTaskButton').disabled = true;
+    $('formMessage').textContent = '正在创建 Task…';
     try {
       const response = await fetch('/api/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(requestBody())});
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || '任务创建失败');
-      taskId = result.id; renderStages(result.stages); setRunStatus('running', '运行中');
-      $('cancelButton').disabled = false; $('formMessage').textContent = `任务 ${taskId} 已启动`;
-      $('runMeta').textContent = `任务 ${taskId} · workspace: ${result.target_dir}`; connectEvents(taskId);
-      pollCoverage();
-      covPollTimer = setInterval(pollCoverage, 15000);
-      pollSnapshots();
-      snapPollTimer = setInterval(pollSnapshots, 30000);
+      closeCreateModal();
+      $('listMessage').textContent = `Task ${result.id} 已创建，请点击右侧“开始”运行。`;
+      await loadTaskList();
     } catch (error) {
-      $('startButton').disabled = false; setRunStatus('failed', '启动失败'); $('formMessage').textContent = error.message;
+      $('formMessage').textContent = error.message;
+    } finally {
+      $('createTaskButton').disabled = false;
     }
   });
 
   $('cancelButton').addEventListener('click', async () => {
     if (!taskId) return;
-    $('cancelButton').disabled = true; $('formMessage').textContent = '正在取消任务…';
+    if (!confirm('确认停止此 Task？之后可以从当前状态恢复。')) return;
+    $('cancelButton').disabled = true; $('detailMessage').textContent = '正在停止任务…';
     const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/cancel`, {method: 'POST'});
     const result = await response.json();
-    if (!response.ok) { $('formMessage').textContent = result.error || '取消失败'; $('cancelButton').disabled = false; }
+    if (!response.ok) { $('detailMessage').textContent = result.error || '停止失败'; $('cancelButton').disabled = false; }
+    else setRunStatus('stopping', '停止中');
   });
 
   $('triggerFuzzButton').addEventListener('click', async () => {
     if (!taskId) return;
-    $('triggerFuzzButton').disabled = true; $('formMessage').textContent = '正在触发 LLM 分析…';
+    $('triggerFuzzButton').disabled = true; $('detailMessage').textContent = '正在触发 LLM 分析…';
     try {
       const response = await fetch(`/api/runs/${encodeURIComponent(taskId)}/trigger-fuzz`, {method: 'POST'});
       const result = await response.json();
       if (!response.ok) {
-        $('formMessage').textContent = result.error || '触发失败';
+        $('detailMessage').textContent = result.error || '触发失败';
         $('triggerFuzzButton').disabled = false;
       } else {
         waitingForAnalysis = true;
-        $('formMessage').textContent = '已触发 LLM 分析，等待结果…';
+        $('detailMessage').textContent = '已触发 LLM 分析，等待结果…';
       }
     } catch (error) {
-      $('formMessage').textContent = '触发失败: ' + error.message;
+      $('detailMessage').textContent = '触发失败: ' + error.message;
       $('triggerFuzzButton').disabled = false;
     }
   });
@@ -653,6 +1049,7 @@
   renderStages([]);
   initTerminal();
   fetch('/api/defaults').then(response => response.json()).then(fillDefaults).catch(error => { $('formMessage').textContent = '读取默认配置失败：' + error.message; });
+  showTaskList();
 
   /* ===== Path Picker Component ===== */
   let ppCache = new Map();

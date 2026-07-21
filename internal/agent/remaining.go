@@ -286,7 +286,6 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 		Runner:       a.Runner,
 		LogsDir:      fuzzLogsDir,
 		EventSink:    a.codexEventSinkFuzzing(),
-		PythonPath:   a.Options.PythonPath,
 		LogSink: func(message string) {
 			a.emit(runevent.New("log", string(state.StageFuzzing), "", "autofuzz", message))
 		},
