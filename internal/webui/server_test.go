@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestDefaultsEndpoint(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &defaults); err != nil {
 		t.Fatal(err)
 	}
-	if defaults.CodexCommand != "codex" || defaults.StopAfter != "fuzzing" {
+	if defaults.CodexCommand != "codex" || defaults.StopAfter != "fuzzing" || defaults.MaxFuzzDrivers != runtime.NumCPU() {
 		t.Fatalf("unexpected defaults: %#v", defaults)
 	}
 }
@@ -39,7 +40,7 @@ func TestIndexShowsTaskListBeforeTaskDetails(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 	body := response.Body.String()
-	for _, marker := range []string{`id="taskListView"`, `id="createModal"`, `id="taskDetailView"`, `id="resumeButton"`, `id="fuzzFlowHistory"`, `id="codexEventPanel" class="panel stream"`, `id="runtimeLogPanel" class="panel stream"`, `stage-cycle`, `event.kind === 'fuzz_flow'`, `snap-version-button`, `/start`} {
+	for _, marker := range []string{`id="taskListView"`, `id="createModal"`, `id="taskDetailView"`, `id="resumeButton"`, `id="max_fuzz_drivers"`, `id="covTotalCard"`, `id="covDriverCard"`, `id="driverCoverageList"`, `id="driverCoverageGraph"`, `driver-cov-row`, `driver-graph-node`, `/coverage/function-sources`, `id="fuzzFlowHistory"`, `id="crashQueuePanel"`, `id="crashQueueList"`, `/crash-analysis-queue`, `id="uniqueCrashPanel"`, `id="uniqueCrashList"`, `/unique-crashes`, `id="crashReportView"`, `/crash-reports`, `/crash-reports/analyze`, `crash-analyze-button`, `id="codexEventPanel" class="panel stream"`, `id="runtimeLogPanel" class="panel stream"`, `stage-cycle`, `event.kind === 'fuzz_flow'`, `snap-version-button`, `/start`} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("index is missing %s", marker)
 		}
@@ -49,6 +50,76 @@ func TestIndexShowsTaskListBeforeTaskDetails(t *testing.T) {
 	}
 	if strings.Contains(body, "waitingForAnalysis") || strings.Contains(body, "m.includes('plateau=')") {
 		t.Fatal("index still infers LLM flow state from runtime log strings")
+	}
+}
+
+func TestOverviewEndpointAggregatesDashboardMetrics(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workspace := t.TempDir()
+	targetDir := filepath.Join(workspace, "lib-a")
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	analysis := `{
+  "total_crashes": 2,
+  "unique_crashes": 2,
+  "unique_list": [{
+    "file": "crash-a",
+    "type": "heap-buffer-overflow",
+    "stack": "stack",
+    "report_status": "completed",
+    "classification": "library_bug"
+  }, {
+    "file": "crash-b",
+    "type": "SEGV",
+    "stack": "stack",
+    "report_status": "pending"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC)
+	if err := upsertTaskRegistry(registryEntry{
+		ID:            "run-a",
+		Workspace:     workspace,
+		Name:          "lib-a",
+		RepositoryURL: "https://example.com/lib-a.git",
+		CreatedAt:     createdAt.Format(time.RFC3339),
+		Status:        "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(context.Background())
+	manager.tasks["run-a"] = &Task{
+		id:          "run-a",
+		request:     RunRequest{RepositoryURL: "https://example.com/lib-a.git"},
+		status:      "running",
+		createdAt:   createdAt,
+		targetDir:   targetDir,
+		stages:      map[string]string{"fuzzing": "running"},
+		subscribers: map[chan runevent.Event]struct{}{},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got OverviewResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tasks.Total != 1 || got.Tasks.Running != 1 {
+		t.Fatalf("unexpected task counts: %#v", got.Tasks)
+	}
+	if got.Issues.DiscoveredTotal != 2 || got.Issues.LibraryBugs != 1 || got.Issues.PendingAnalysis != 1 {
+		t.Fatalf("unexpected issue counts: %#v", got.Issues)
+	}
+	if len(got.RecentIssues) != 2 || got.RecentIssues[0].TaskID != "run-a" || got.RecentIssues[0].DriverID != 1 {
+		t.Fatalf("unexpected recent issues: %#v", got.RecentIssues)
 	}
 }
 
@@ -81,6 +152,167 @@ func TestFuzzFlowEndpointRestoresCurrentAndLimitsHistory(t *testing.T) {
 	}
 	if got.Current == nil || got.Current.Phase != fuzzing.FuzzFlowAnalyzing || len(got.History) != 1 || got.History[0].Iteration != 2 || got.History[0].Trigger != "manual" {
 		t.Fatalf("unexpected fuzz flow response: %#v", got)
+	}
+}
+
+func TestCrashReportsEndpointReadsSnapshotReports(t *testing.T) {
+	targetDir := t.TempDir()
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0003", "v002")
+	if err := os.MkdirAll(filepath.Join(snapDir, "crash-reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	analysis := `{
+  "total_crashes": 1,
+  "unique_crashes": 1,
+  "unique_list": [{
+    "file": "crash-a",
+    "type": "heap-buffer-overflow",
+    "stack": "stack: lib_fn <- LLVMFuzzerTestOneInput",
+    "asan_report": "ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer",
+    "report_path": "crash-reports/crash-a.json",
+    "report_status": "completed",
+    "classification": "library_bug"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := `{"report":{"classification":"library_bug","asan_report":"ERROR: AddressSanitizer: heap-buffer-overflow","root_cause":"库边界检查缺失"}}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-reports", "crash-a.json"), []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(context.Background())
+	manager.tasks["crash"] = &Task{id: "crash", status: "running", createdAt: time.Now(), targetDir: targetDir, stages: map[string]string{}}
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/crash/crash-reports?driver_id=3&seq=2", nil)
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got CrashReportsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DriverID != 3 || got.Seq != 2 || len(got.Reports) != 1 {
+		t.Fatalf("unexpected crash reports response: %#v", got)
+	}
+	if got.Reports[0].Entry.Classification != "library_bug" || !strings.Contains(got.Reports[0].Entry.ASanReport, "AddressSanitizer") || !strings.Contains(string(got.Reports[0].Report), "库边界检查缺失") {
+		t.Fatalf("unexpected report entry: %#v", got.Reports[0])
+	}
+}
+
+func TestUniqueCrashesEndpointAggregatesDriverSnapshots(t *testing.T) {
+	targetDir := t.TempDir()
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0003", "v002")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	analysis := `{
+  "total_crashes": 1,
+  "unique_crashes": 1,
+  "unique_list": [{
+    "file": "leak-a",
+    "type": "timeout",
+    "stack": "(timeout)"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(context.Background())
+	manager.tasks["crashes"] = &Task{id: "crashes", status: "running", createdAt: time.Now(), targetDir: targetDir, stages: map[string]string{}}
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/crashes/unique-crashes", nil)
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got UniqueCrashesResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Crashes) != 1 || got.Crashes[0].DriverID != 3 || got.Crashes[0].Seq != 2 || got.Crashes[0].Entry.Type != "leak" || got.Crashes[0].Entry.ReportStatus != "pending" {
+		t.Fatalf("unexpected unique crashes response: %#v", got)
+	}
+}
+
+func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
+	targetDir := t.TempDir()
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
+	if err := os.MkdirAll(filepath.Join(snapDir, "crash-reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	analysis := `{
+  "total_crashes": 1,
+  "unique_crashes": 1,
+  "unique_list": [{
+    "file": "crash-a",
+    "type": "heap-buffer-overflow",
+    "stack": "stack",
+    "report_path": "crash-reports/crash-a.json",
+    "report_status": "running"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := `{"report":{"classification":"library_bug","asan_report":"ERROR: AddressSanitizer: heap-buffer-overflow"}}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-reports", "crash-a.json"), []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(context.Background())
+	manager.tasks["stale"] = &Task{id: "stale", status: "running", createdAt: time.Now(), targetDir: targetDir, stages: map[string]string{}}
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/stale/unique-crashes", nil)
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got UniqueCrashesResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Crashes) != 1 || got.Crashes[0].Entry.ReportStatus != "completed" || got.Crashes[0].Entry.Classification != "library_bug" {
+		t.Fatalf("stale running report was not reconciled: %#v", got.Crashes)
+	}
+}
+
+func TestCrashReportsEndpointNormalizesLegacyLeakTimeout(t *testing.T) {
+	targetDir := t.TempDir()
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	analysis := `{
+  "total_crashes": 1,
+  "unique_crashes": 1,
+  "unique_list": [{
+    "file": "leak-b276eb69773681eada7c51666c7234b9b62846d0",
+    "type": "timeout",
+    "stack": "(timeout)"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(context.Background())
+	manager.tasks["legacy"] = &Task{id: "legacy", status: "running", createdAt: time.Now(), targetDir: targetDir, stages: map[string]string{}}
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/legacy/crash-reports?driver_id=1&seq=1", nil)
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got CrashReportsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Reports) != 1 || got.Reports[0].Entry.Type != "leak" || got.Reports[0].Entry.ReportStatus != "pending" {
+		t.Fatalf("legacy leak timeout was not normalized to pending leak: %#v", got.Reports)
 	}
 }
 

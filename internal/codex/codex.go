@@ -14,6 +14,17 @@ import (
 	"strings"
 )
 
+// CommandArgv turns a configured Codex command prefix into argv and appends the
+// caller's subcommand/options. It intentionally does not invoke a shell.
+func CommandArgv(command string, args ...string) []string {
+	prefix := strings.Fields(strings.TrimSpace(command))
+	if len(prefix) == 0 {
+		prefix = []string{"codex"}
+	}
+	argv := append([]string(nil), prefix...)
+	return append(argv, args...)
+}
+
 // ExtractJSONObject locates the first complete JSON object in data, tolerating
 // surrounding prose and markdown code fences (```json ... ```) that Codex
 // sometimes emits despite instructions. Returns nil if no balanced object is

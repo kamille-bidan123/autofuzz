@@ -29,6 +29,8 @@ type Agent struct {
 	fuzzController   *fuzzing.FuzzController
 	corpusMonitorMu  sync.RWMutex
 	corpusMonitor    *fuzzing.CorpusMonitor
+	coverageMu       sync.RWMutex
+	coverageData     any
 	snapshotCmpMu    sync.RWMutex
 	snapshotCmp      map[int]fuzzing.CoverageStatus // frozen past-snapshot exports (cached)
 }
@@ -130,9 +132,21 @@ func (a *Agent) setCorpusMonitor(m *fuzzing.CorpusMonitor) {
 	a.corpusMonitorMu.Unlock()
 }
 
+func (a *Agent) setCoverageData(data any) {
+	a.coverageMu.Lock()
+	a.coverageData = fuzzing.CloneCoverageData(data)
+	a.coverageMu.Unlock()
+}
+
 // CoverageData returns the cached llvm-cov export result from the corpus
 // monitor, or nil when no monitor is active (e.g. not in the fuzzing stage).
 func (a *Agent) CoverageData() any {
+	a.coverageMu.RLock()
+	data := a.coverageData
+	a.coverageMu.RUnlock()
+	if data != nil {
+		return fuzzing.CloneCoverageData(data)
+	}
 	a.corpusMonitorMu.RLock()
 	m := a.corpusMonitor
 	a.corpusMonitorMu.RUnlock()

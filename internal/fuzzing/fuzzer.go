@@ -19,11 +19,11 @@ import (
 
 // FuzzConfig holds all parameters needed to run the fuzzing phase.
 type FuzzConfig struct {
-	DriverDir    string        // directory containing the synthesized driver and build scripts
+	DriverDir    string        // directory containing the active driver and build scripts
 	SourceDir    string        // target library source directory
 	BuildDir     string        // out-of-tree build directory (sources may be copied here; llvm-cov reports them under here)
-	BuildScript  string        // build_cov_synthesized_driver.sh path
-	BinaryPath   string        // cov_synthesized_driver binary path
+	BuildScript  string        // coverage build script path
+	BinaryPath   string        // coverage-instrumented driver binary path
 	CorpusDir    string        // corpus directory for libFuzzer
 	Interval     time.Duration // how often to collect status
 	CodexCommand string
@@ -32,12 +32,13 @@ type FuzzConfig struct {
 	Runner       runner.Runner
 	LogsDir      string
 	EventSink    func(json.RawMessage)
-	// MaxSeeds caps how many corpus seeds are replayed per analysis cycle
-	// (largest by size). 0 means DefaultMaxCorpusSeeds.
-	MaxSeeds int
 	// ForkWorkers is the libFuzzer -fork worker count. <=0 means use the
 	// number of logical CPUs (nproc).
 	ForkWorkers int
+	// MaxParallelDrivers caps how many independent child fuzz drivers are
+	// running at the same time in multi-driver mode. <=0 means a conservative
+	// default is used.
+	MaxParallelDrivers int
 
 	// TriggerCh is an optional channel that, when signaled, causes the
 	// fuzz loop to immediately skip the remaining wait and proceed to
@@ -52,6 +53,10 @@ type FuzzConfig struct {
 	// (nil when stopped). Allows the web UI to access real-time coverage data
 	// via the monitor's CoverageCache().
 	OnMonitorChanged func(*CorpusMonitor)
+
+	// OnCoverageChanged receives live aggregate coverage objects for fuzzing
+	// modes that do not expose exactly one CorpusMonitor.
+	OnCoverageChanged func(any)
 
 	// FlowSink receives structured state transitions for the repeating
 	// fuzz/analyze/rebuild loop. The same snapshots are persisted to disk.
@@ -107,6 +112,7 @@ func (c FuzzController) TriggerAnalysis() bool {
 type FuzzIteration struct {
 	Iteration   int                  `json:"iteration"`
 	Seq         int                  `json:"seq"` // driver version that ran this cycle
+	DriverID    int                  `json:"driver_id,omitempty"`
 	Trigger     string               `json:"trigger,omitempty"`
 	FuzzStatus  FuzzStatus           `json:"fuzz_status"`
 	Coverage    CorpusCoverageStatus `json:"coverage_status"`
@@ -118,14 +124,14 @@ type FuzzIteration struct {
 }
 
 // RunFuzzingPhase is the main entry point for the fuzzing phase.
-// It runs the coverage-instrumented synthesized driver as a long-running
-// fuzzer, collects per-seed coverage each interval (without stopping the
-// fuzzer), sends the data to Codex which edits driver sources directly, and on
-// a driver change rebuilds + restarts. The phase runs until the fuzzer exits
-// or the context is cancelled; plateau no longer stops the loop. On exit,
-// crashes across all driver snapshots are triaged against the final binary.
-// Crash artifacts land inside the driver version's snapshot dir so every crash
-// stays reproducible against the driver version that found it.
+// It runs the coverage-instrumented driver as a long-running
+// fuzzer, merges runtime LLVM profiles into aggregate coverage, sends that
+// data to Codex which edits driver sources directly, and on a driver change
+// rebuilds + restarts. The phase runs until the fuzzer exits or the context is
+// cancelled; plateau no longer stops the loop. On exit, crashes across all
+// driver snapshots are triaged against the final binary. Crash artifacts land
+// inside the driver version's snapshot dir so every crash stays reproducible
+// against the driver version that found it.
 func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	if err := os.MkdirAll(cfg.LogsDir, 0o755); err != nil {
 		return err
@@ -310,9 +316,9 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			if err != nil {
 				return err
 			}
-			// Start a background corpus monitor that incrementally replays new
-			// seeds and maintains a running aggregate profdata, so that the
-			// LLM analysis cycle can take coverage data instantly.
+			// Start a background corpus monitor that incrementally merges live
+			// fuzzer profraw files into an aggregate profdata, so the LLM
+			// analysis cycle can take coverage data without replaying corpus.
 			if monitor != nil {
 				if cfg.OnMonitorChanged != nil {
 					cfg.OnMonitorChanged(nil)
@@ -377,8 +383,8 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		cfg.logf("[fuzzing] iteration %d: %s\n", iteration, fuzzStatus.String())
 
 		// Coverage data is maintained incrementally by the background corpus
-		// monitor. Snapshot returns instantly (one llvm-cov export on the
-		// running aggregate profdata + cached per-seed reach data).
+		// monitor. Snapshot returns aggregate coverage without replaying
+		// individual corpus seeds.
 		var corpusCov CorpusCoverageStatus
 		if monitor != nil {
 			var covErr error
@@ -621,13 +627,20 @@ func startFuzzer(ctx context.Context, cfg FuzzConfig, logDir, stderrPath, stdout
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = cfg.DriverDir
+	profileDir := filepath.Join(logDir, "monitor", "profiles")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		stdoutFile.Close()
+		stderrFile.Close()
+		return err
+	}
+
 	// Disable ASan stack symbolization for the live fuzzer: llvm-symbolizer is
 	// re-spawned per crash and is pathologically slow (often >15s, sometimes
 	// hanging) on the large coverage+ASan binary, which stalls fork-mode
 	// corpus merges and prevents the fuzzer from ever reaching INITED. Crash
 	// inputs are still saved to -artifact_prefix and symbolicated later during
 	// crash triage (replayCrash), so no stack info is lost.
-	env := append(os.Environ(), "LLVM_PROFILE_FILE=/dev/null")
+	env := append(os.Environ(), "LLVM_PROFILE_FILE="+filepath.Join(profileDir, "live-%p.profraw"))
 	cmd.Env = withAsanSymbolizeDisabled(env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -651,9 +664,21 @@ func startFuzzer(ctx context.Context, cfg FuzzConfig, logDir, stderrPath, stdout
 		return err
 	}
 
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		case <-done:
+		}
+	}()
+
 	// Wait in a goroutine so the context can cancel
 	go func() {
 		_ = cmd.Wait()
+		close(done)
 		stderrPipe.Flush()
 		stderrFile.Close()
 		stdoutFile.Close()
@@ -665,10 +690,10 @@ func startFuzzer(ctx context.Context, cfg FuzzConfig, logDir, stderrPath, stdout
 // withAsanSymbolizeDisabled returns env with ASAN_OPTIONS forced to include
 // symbolize=0, replacing any existing symbolize= token while preserving other
 // options (e.g. detect_leaks). If ASAN_OPTIONS is unset, adds it. The live
-// fuzzer and per-seed replay paths use this so llvm-symbolizer is not
+// fuzzer and proof-seed coverage paths use this so llvm-symbolizer is not
 // re-spawned per crash (it is pathologically slow / can hang on the large
-// coverage+ASan binary, stalling fork-mode merges and replay). Crash triage
-// (replayCrash) keeps symbolization on to extract stacks.
+// coverage+ASan binary, stalling fork-mode merges). Crash triage (replayCrash)
+// keeps symbolization on to extract stacks.
 func withAsanSymbolizeDisabled(env []string) []string {
 	for i, kv := range env {
 		if !strings.HasPrefix(kv, "ASAN_OPTIONS=") {

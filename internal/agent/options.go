@@ -11,21 +11,22 @@ import (
 )
 
 type Options struct {
-	RepositoryURL string
-	Ref           string
-	Workspace     string
-	PromeFuzzRoot string
-	ConfigPath    string
-	PythonPath    string
-	PoolSize      int
-	Jobs          int
-	CodexCommand  string
-	CodexModel    string
-	CodexProfile  string
-	Resume        bool
-	Verbose       bool
-	StopAfter     state.Stage
-	FuzzInterval  time.Duration
+	RepositoryURL  string
+	Ref            string
+	Workspace      string
+	PromeFuzzRoot  string
+	ConfigPath     string
+	PythonPath     string
+	PoolSize       int
+	Jobs           int
+	MaxFuzzDrivers int
+	CodexCommand   string
+	CodexModel     string
+	CodexProfile   string
+	Resume         bool
+	Verbose        bool
+	StopAfter      state.Stage
+	FuzzInterval   time.Duration
 }
 
 func (o *Options) Normalize() error {
@@ -55,8 +56,11 @@ func (o *Options) Normalize() error {
 			return fmt.Errorf("resolve %s: %w", item.name, err)
 		}
 	}
-	if o.PoolSize < 1 || o.Jobs < 1 {
-		return fmt.Errorf("pool-size and jobs must be positive")
+	if o.MaxFuzzDrivers == 0 {
+		o.MaxFuzzDrivers = runtime.NumCPU()
+	}
+	if o.PoolSize < 1 || o.Jobs < 1 || o.MaxFuzzDrivers < 1 {
+		return fmt.Errorf("pool-size, jobs and max-fuzz-drivers must be positive")
 	}
 	if o.CodexCommand == "" {
 		return fmt.Errorf("codex-command cannot be empty")
@@ -84,7 +88,7 @@ func (o *Options) Normalize() error {
 func DefaultOptions() Options {
 	return Options{
 		Workspace: "autofuzz-work",
-		PoolSize: 5, Jobs: runtime.NumCPU(), StopAfter: state.StageFuzzing, FuzzInterval: 30 * time.Minute,
+		PoolSize:  5, Jobs: runtime.NumCPU(), MaxFuzzDrivers: runtime.NumCPU(), StopAfter: state.StageFuzzing, FuzzInterval: 30 * time.Minute,
 		CodexCommand: "codex",
 	}
 }

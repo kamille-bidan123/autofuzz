@@ -30,6 +30,7 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /", server.index)
 	server.mux.HandleFunc("GET /api/defaults", server.defaults)
 	server.mux.HandleFunc("GET /api/browse", server.browse)
+	server.mux.HandleFunc("GET /api/overview", server.overview)
 	server.mux.HandleFunc("POST /api/runs", server.createRun)
 	server.mux.HandleFunc("GET /api/runs", server.listRuns)
 	server.mux.HandleFunc("GET /api/runs/{id}", server.runSnapshot)
@@ -40,7 +41,13 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
+	server.mux.HandleFunc("GET /api/runs/{id}/coverage/function-sources", server.coverageFunctionSources)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
+	server.mux.HandleFunc("GET /api/runs/{id}/unique-crashes", server.uniqueCrashes)
+	server.mux.HandleFunc("GET /api/runs/{id}/crash-analysis-queue", server.crashAnalysisQueue)
+	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-analysis-queue", server.removeCrashAnalysisQueueItem)
+	server.mux.HandleFunc("GET /api/runs/{id}/crash-reports", server.crashReports)
+	server.mux.HandleFunc("POST /api/runs/{id}/crash-reports/analyze", server.analyzeCrashReport)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots/{seq}/diff", server.snapshotDiff)
 	server.mux.HandleFunc("DELETE /api/runs/{id}", server.deleteRun)
 	server.mux.HandleFunc("GET /static/vendor/", server.serveVendor)
@@ -224,6 +231,10 @@ func (s *Server) listRuns(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, s.manager.List())
 }
 
+func (s *Server) overview(response http.ResponseWriter, request *http.Request) {
+	writeJSON(response, http.StatusOK, s.manager.Overview())
+}
+
 func (s *Server) deleteRun(response http.ResponseWriter, request *http.Request) {
 	if err := s.manager.Delete(request.PathValue("id")); err != nil {
 		writeError(response, http.StatusConflict, err.Error())
@@ -249,9 +260,26 @@ func (s *Server) triggerFuzz(response http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) coverage(response http.ResponseWriter, request *http.Request) {
-	data := s.manager.CoverageData(request.PathValue("id"))
+	driverID, _ := strconv.Atoi(request.URL.Query().Get("target_id"))
+	if driverID == 0 {
+		driverID, _ = strconv.Atoi(request.URL.Query().Get("driver_id"))
+	}
+	data := s.manager.CoverageData(request.PathValue("id"), driverID)
 	if data == nil {
 		writeJSON(response, http.StatusOK, map[string]any{"available": false})
+		return
+	}
+	writeJSON(response, http.StatusOK, data)
+}
+
+func (s *Server) coverageFunctionSources(response http.ResponseWriter, request *http.Request) {
+	driverID, _ := strconv.Atoi(request.URL.Query().Get("target_id"))
+	if driverID == 0 {
+		driverID, _ = strconv.Atoi(request.URL.Query().Get("driver_id"))
+	}
+	data, err := s.manager.CoverageFunctionSources(request.PathValue("id"), driverID)
+	if err != nil {
+		writeError(response, http.StatusNotFound, err.Error())
 		return
 	}
 	writeJSON(response, http.StatusOK, data)
@@ -266,13 +294,79 @@ func (s *Server) snapshots(response http.ResponseWriter, request *http.Request) 
 	writeJSON(response, http.StatusOK, data)
 }
 
+func (s *Server) uniqueCrashes(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.UniqueCrashes(request.PathValue("id"))
+	if err != nil {
+		writeError(response, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) crashAnalysisQueue(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.CrashAnalysisQueue(request.PathValue("id"))
+	if err != nil {
+		writeError(response, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) removeCrashAnalysisQueueItem(response http.ResponseWriter, request *http.Request) {
+	itemID := request.URL.Query().Get("item_id")
+	if strings.TrimSpace(itemID) == "" {
+		writeError(response, http.StatusBadRequest, "missing queue item id")
+		return
+	}
+	if err := s.manager.RemoveCrashAnalysisQueueItem(request.PathValue("id"), itemID); err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]string{"status": "removed"})
+}
+
+func (s *Server) crashReports(response http.ResponseWriter, request *http.Request) {
+	driverID, _ := strconv.Atoi(request.URL.Query().Get("driver_id"))
+	seq, _ := strconv.Atoi(request.URL.Query().Get("seq"))
+	if seq <= 0 {
+		writeError(response, http.StatusBadRequest, "invalid snapshot version")
+		return
+	}
+	result, err := s.manager.CrashReports(request.PathValue("id"), driverID, seq)
+	if err != nil {
+		writeError(response, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) analyzeCrashReport(response http.ResponseWriter, request *http.Request) {
+	driverID, _ := strconv.Atoi(request.URL.Query().Get("driver_id"))
+	seq, _ := strconv.Atoi(request.URL.Query().Get("seq"))
+	crashFile := request.URL.Query().Get("file")
+	if seq <= 0 {
+		writeError(response, http.StatusBadRequest, "invalid snapshot version")
+		return
+	}
+	if strings.TrimSpace(crashFile) == "" {
+		writeError(response, http.StatusBadRequest, "missing crash file")
+		return
+	}
+	if err := s.manager.TriggerCrashReportAnalysis(request.PathValue("id"), driverID, seq, crashFile); err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusAccepted, map[string]string{"status": "started"})
+}
+
 func (s *Server) snapshotDiff(response http.ResponseWriter, request *http.Request) {
 	sequence, err := strconv.Atoi(request.PathValue("seq"))
 	if err != nil || sequence <= 1 {
 		writeError(response, http.StatusBadRequest, "invalid driver version")
 		return
 	}
-	result, err := s.manager.DriverDiff(request.PathValue("id"), sequence)
+	driverID, _ := strconv.Atoi(request.URL.Query().Get("driver_id"))
+	result, err := s.manager.DriverDiff(request.PathValue("id"), driverID, sequence)
 	if err != nil {
 		writeError(response, http.StatusNotFound, err.Error())
 		return
@@ -310,7 +404,7 @@ func (s *Server) runEvents(response http.ResponseWriter, request *http.Request) 
 	if lastEventID := request.Header.Get("Last-Event-ID"); lastEventID != "" {
 		afterSequence, _ = strconv.ParseUint(lastEventID, 10, 64)
 	}
-	history, channel, finished := task.subscribe(afterSequence)
+	history, channel, finished := task.subscribe(afterSequence, s.manager.hasActiveCrashAnalysis(request.PathValue("id")))
 	for _, event := range history {
 		if !writeSSE(response, event) {
 			if channel != nil {

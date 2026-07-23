@@ -67,9 +67,9 @@ func (c Client) Build(ctx context.Context, request Request) (Result, error) {
 	if err := os.WriteFile(filepath.Join(request.LogDir, "prompt.txt"), []byte(prompt), 0o644); err != nil {
 		return Result{}, err
 	}
-	args := []string{c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write", "--ignore-rules", "--json",
+	args := codex.CommandArgv(c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write", "--ignore-rules", "--json",
 		"--skip-git-repo-check", "--color", "never", "--output-schema", schemaPath,
-		"--output-last-message", responsePath, "-C", request.TargetDir}
+		"--output-last-message", responsePath, "-C", request.TargetDir)
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}

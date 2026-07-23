@@ -13,6 +13,7 @@ import (
 )
 
 type snapshotEntry struct {
+	DriverID          int    `json:"driver_id,omitempty"`
 	Seq               int    `json:"seq"`
 	Timestamp         string `json:"timestamp"`
 	ExecutedFunctions int    `json:"executed_functions"`
@@ -21,6 +22,7 @@ type snapshotEntry struct {
 	UncoveredCount    int    `json:"uncovered_count"`
 	CrashCount        int    `json:"crash_count"`
 	UniqueCrashCount  int    `json:"unique_crash_count"`
+	CrashReportCount  int    `json:"crash_report_count"`
 	CorpusCount       int    `json:"corpus_count"`
 	DeltaExecuted     int    `json:"delta_executed"`
 	DeltaUncovered    int    `json:"delta_uncovered"`
@@ -39,6 +41,9 @@ type snapshotEntry struct {
 // snapshot so the web UI can color-code improvement/regression.
 func (a *Agent) SnapshotComparison() any {
 	fuzzingLogsDir := filepath.Join(a.LogsDir, "fuzzing")
+	if multi := a.multiSnapshotComparison(fuzzingLogsDir); len(multi) > 0 {
+		return multi
+	}
 	snapshotsDir := filepath.Join(fuzzingLogsDir, "driver-snapshots")
 
 	entries, err := os.ReadDir(snapshotsDir)
@@ -62,6 +67,7 @@ func (a *Agent) SnapshotComparison() any {
 
 	var result []snapshotEntry
 	prevExecuted, prevUncovered := 0, 0
+	hasPrevious := false
 
 	for _, seq := range seqs {
 		snapDir := filepath.Join(snapshotsDir, fmt.Sprintf("fuzz-%03d", seq))
@@ -112,13 +118,18 @@ func (a *Agent) SnapshotComparison() any {
 		}
 
 		crashCount := countFiles(filepath.Join(snapDir, "crashes"))
-		uniqueCrashCount := readUniqueCrashCount(filepath.Join(snapDir, "crash-analysis.json"))
+		uniqueCrashCount, crashReportCount := readCrashAnalysisCounts(filepath.Join(snapDir, "crash-analysis.json"))
 		corpusCount := countFiles(filepath.Join(snapDir, "corpus"))
 
 		info, _ := os.Stat(snapDir)
 		timestamp := ""
 		if info != nil {
 			timestamp = info.ModTime().Format("15:04:05")
+		}
+		deltaExecuted, deltaUncovered := 0, 0
+		if hasPrevious {
+			deltaExecuted = executed - prevExecuted
+			deltaUncovered = uncovered - prevUncovered
 		}
 
 		result = append(result, snapshotEntry{
@@ -130,19 +141,104 @@ func (a *Agent) SnapshotComparison() any {
 			UncoveredCount:    uncovered,
 			CrashCount:        crashCount,
 			UniqueCrashCount:  uniqueCrashCount,
+			CrashReportCount:  crashReportCount,
 			CorpusCount:       corpusCount,
-			DeltaExecuted:     executed - prevExecuted,
-			DeltaUncovered:    uncovered - prevUncovered,
+			DeltaExecuted:     deltaExecuted,
+			DeltaUncovered:    deltaUncovered,
 			Analysis:          analysisBySeq[seq],
 		})
 
 		prevExecuted = executed
 		prevUncovered = uncovered
+		hasPrevious = true
 	}
 
 	if result == nil {
 		return []snapshotEntry{}
 	}
+	return result
+}
+
+func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
+	targetsDir := filepath.Join(fuzzingLogsDir, "driver-targets")
+	targetEntries, err := os.ReadDir(targetsDir)
+	if err != nil {
+		return nil
+	}
+	analysisByTargetSeq := readAnalysisByTargetSeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
+	var result []snapshotEntry
+	for _, targetEntry := range targetEntries {
+		if !targetEntry.IsDir() || !strings.HasPrefix(targetEntry.Name(), "driver-") {
+			continue
+		}
+		driverID, err := strconv.Atoi(strings.TrimPrefix(targetEntry.Name(), "driver-"))
+		if err != nil || driverID <= 0 {
+			continue
+		}
+		targetDir := filepath.Join(targetsDir, targetEntry.Name())
+		versionEntries, err := os.ReadDir(targetDir)
+		if err != nil {
+			continue
+		}
+		var seqs []int
+		for _, versionEntry := range versionEntries {
+			if !versionEntry.IsDir() || !strings.HasPrefix(versionEntry.Name(), "v") {
+				continue
+			}
+			seq, err := strconv.Atoi(strings.TrimPrefix(versionEntry.Name(), "v"))
+			if err == nil && seq > 0 {
+				seqs = append(seqs, seq)
+			}
+		}
+		sort.Ints(seqs)
+		prevExecuted, prevUncovered := 0, 0
+		hasPrevious := false
+		for _, seq := range seqs {
+			snapDir := filepath.Join(targetDir, fmt.Sprintf("v%03d", seq))
+			executed, full, partial, uncovered := 0, 0, 0, 0
+			profdataPath := filepath.Join(snapDir, "monitor", "aggregate.profdata")
+			binaryPath := filepath.Join(snapDir, "cov_driver")
+			if fileExists(profdataPath) && fileExists(binaryPath) {
+				if cs, err := fuzzing.CollectCoverageStatus(profdataPath, binaryPath, a.State.SourceDir, a.State.BuildDir); err == nil {
+					executed = cs.Summary.ExecutedFunctions
+					full = cs.Summary.FullFunctions
+					partial = cs.Summary.PartialFunctions
+					uncovered = countUncovered(cs)
+				}
+			}
+			info, _ := os.Stat(snapDir)
+			timestamp := ""
+			if info != nil {
+				timestamp = info.ModTime().Format("15:04:05")
+			}
+			key := fmt.Sprintf("%d/%d", driverID, seq)
+			uniqueCrashCount, crashReportCount := readCrashAnalysisCounts(filepath.Join(snapDir, "crash-analysis.json"))
+			deltaExecuted, deltaUncovered := 0, 0
+			if hasPrevious {
+				deltaExecuted = executed - prevExecuted
+				deltaUncovered = uncovered - prevUncovered
+			}
+			result = append(result, snapshotEntry{
+				DriverID: driverID, Seq: seq, Timestamp: timestamp,
+				ExecutedFunctions: executed, FullFunctions: full, PartialFunctions: partial,
+				UncoveredCount: uncovered, CrashCount: countFiles(filepath.Join(snapDir, "crashes")),
+				UniqueCrashCount: uniqueCrashCount,
+				CrashReportCount: crashReportCount,
+				CorpusCount:      countFiles(filepath.Join(snapDir, "corpus")),
+				DeltaExecuted:    deltaExecuted, DeltaUncovered: deltaUncovered,
+				Analysis: analysisByTargetSeq[key],
+			})
+			prevExecuted = executed
+			prevUncovered = uncovered
+			hasPrevious = true
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].DriverID != result[j].DriverID {
+			return result[i].DriverID < result[j].DriverID
+		}
+		return result[i].Seq < result[j].Seq
+	})
 	return result
 }
 
@@ -171,21 +267,31 @@ func countFiles(dir string) int {
 	return n
 }
 
-// readUniqueCrashCount reads the unique_crashes field from a snapshot's
-// crash-analysis.json. Returns 0 if the file doesn't exist (analysis hasn't
-// run yet for this snapshot).
-func readUniqueCrashCount(path string) int {
+// readCrashAnalysisCounts reads unique crash and completed LLM report counts
+// from a snapshot's crash-analysis.json. Returns zeros if the file doesn't
+// exist or was written by an older version without report metadata.
+func readCrashAnalysisCounts(path string) (int, int) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	var v struct {
 		Unique int `json:"unique_crashes"`
+		List   []struct {
+			ReportStatus string `json:"report_status"`
+			ReportPath   string `json:"report_path"`
+		} `json:"unique_list"`
 	}
 	if json.Unmarshal(data, &v) != nil {
-		return 0
+		return 0, 0
 	}
-	return v.Unique
+	reports := 0
+	for _, entry := range v.List {
+		if entry.ReportStatus == "completed" {
+			reports++
+		}
+	}
+	return v.Unique, reports
 }
 
 func countUncovered(cs fuzzing.CoverageStatus) int {
@@ -222,6 +328,35 @@ func readAnalysisBySeq(path string) map[int]string {
 		}
 		if rec.Regenerated && rec.Analysis.Analysis != "" {
 			out[rec.Seq+1] = rec.Analysis.Analysis
+		}
+	}
+	return out
+}
+
+func readAnalysisByTargetSeq(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			DriverID    int  `json:"driver_id"`
+			Seq         int  `json:"seq"`
+			Regenerated bool `json:"regenerated"`
+			Analysis    struct {
+				Analysis string `json:"analysis"`
+			} `json:"analysis"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec.DriverID > 0 && rec.Regenerated && rec.Analysis.Analysis != "" {
+			out[fmt.Sprintf("%d/%d", rec.DriverID, rec.Seq+1)] = rec.Analysis.Analysis
 		}
 	}
 	return out

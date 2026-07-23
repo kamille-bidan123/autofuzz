@@ -7,15 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	monitorPollInterval = 5 * time.Second
-	monitorMaxPerScan   = 20
-	monitorCovInterval  = 60 * time.Second
+	monitorCovInterval = 60 * time.Second
 )
 
 // CoverageSnapshot is a cached llvm-cov export result, updated periodically by
@@ -27,27 +25,19 @@ type CoverageSnapshot struct {
 	Coverage  CoverageStatus `json:"coverage"`
 }
 
-// CorpusMonitor watches the corpus directory in the background. When new
-// corpus seeds appear, it replays them through the coverage-instrumented
-// driver and merges the profraw into a running aggregate profdata. Per-seed
-// branch-site reach is persisted to disk (one file per seed, 1:1 with a
-// corpus copy in the snapshot) so it survives restart. An in-memory reverse
-// index (branch site → reaching seed names) is maintained for fast
-// reaching_seeds attribution and pruned to uncovered branches to bound
-// memory. When the LLM analysis is triggered, Snapshot returns the current
-// coverage status instantly — no replay is needed.
+// CorpusMonitor watches runtime LLVM profile output in the background. The
+// live fuzzer writes profraw files under profileDir; the monitor periodically
+// merges them into aggregate.profdata and exports aggregate source coverage for
+// the web UI and LLM analysis. It does not replay corpus seeds.
 type CorpusMonitor struct {
-	cfg           FuzzConfig
-	workDir       string
-	profdataPath  string // running aggregate (incrementally merged)
-	reachDir      string // persisted per-seed reach (1:1 with corpus copy)
-	corpusSnapDir string // corpus copy in the snapshot (self-containment)
+	cfg          FuzzConfig
+	workDir      string
+	profileDir   string // live fuzzer profraw files
+	profdataPath string // running aggregate (incrementally merged)
+	profileMu    sync.Mutex
 
-	mu              sync.RWMutex
-	seenSeeds       map[string]bool
-	totalSeeds      int
-	branchReachIndex map[string]map[[2]int][]string // reverse: branch site → reaching seed names
-	uncoveredSites  map[string]map[[2]int]bool      // current uncovered branch sites (for pruning)
+	mu         sync.RWMutex
+	totalSeeds int
 
 	covMu    sync.RWMutex
 	covCache CoverageSnapshot
@@ -56,16 +46,18 @@ type CorpusMonitor struct {
 	// snapshot's own binary, extracts the symbolized ASan stack for dedup,
 	// and persists the result (total + unique count + unique list) to
 	// crash-analysis.json in the snapshot dir.
-	crashMu           sync.Mutex
-	seenCrashes       map[string]bool
-	crashSigs         map[string]bool
-	uniqueCrashList   []CrashAnalysisEntry
-	totalCrashCount   int
-	uniqueCrashCount  int
-	crashAnalysisPath string
+	crashMu            sync.Mutex
+	seenCrashes        map[string]bool
+	crashSigs          map[string]bool
+	uniqueCrashList    []CrashAnalysisEntry
+	totalCrashCount    int
+	uniqueCrashCount   int
+	crashAnalysisPath  string
+	snapshotDir        string
 	snapshotBinaryPath string
-	crashesDir        string
-	uniqueCrashesDir  string
+	crashesDir         string
+	uniqueCrashesDir   string
+	crashReportsDir    string
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -74,134 +66,38 @@ type CorpusMonitor struct {
 func NewCorpusMonitor(cfg FuzzConfig, workDir string) *CorpusMonitor {
 	snapDir := filepath.Dir(workDir) // fuzz-NNN/ (parent of monitor/)
 	return &CorpusMonitor{
-		cfg:               cfg,
-		workDir:           workDir,
-		profdataPath:      filepath.Join(workDir, "aggregate.profdata"),
-		reachDir:          filepath.Join(workDir, "reach"),
-		corpusSnapDir:     filepath.Join(workDir, "corpus"),
-		seenSeeds:         map[string]bool{},
-		branchReachIndex:  map[string]map[[2]int][]string{},
-		seenCrashes:       map[string]bool{},
-		crashSigs:         map[string]bool{},
+		cfg:                cfg,
+		workDir:            workDir,
+		profileDir:         filepath.Join(workDir, "profiles"),
+		profdataPath:       filepath.Join(workDir, "aggregate.profdata"),
+		seenCrashes:        map[string]bool{},
+		crashSigs:          map[string]bool{},
 		crashAnalysisPath:  filepath.Join(snapDir, "crash-analysis.json"),
-		snapshotBinaryPath: filepath.Join(snapDir, "cov_synthesized_driver"),
+		snapshotDir:        snapDir,
+		snapshotBinaryPath: filepath.Join(snapDir, filepath.Base(cfg.BinaryPath)),
 		crashesDir:         filepath.Join(snapDir, "crashes"),
 		uniqueCrashesDir:   filepath.Join(snapDir, "unique_crashes"),
-		stop:              make(chan struct{}),
+		crashReportsDir:    filepath.Join(snapDir, "crash-reports"),
+		stop:               make(chan struct{}),
 	}
 }
 
 func (m *CorpusMonitor) Start(ctx context.Context) {
 	_ = os.MkdirAll(m.workDir, 0o755)
-	_ = os.MkdirAll(m.reachDir, 0o755)
-	_ = os.MkdirAll(m.corpusSnapDir, 0o755)
+	_ = os.MkdirAll(m.profileDir, 0o755)
 	_ = os.MkdirAll(m.uniqueCrashesDir, 0o755)
-	// Load persisted reach on startup (resume case): rebuild the in-memory
-	// reverse index + mark those seeds as seen so we don't re-replay them.
-	m.loadPersistedReach()
+	_ = os.MkdirAll(m.crashReportsDir, 0o755)
 	// Load existing crash analysis (resume): rebuild dedup state + mark
 	// existing crash files as seen so we only analyze new ones.
 	m.loadCrashAnalysis()
-	m.wg.Add(3)
-	go func() { defer m.wg.Done(); m.loop(ctx) }()
+	m.enqueuePendingCrashReports(ctx)
+	m.wg.Add(2)
 	go func() { defer m.wg.Done(); m.coverageLoop(ctx) }()
 	go func() { defer m.wg.Done(); m.crashLoop(ctx) }()
 }
 
-// loadPersistedReach reads all reach files from reachDir and rebuilds the
-// in-memory reverse index + seenSeeds. This enables fast same-driver resume:
-// the monitor loads existing reach data instead of re-replaying the corpus.
-func (m *CorpusMonitor) loadPersistedReach() {
-	entries, err := os.ReadDir(m.reachDir)
-	if err != nil {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		seedName := e.Name()
-		seedPath := filepath.Join(m.cfg.CorpusDir, seedName)
-		reach, err := loadReachFile(filepath.Join(m.reachDir, seedName))
-		if err != nil || len(reach) == 0 {
-			continue
-		}
-		m.seenSeeds[seedPath] = true
-		m.totalSeeds++
-		m.addSeedToIndex(seedName, reach)
-	}
-}
-
-// addSeedToIndex appends seedName to the reaching list of every branch site
-// the seed evaluated. After the first coverage refresh (uncoveredSites set),
-// only uncovered branches are updated — covered branches' lists were pruned
-// and are never queried. Before the first refresh (uncoveredSites nil), all
-// evaluated branches are added (the first prune will filter). Called under m.mu.
-func (m *CorpusMonitor) addSeedToIndex(seedName string, reach map[string]map[[2]int]bool) {
-	for fn, locs := range reach {
-		var unc map[[2]int]bool
-		if m.uncoveredSites != nil {
-			unc = m.uncoveredSites[fn]
-			if unc == nil {
-				continue // no uncovered branches in this function
-			}
-		}
-		if m.branchReachIndex[fn] == nil {
-			m.branchReachIndex[fn] = map[[2]int][]string{}
-		}
-		for loc := range locs {
-			if m.uncoveredSites != nil && !unc[loc] {
-				continue // this branch is covered, skip
-			}
-			m.branchReachIndex[fn][loc] = append(m.branchReachIndex[fn][loc], seedName)
-		}
-	}
-}
-
-// pruneIndexToUncovered drops index entries for branches NOT in the uncovered
-// set. Coverage is monotonic (covered branches stay covered), so pruned entries
-// are never needed again. Called under m.mu.
-func (m *CorpusMonitor) pruneIndexToUncovered() {
-	if m.uncoveredSites == nil {
-		return
-	}
-	for fn := range m.branchReachIndex {
-		unc, keep := m.uncoveredSites[fn]
-		if !keep {
-			delete(m.branchReachIndex, fn)
-			continue
-		}
-		for loc := range m.branchReachIndex[fn] {
-			if !unc[loc] {
-				delete(m.branchReachIndex[fn], loc)
-			}
-		}
-		if len(m.branchReachIndex[fn]) == 0 {
-			delete(m.branchReachIndex, fn)
-		}
-	}
-}
-
-func (m *CorpusMonitor) loop(ctx context.Context) {
-	ticker := time.NewTicker(monitorPollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-m.stop:
-			return
-		case <-ticker.C:
-			m.scanAndReplay(ctx)
-		}
-	}
-}
-
-// coverageLoop runs llvm-cov export on the aggregate profdata every minute,
-// caches the result for the web UI, and prunes the reverse index to the
-// current uncovered-branch set. The export is NOT under the main mutex.
+// coverageLoop merges live profraw files and runs llvm-cov export on the
+// aggregate profdata every minute. The export is NOT under the main mutex.
 func (m *CorpusMonitor) coverageLoop(ctx context.Context) {
 	m.updateCoverageCache()
 	ticker := time.NewTicker(monitorCovInterval)
@@ -219,6 +115,7 @@ func (m *CorpusMonitor) coverageLoop(ctx context.Context) {
 }
 
 func (m *CorpusMonitor) updateCoverageCache() {
+	m.mergeLiveProfiles()
 	snap := CoverageSnapshot{Timestamp: time.Now()}
 	var cs CoverageStatus
 	if fileExists(m.profdataPath) {
@@ -229,48 +126,82 @@ func (m *CorpusMonitor) updateCoverageCache() {
 			snap.Coverage = cs
 		}
 	}
-	m.mu.RLock()
-	snap.SeedCount = m.totalSeeds
-	m.mu.RUnlock()
+	seedCount := countCorpusSeeds(m.cfg.CorpusDir)
+	m.mu.Lock()
+	m.totalSeeds = seedCount
+	m.mu.Unlock()
+	snap.SeedCount = seedCount
 	m.covMu.Lock()
 	m.covCache = snap
 	m.covMu.Unlock()
-
-	// Build the current uncovered-branch set from the coverage status and
-	// prune the reverse index to only those branches (drop covered ones).
-	m.mu.Lock()
-	m.uncoveredSites = buildUncoveredSites(cs)
-	m.pruneIndexToUncovered()
-	m.mu.Unlock()
 }
 
-// buildUncoveredSites extracts the set of uncovered branch sites (function →
-// {[line,col]}) from a CoverageStatus. Returns nil if cs is zero (no export).
-func buildUncoveredSites(cs CoverageStatus) map[string]map[[2]int]bool {
-	if len(cs.Partial) == 0 {
+func (m *CorpusMonitor) mergeLiveProfiles() {
+	m.profileMu.Lock()
+	defer m.profileMu.Unlock()
+
+	profrawBin := findTool("llvm-profdata")
+	if profrawBin == "" {
+		return
+	}
+	profraws := mergeableProfrawFiles(m.profileDir)
+	if len(profraws) == 0 {
+		return
+	}
+	tmpPath := m.profdataPath + ".tmp"
+	args := []string{"merge", "-sparse", "-o", tmpPath}
+	if fileExists(m.profdataPath) {
+		args = append(args, m.profdataPath)
+	}
+	args = append(args, profraws...)
+	cmd := exec.Command(profrawBin, args...)
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, m.profdataPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	for _, profraw := range profraws {
+		_ = os.Remove(profraw)
+	}
+}
+
+func mergeableProfrawFiles(profileDir string) []string {
+	paths, _ := filepath.Glob(filepath.Join(profileDir, "*.profraw"))
+	if len(paths) == 0 {
 		return nil
 	}
-	out := map[string]map[[2]int]bool{}
-	for _, pf := range cs.Partial {
-		if len(pf.UncoveredBranches) == 0 {
+	mergeable := make([]string, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Size() == 0 {
 			continue
 		}
-		locs, ok := out[pf.Function]
-		if !ok {
-			locs = map[[2]int]bool{}
-			out[pf.Function] = locs
-		}
-		for _, br := range pf.UncoveredBranches {
-			locs[br.Location] = true
+		mergeable = append(mergeable, path)
+	}
+	return mergeable
+}
+
+func countCorpusSeeds(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			count++
 		}
 	}
-	return out
+	return count
 }
 
 func (m *CorpusMonitor) CoverageCache() CoverageSnapshot {
 	m.covMu.RLock()
 	defer m.covMu.RUnlock()
-	return m.covCache
+	return CloneCoverageSnapshot(m.covCache)
 }
 
 func (m *CorpusMonitor) Stop() {
@@ -282,132 +213,10 @@ func (m *CorpusMonitor) Stop() {
 	m.wg.Wait()
 }
 
-func (m *CorpusMonitor) scanAndReplay(ctx context.Context) {
-	entries, err := os.ReadDir(m.cfg.CorpusDir)
-	if err != nil {
-		return
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-
-	replayed := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if ctx.Err() != nil || replayed >= monitorMaxPerScan {
-			return
-		}
-		path := filepath.Join(m.cfg.CorpusDir, e.Name())
-
-		m.mu.RLock()
-		seen := m.seenSeeds[path]
-		m.mu.RUnlock()
-		if seen {
-			continue
-		}
-
-		m.replaySeed(ctx, path, e.Name())
-		replayed++
-	}
-}
-
-func (m *CorpusMonitor) replaySeed(ctx context.Context, seedPath, seedName string) {
-	idx := m.totalSeeds
-
-	profrawPath := filepath.Join(m.workDir, fmt.Sprintf("seed-%d.profraw", idx))
-	seedCtx, cancel := context.WithTimeout(ctx, defaultPerSeedTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(seedCtx, m.cfg.BinaryPath, "-runs=1", seedPath)
-	cmd.Dir = m.cfg.DriverDir
-	cmd.Env = withAsanSymbolizeDisabled(append(os.Environ(), "LLVM_PROFILE_FILE="+profrawPath))
-	_ = cmd.Run()
-
-	if !fileExists(profrawPath) {
-		m.mu.Lock()
-		m.seenSeeds[seedPath] = true
-		m.totalSeeds++
-		m.mu.Unlock()
-		return
-	}
-
-	profrawBin := findTool("llvm-profdata")
-	if profrawBin == "" {
-		_ = os.Remove(profrawPath)
-		m.mu.Lock()
-		m.seenSeeds[seedPath] = true
-		m.totalSeeds++
-		m.mu.Unlock()
-		return
-	}
-
-	// Merge profraw → seed-specific profdata (for per-seed branch reach).
-	seedProfdata := filepath.Join(m.workDir, fmt.Sprintf("seed-%d.profdata", idx))
-	mergeCmd := exec.Command(profrawBin, "merge", "-o", seedProfdata, profrawPath)
-	if out, err := mergeCmd.CombinedOutput(); err != nil {
-		_ = out
-		_ = os.Remove(profrawPath)
-		m.mu.Lock()
-		m.seenSeeds[seedPath] = true
-		m.totalSeeds++
-		m.mu.Unlock()
-		return
-	}
-
-	// Collect per-seed branch reach (no lock held — this is the slow part).
-	var reach map[string]map[[2]int]bool
-	if r, err := CollectBranchReach(seedProfdata, m.cfg.BinaryPath, m.cfg.SourceDir, m.cfg.BuildDir); err == nil {
-		reach = r
-	}
-	_ = os.Remove(seedProfdata)
-
-	// Merge profraw into the running aggregate.
-	m.mergeIntoAggregate(profrawPath, profrawBin)
-	_ = os.Remove(profrawPath)
-
-	// Persist the per-seed reach to disk (1:1 with the corpus copy) and copy
-	// the corpus input into the snapshot for self-containment. Real-time so
-	// the persisted state stays current with the aggregate.
-	if reach != nil {
-		_ = writeReachFile(filepath.Join(m.reachDir, seedName), reach)
-	}
-	_ = copyFile(seedPath, filepath.Join(m.corpusSnapDir, seedName))
-
-	m.mu.Lock()
-	m.seenSeeds[seedPath] = true
-	m.totalSeeds++
-	if reach != nil {
-		m.addSeedToIndex(seedName, reach)
-	}
-	reachEntries := 0
-	for _, locs := range m.branchReachIndex {
-		reachEntries += len(locs)
-	}
-	m.mu.Unlock()
-
-	m.cfg.logf("[corpus-monitor] replayed %s (total=%d, index_branches=%d)\n", seedName, m.totalSeeds, reachEntries)
-}
-
-func (m *CorpusMonitor) mergeIntoAggregate(profrawPath, profrawBin string) {
-	tmpPath := m.profdataPath + ".tmp"
-	var cmd *exec.Cmd
-	if fileExists(m.profdataPath) {
-		cmd = exec.Command(profrawBin, "merge", "-sparse", "-o", tmpPath, m.profdataPath, profrawPath)
-	} else {
-		cmd = exec.Command(profrawBin, "merge", "-sparse", "-o", tmpPath, profrawPath)
-	}
-	_ = cmd.Run()
-	_ = os.Rename(tmpPath, m.profdataPath)
-}
-
-// Snapshot returns the current coverage status instantly. It runs a single
-// llvm-cov export on the aggregate profdata and attributes each uncovered
-// branch to reaching seeds via the in-memory reverse index. No seed replay
-// is performed — the heavy lifting was done incrementally in the background.
+// Snapshot returns the current aggregate coverage status instantly. It does
+// not replay corpus seeds or attribute branches to individual seeds.
 func (m *CorpusMonitor) Snapshot(sourceDir, buildDir string, logf func(string, ...any)) (CorpusCoverageStatus, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
+	m.mergeLiveProfiles()
 	if !fileExists(m.profdataPath) {
 		return CorpusCoverageStatus{CorpusDir: m.cfg.CorpusDir}, nil
 	}
@@ -417,98 +226,27 @@ func (m *CorpusMonitor) Snapshot(sourceDir, buildDir string, logf func(string, .
 		return CorpusCoverageStatus{}, fmt.Errorf("monitor snapshot: %w", err)
 	}
 
-	status := CorpusCoverageStatus{
-		Summary:   cs.Summary,
-		SeedCount: m.totalSeeds,
-		CorpusDir: m.cfg.CorpusDir,
-		Uncovered: []UncoveredBranchWithReach{},
+	seedCount := countCorpusSeeds(m.cfg.CorpusDir)
+	m.mu.Lock()
+	m.totalSeeds = seedCount
+	m.mu.Unlock()
+	m.covMu.Lock()
+	m.covCache = CoverageSnapshot{
+		Timestamp: time.Now(),
+		Available: true,
+		SeedCount: seedCount,
+		Coverage:  cs,
 	}
-
-	for _, pf := range cs.Partial {
-		for _, br := range pf.UncoveredBranches {
-			loc := br.Location
-			var reach []string
-			if fnIdx, ok := m.branchReachIndex[pf.Function]; ok {
-				if seeds, ok2 := fnIdx[loc]; ok2 {
-					reach = make([]string, len(seeds))
-					copy(reach, seeds)
-				}
-			}
-			status.Uncovered = append(status.Uncovered, UncoveredBranchWithReach{
-				Function:      pf.Function,
-				File:          pf.File,
-				Line:          br.Location[0],
-				Condition:     br.Condition,
-				Missing:       br.Missing,
-				Counts:        br.Counts,
-				ReachingSeeds: capStrings(reach, DefaultMaxReachingSeedsPerBranch),
-				ReachCount:    len(reach),
-			})
-		}
-	}
-
-	sort.SliceStable(status.Uncovered, func(i, j int) bool {
-		return status.Uncovered[i].ReachCount > status.Uncovered[j].ReachCount
-	})
-	if len(status.Uncovered) > DefaultMaxUncoveredBranches {
-		status.Uncovered = status.Uncovered[:DefaultMaxUncoveredBranches]
-	}
+	m.covMu.Unlock()
+	status := CoverageStatusToCorpusCoverage(cs, seedCount, false, m.cfg.CorpusDir)
 
 	if logf != nil {
-		reachEntries := 0
-		for _, locs := range m.branchReachIndex {
-			reachEntries += len(locs)
-		}
-		logf("[corpus-monitor] snapshot: seeds=%d index_branches=%d executed=%d full=%d partial=%d uncovered=%d\n",
-			m.totalSeeds, reachEntries, status.Summary.ExecutedFunctions,
+		logf("[corpus-monitor] snapshot: seeds=%d executed=%d full=%d partial=%d uncovered=%d\n",
+			seedCount, status.Summary.ExecutedFunctions,
 			status.Summary.FullFunctions, status.Summary.PartialFunctions, len(status.Uncovered))
 	}
 
 	return status, nil
-}
-
-// writeReachFile persists a per-seed reach map to disk as JSON.
-// Format: {"function":[[line,col],[line,col],...], ...}
-func writeReachFile(path string, reach map[string]map[[2]int]bool) error {
-	out := make(map[string][][]int, len(reach))
-	for fn, locs := range reach {
-		arr := make([][]int, 0, len(locs))
-		for loc := range locs {
-			arr = append(arr, []int{loc[0], loc[1]})
-		}
-		out[fn] = arr
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-// loadReachFile reads a per-seed reach file back into the in-memory format.
-func loadReachFile(path string) (map[string]map[[2]int]bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var in map[string][][]int
-	if err := json.Unmarshal(data, &in); err != nil {
-		return nil, err
-	}
-	reach := make(map[string]map[[2]int]bool, len(in))
-	for fn, arr := range in {
-		locs := make(map[[2]int]bool, len(arr))
-		for _, pair := range arr {
-			if len(pair) >= 2 {
-				locs[[2]int{pair[0], pair[1]}] = true
-			}
-		}
-		reach[fn] = locs
-	}
-	return reach, nil
 }
 
 // crashLoop polls the snapshot's crashes/ dir every 10 seconds for new crash
@@ -537,6 +275,7 @@ func (m *CorpusMonitor) scanAndAnalyzeCrashes(ctx context.Context) {
 		return
 	}
 	analyzed := 0
+	var uniqueFiles []string
 	const maxPerScan = 10
 	for _, e := range entries {
 		if e.IsDir() || analyzed >= maxPerScan {
@@ -554,32 +293,49 @@ func (m *CorpusMonitor) scanAndAnalyzeCrashes(ctx context.Context) {
 		}
 		// Replay on the snapshot's own binary (the exact driver that found
 		// the crash). ASan symbolization is ON (needed for stack-based dedup).
-		reproduced, crashType, stack := replayCrash(ctx, m.snapshotBinaryPath, m.crashesDir, path)
+		replay := replayCrashDetailed(ctx, m.snapshotBinaryPath, m.crashesDir, path)
 		m.crashMu.Lock()
 		m.seenCrashes[path] = true
 		m.totalCrashCount++
-		sig := stack
-		if !reproduced {
+		sig := replay.Stack
+		if !replay.Reproduced {
 			sig = "no-crash:" + e.Name()
 		}
 		isUnique := !m.crashSigs[sig]
 		if isUnique {
 			m.crashSigs[sig] = true
 			m.uniqueCrashCount++
-			m.uniqueCrashList = append(m.uniqueCrashList, CrashAnalysisEntry{
-				File:  e.Name(),
-				Type:  crashType,
-				Stack: stack,
-			})
+			entry := CrashAnalysisEntry{
+				File:            e.Name(),
+				Type:            normalizeCrashAnalysisType(e.Name(), replay.Type),
+				Stack:           replay.Stack,
+				ASanReport:      replay.ASanReport,
+				Signature:       sig,
+				UniquePath:      m.uniqueCrashRel(e.Name()),
+				ReportPath:      m.crashReportRel(e.Name()),
+				ReportStatus:    "pending",
+				ReportUpdatedAt: time.Now().Format(time.RFC3339),
+			}
+			if shouldSkipCrashLLMAnalysis(entry) {
+				entry.ReportStatus = "skipped"
+				entry.ReportError = skippedCrashLLMAnalysisReason(entry)
+			}
+			m.uniqueCrashList = append(m.uniqueCrashList, entry)
 			// Copy the crash input to unique_crashes/ (one per signature)
 			// so the snapshot is self-contained for crash reproduction.
 			_ = copyFile(path, filepath.Join(m.uniqueCrashesDir, e.Name()))
+			if entry.ReportStatus != "skipped" {
+				uniqueFiles = append(uniqueFiles, e.Name())
+			}
 		}
 		m.crashMu.Unlock()
 		analyzed++
 	}
 	if analyzed > 0 {
 		m.saveCrashAnalysis()
+	}
+	for _, file := range uniqueFiles {
+		m.enqueueCrashReport(ctx, file)
 	}
 }
 
@@ -601,8 +357,15 @@ func (m *CorpusMonitor) loadCrashAnalysis() {
 			m.crashMu.Lock()
 			m.uniqueCrashCount = loaded_.Unique
 			m.uniqueCrashList = loaded_.List
-			for _, e := range loaded_.List {
-				m.crashSigs[e.Stack] = true
+			for i := range m.uniqueCrashList {
+				m.ensureCrashEntryPaths(&m.uniqueCrashList[i])
+				sig := m.uniqueCrashList[i].Signature
+				if sig == "" {
+					sig = m.uniqueCrashList[i].Stack
+				}
+				if sig != "" {
+					m.crashSigs[sig] = true
+				}
 			}
 			m.crashMu.Unlock()
 			loaded = true
@@ -629,6 +392,10 @@ func (m *CorpusMonitor) loadCrashAnalysis() {
 func (m *CorpusMonitor) saveCrashAnalysis() {
 	m.crashMu.Lock()
 	defer m.crashMu.Unlock()
+	m.saveCrashAnalysisLocked()
+}
+
+func (m *CorpusMonitor) saveCrashAnalysisLocked() {
 	data, _ := json.MarshalIndent(struct {
 		Total  int                  `json:"total_crashes"`
 		Unique int                  `json:"unique_crashes"`
@@ -639,6 +406,291 @@ func (m *CorpusMonitor) saveCrashAnalysis() {
 		List:   m.uniqueCrashList,
 	}, "", "  ")
 	_ = os.WriteFile(m.crashAnalysisPath, data, 0o644)
+}
+
+func (m *CorpusMonitor) uniqueCrashRel(file string) string {
+	return filepath.ToSlash(filepath.Join("unique_crashes", filepath.Base(file)))
+}
+
+func (m *CorpusMonitor) crashReportRel(file string) string {
+	return filepath.ToSlash(filepath.Join("crash-reports", safeCrashReportName(file)+".json"))
+}
+
+func safeCrashReportName(name string) string {
+	name = filepath.Base(name)
+	var b strings.Builder
+	for _, ch := range name {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' {
+			b.WriteRune(ch)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if strings.Trim(out, "._-") == "" {
+		return "crash"
+	}
+	return out
+}
+
+func shouldSkipCrashLLMAnalysis(entry CrashAnalysisEntry) bool {
+	if isLeakCrashAnalysisArtifact(entry.File) {
+		return false
+	}
+	return isSkippedCrashAnalysisKind(entry.Type) || isSkippedCrashAnalysisArtifact(entry.File)
+}
+
+func ShouldSkipCrashLLMAnalysis(entry CrashAnalysisEntry) bool {
+	return shouldSkipCrashLLMAnalysis(entry)
+}
+
+func NormalizeCrashAnalysisEntryType(entry *CrashAnalysisEntry) {
+	if entry == nil {
+		return
+	}
+	entry.Type = normalizeCrashAnalysisType(entry.File, entry.Type)
+}
+
+func skippedCrashLLMAnalysisReason(entry CrashAnalysisEntry) string {
+	kind := entry.Type
+	if !isSkippedCrashAnalysisKind(kind) {
+		kind = filepath.Base(entry.File)
+	}
+	return fmt.Sprintf("LLM crash analysis skipped for %s unique crash", kind)
+}
+
+func isSkippedCrashAnalysisKind(value string) bool {
+	kind := normalizeCrashAnalysisKind(value)
+	return kind == "timeout" || kind == "slowunit"
+}
+
+func isSkippedCrashAnalysisArtifact(file string) bool {
+	kind := normalizeCrashAnalysisKind(filepath.Base(file))
+	return strings.HasPrefix(kind, "timeout") || strings.HasPrefix(kind, "slowunit")
+}
+
+func isLeakCrashAnalysisArtifact(file string) bool {
+	return strings.HasPrefix(normalizeCrashAnalysisKind(filepath.Base(file)), "leak")
+}
+
+func normalizeCrashAnalysisType(file, typ string) string {
+	if isLeakCrashAnalysisArtifact(file) {
+		return "leak"
+	}
+	if strings.TrimSpace(typ) == "" {
+		return "unknown"
+	}
+	return typ
+}
+
+func normalizeCrashAnalysisKind(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	for _, ch := range value {
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func (m *CorpusMonitor) ensureCrashEntryPaths(entry *CrashAnalysisEntry) {
+	entry.Type = normalizeCrashAnalysisType(entry.File, entry.Type)
+	if entry.UniquePath == "" {
+		entry.UniquePath = m.uniqueCrashRel(entry.File)
+	}
+	if entry.ReportPath == "" {
+		entry.ReportPath = m.crashReportRel(entry.File)
+	}
+	if shouldSkipCrashLLMAnalysis(*entry) && entry.ReportStatus != "completed" {
+		entry.ReportStatus = "skipped"
+		entry.ReportError = skippedCrashLLMAnalysisReason(*entry)
+		return
+	}
+	if entry.ReportStatus == "" {
+		reportPath := filepath.Join(m.snapshotDir, filepath.FromSlash(entry.ReportPath))
+		if fileExists(reportPath) {
+			entry.ReportStatus = "completed"
+		} else {
+			entry.ReportStatus = "pending"
+		}
+	}
+}
+
+func (m *CorpusMonitor) enqueuePendingCrashReports(ctx context.Context) {
+	var files []string
+	m.crashMu.Lock()
+	for i := range m.uniqueCrashList {
+		m.ensureCrashEntryPaths(&m.uniqueCrashList[i])
+		switch m.uniqueCrashList[i].ReportStatus {
+		case "completed", "skipped":
+			continue
+		default:
+			files = append(files, m.uniqueCrashList[i].File)
+		}
+	}
+	m.saveCrashAnalysisLocked()
+	m.crashMu.Unlock()
+	for _, file := range files {
+		m.enqueueCrashReport(ctx, file)
+	}
+}
+
+func (m *CorpusMonitor) enqueueCrashReport(ctx context.Context, file string) {
+	if file == "" {
+		return
+	}
+	entry, ok := m.crashEntry(file)
+	if !ok {
+		return
+	}
+	analysisCfg := m.cfg
+	analysisCfg.BinaryPath = m.snapshotBinaryPath
+	queued, err := EnqueueCrashAnalysis(ctx, CrashAnalysisJob{
+		Key:         CrashAnalysisJobKey(m.snapshotDir, file),
+		Config:      analysisCfg,
+		SnapshotDir: m.snapshotDir,
+		Entry:       entry,
+		OnQueued: func() {
+			m.updateCrashReportState(file, "queued", "", "")
+			m.cfg.logf("[crash-analysis] queued unique crash %s in %s\n", file, m.snapshotDir)
+		},
+		OnStart: func() {
+			m.updateCrashReportState(file, "running", "", "")
+			m.cfg.logf("[crash-analysis] analyzing unique crash %s in %s\n", file, m.snapshotDir)
+		},
+		OnComplete: func(report CrashLLMReport) {
+			m.cfg.logf("[crash-analysis] unique crash %s classified as %s\n", file, report.Classification)
+			m.updateCrashReportState(file, "completed", report.Classification, "")
+		},
+		OnError: func(err error) {
+			m.cfg.logf("[crash-analysis] unique crash %s analysis failed: %v\n", file, err)
+			m.updateCrashReportState(file, "failed", "", err.Error())
+		},
+		OnCancel: func() {
+			m.cfg.logf("[crash-analysis] unique crash %s removed from analysis queue\n", file)
+			m.updateCrashReportState(file, "pending", "", "")
+		},
+	})
+	if err != nil {
+		m.cfg.logf("[crash-analysis] unique crash %s queue failed: %v\n", file, err)
+		m.updateCrashReportState(file, "failed", "", err.Error())
+		return
+	}
+	if !queued {
+		m.cfg.logf("[crash-analysis] unique crash %s is already queued or running\n", file)
+	}
+}
+
+func AnalyzeUniqueCrashWithLLM(ctx context.Context, cfg FuzzConfig, snapshotDir string, entry CrashAnalysisEntry) (CrashLLMReport, error) {
+	file := filepath.Base(entry.File)
+	if file == "." || file == string(filepath.Separator) || strings.TrimSpace(file) == "" {
+		return CrashLLMReport{}, fmt.Errorf("invalid crash file")
+	}
+	if cfg.BinaryPath == "" {
+		cfg.BinaryPath = filepath.Join(snapshotDir, "cov_driver")
+	}
+	if entry.UniquePath == "" {
+		entry.UniquePath = filepath.ToSlash(filepath.Join("unique_crashes", file))
+	}
+	if entry.ReportPath == "" {
+		entry.ReportPath = filepath.ToSlash(filepath.Join("crash-reports", safeCrashReportName(file)+".json"))
+	}
+	uniquePath := filepath.Join(snapshotDir, filepath.FromSlash(entry.UniquePath))
+	reportPath := filepath.Join(snapshotDir, filepath.FromSlash(entry.ReportPath))
+	crashPath := filepath.Join(snapshotDir, "crashes", file)
+	workDir := filepath.Join(snapshotDir, "crash-llm-work", safeCrashReportName(file))
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return CrashLLMReport{}, err
+	}
+	analyzer := CodexAnalyzer{
+		Command:   cfg.CodexCommand,
+		Model:     cfg.CodexModel,
+		Profile:   cfg.CodexProfile,
+		Timeout:   30 * time.Minute,
+		Runner:    cfg.Runner,
+		EventSink: cfg.EventSink,
+		LogSink:   cfg.LogSink,
+	}
+	report, err := analyzer.AnalyzeCrash(ctx, CrashAnalysisRequest{
+		SnapshotDir:     snapshotDir,
+		SourceDir:       cfg.SourceDir,
+		BinaryPath:      cfg.BinaryPath,
+		CrashPath:       crashPath,
+		UniqueCrashPath: uniquePath,
+		CrashFile:       file,
+		CrashType:       entry.Type,
+		Stack:           entry.Stack,
+		ASanReport:      entry.ASanReport,
+	}, workDir)
+	if err != nil {
+		return CrashLLMReport{}, err
+	}
+	entry.ReportStatus = "completed"
+	entry.ReportError = ""
+	entry.ReportUpdatedAt = time.Now().Format(time.RFC3339)
+	entry.Classification = report.Classification
+	out, _ := json.MarshalIndent(struct {
+		GeneratedAt     string             `json:"generated_at"`
+		SnapshotDir     string             `json:"snapshot_dir"`
+		SourceDir       string             `json:"source_dir"`
+		BinaryPath      string             `json:"binary_path"`
+		CrashPath       string             `json:"crash_path"`
+		UniqueCrashPath string             `json:"unique_crash_path"`
+		StackSignature  string             `json:"stack_signature"`
+		ASanReport      string             `json:"asan_report,omitempty"`
+		Report          CrashLLMReport     `json:"report"`
+		Entry           CrashAnalysisEntry `json:"entry"`
+	}{
+		GeneratedAt:     time.Now().Format(time.RFC3339),
+		SnapshotDir:     snapshotDir,
+		SourceDir:       cfg.SourceDir,
+		BinaryPath:      cfg.BinaryPath,
+		CrashPath:       crashPath,
+		UniqueCrashPath: uniquePath,
+		StackSignature:  entry.Stack,
+		ASanReport:      entry.ASanReport,
+		Report:          report,
+		Entry:           entry,
+	}, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+		return CrashLLMReport{}, err
+	}
+	if err := os.WriteFile(reportPath, out, 0o644); err != nil {
+		return CrashLLMReport{}, err
+	}
+	return report, nil
+}
+
+func (m *CorpusMonitor) crashEntry(file string) (CrashAnalysisEntry, bool) {
+	m.crashMu.Lock()
+	defer m.crashMu.Unlock()
+	for i := range m.uniqueCrashList {
+		if m.uniqueCrashList[i].File == file {
+			m.ensureCrashEntryPaths(&m.uniqueCrashList[i])
+			return m.uniqueCrashList[i], true
+		}
+	}
+	return CrashAnalysisEntry{}, false
+}
+
+func (m *CorpusMonitor) updateCrashReportState(file, status, classification, errText string) {
+	m.crashMu.Lock()
+	defer m.crashMu.Unlock()
+	for i := range m.uniqueCrashList {
+		if m.uniqueCrashList[i].File != file {
+			continue
+		}
+		m.ensureCrashEntryPaths(&m.uniqueCrashList[i])
+		m.uniqueCrashList[i].ReportStatus = status
+		m.uniqueCrashList[i].ReportUpdatedAt = time.Now().Format(time.RFC3339)
+		m.uniqueCrashList[i].ReportError = errText
+		if classification != "" {
+			m.uniqueCrashList[i].Classification = classification
+		}
+		break
+	}
+	m.saveCrashAnalysisLocked()
 }
 
 // CrashAnalysisData returns the current per-snapshot crash analysis state for

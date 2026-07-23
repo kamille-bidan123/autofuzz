@@ -259,7 +259,7 @@ func TestDriverDiffComparesPreviousVersion(t *testing.T) {
 		}
 	}
 
-	result, err := manager.DriverDiff(pending.ID, 2)
+	result, err := manager.DriverDiff(pending.ID, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +271,29 @@ func TestDriverDiffComparesPreviousVersion(t *testing.T) {
 			t.Fatalf("diff is missing %q:\n%s", expected, result.Diff)
 		}
 	}
-	if _, err := manager.DriverDiff(pending.ID, 1); err == nil {
+	if _, err := manager.DriverDiff(pending.ID, 0, 1); err == nil {
 		t.Fatal("v1 unexpectedly has a previous version")
+	}
+
+	multiBase := filepath.Join(pending.TargetDir, "logs", "fuzzing", "driver-targets", "driver-0007", "v001", "driver")
+	multiTarget := filepath.Join(pending.TargetDir, "logs", "fuzzing", "driver-targets", "driver-0007", "v002", "driver")
+	for _, directory := range []string{multiBase, multiTarget} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(multiBase, "fuzz_driver_7.c"), []byte("int value = 7;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(multiTarget, "fuzz_driver_7.c"), []byte("int value = 8;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	multiResult, err := manager.DriverDiff(pending.ID, 7, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multiResult.DriverID != 7 || !strings.Contains(multiResult.Diff, "+int value = 8;") {
+		t.Fatalf("unexpected multi diff result: %#v\n%s", multiResult, multiResult.Diff)
 	}
 
 	requestHTTP := httptest.NewRequest(http.MethodGet, "/api/runs/"+pending.ID+"/snapshots/2/diff", nil)
@@ -339,15 +360,16 @@ func lifecycleTestRequest(t *testing.T) RunRequest {
 		}
 	}
 	return RunRequest{
-		RepositoryURL: repository,
-		Workspace:     filepath.Join(root, "workspace"),
-		PromeFuzzRoot: promefuzz,
-		ConfigPath:    filepath.Join(promefuzz, "config.toml"),
-		PythonPath:    python,
-		PoolSize:      1,
-		Jobs:          1,
-		CodexCommand:  "codex",
-		StopAfter:     "fuzzing",
-		FuzzInterval:  "30m",
+		RepositoryURL:  repository,
+		Workspace:      filepath.Join(root, "workspace"),
+		PromeFuzzRoot:  promefuzz,
+		ConfigPath:     filepath.Join(promefuzz, "config.toml"),
+		PythonPath:     python,
+		PoolSize:       1,
+		Jobs:           1,
+		MaxFuzzDrivers: 2,
+		CodexCommand:   "codex",
+		StopAfter:      "fuzzing",
+		FuzzInterval:   "30m",
 	}
 }

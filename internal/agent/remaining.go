@@ -273,19 +273,20 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 	fuzzLogsDir := filepath.Join(a.LogsDir, "fuzzing")
 
 	cfg := fuzzing.FuzzConfig{
-		DriverDir:    driverDir,
-		SourceDir:    a.State.SourceDir,
-		BuildDir:     a.State.BuildDir,
-		BuildScript:  buildScript,
-		BinaryPath:   binaryPath,
-		CorpusDir:    corpusDir,
-		Interval:     a.Options.FuzzInterval,
-		CodexCommand: a.Options.CodexCommand,
-		CodexModel:   a.Options.CodexModel,
-		CodexProfile: a.Options.CodexProfile,
-		Runner:       a.Runner,
-		LogsDir:      fuzzLogsDir,
-		EventSink:    a.codexEventSinkFuzzing(),
+		DriverDir:          driverDir,
+		SourceDir:          a.State.SourceDir,
+		BuildDir:           a.State.BuildDir,
+		BuildScript:        buildScript,
+		BinaryPath:         binaryPath,
+		CorpusDir:          corpusDir,
+		Interval:           a.Options.FuzzInterval,
+		CodexCommand:       a.Options.CodexCommand,
+		CodexModel:         a.Options.CodexModel,
+		CodexProfile:       a.Options.CodexProfile,
+		Runner:             a.Runner,
+		LogsDir:            fuzzLogsDir,
+		MaxParallelDrivers: a.Options.MaxFuzzDrivers,
+		EventSink:          a.codexEventSinkFuzzing(),
 		FlowSink: func(snapshot fuzzing.FuzzFlowSnapshot) {
 			data, err := json.Marshal(snapshot)
 			if err != nil {
@@ -298,14 +299,15 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 		LogSink: func(message string) {
 			a.emit(runevent.New("log", string(state.StageFuzzing), "", "autofuzz", message))
 		},
-		OnMonitorChanged: a.setCorpusMonitor,
+		OnMonitorChanged:  a.setCorpusMonitor,
+		OnCoverageChanged: a.setCoverageData,
 	}
 
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Minute
 	}
 
-	ctrl := fuzzing.StartFuzzingPhase(ctx, cfg)
+	ctrl := fuzzing.StartMultiFuzzingPhase(ctx, cfg)
 	a.fuzzControllerMu.Lock()
 	a.fuzzController = &ctrl
 	a.fuzzControllerMu.Unlock()

@@ -73,8 +73,85 @@ func TestParseExportJSONBuildDir(t *testing.T) {
 	})
 }
 
-// TestParseBranchReachBuildDir mirrors the buildDir filter for the per-seed
-// branch-reach path used by the corpus monitor's incremental replay.
+func TestParseExportJSONFunctionLineRange(t *testing.T) {
+	sourceDir := t.TempDir()
+	sourceFile := filepath.Join(sourceDir, "lib.c")
+	if err := os.WriteFile(sourceFile, []byte("int foo(void) {\n  if (1) return 1;\n  return 0;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data := mustMarshalExport(t, []exportFunc{{
+		Name:      "foo",
+		Filenames: []string{sourceFile},
+		Count:     1,
+		Regions: [][]int64{
+			{1, 1, 4, 2, 1},
+			{2, 3, 2, 18, 1},
+		},
+	}})
+	got, err := parseExportJSON(data, sourceDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("function count = %d, want 1", len(got))
+	}
+	if got[0].startLine != 1 || got[0].endLine != 4 {
+		t.Fatalf("line range = %d-%d, want 1-4", got[0].startLine, got[0].endLine)
+	}
+	if len(got[0].regions) != 2 || got[0].regions[0].Count != 1 || got[0].regions[0].StartLine != 1 {
+		t.Fatalf("regions were not preserved: %#v", got[0].regions)
+	}
+}
+
+func TestParseExportJSONMacroExpansionKeepsFunctionRangeInMainFile(t *testing.T) {
+	sourceDir := t.TempDir()
+	sourceFile := filepath.Join(sourceDir, "test.c")
+	macroFile := filepath.Join(sourceDir, "macro.h")
+	if err := os.WriteFile(sourceFile, []byte("#include \"macro.h\"\nint target(int *p) {\n  CHECK_NULL_OR_RETURN(p);\n  return 1;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(macroFile, []byte("#define CHECK_NULL_OR_RETURN(p) \\\n  do { \\\n    if (!(p)) return 0; \\\n  } while (0)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data := mustMarshalExport(t, []exportFunc{{
+		Name:      "target",
+		Filenames: []string{sourceFile, macroFile},
+		Count:     1,
+		Regions: [][]int64{
+			{2, 20, 5, 2, 1, 0, 0, 0},
+			{3, 3, 3, 23, 1, 0, 1, 1},    // macro expansion site in test.c
+			{50, 3, 52, 14, 1, 1, 0, 0},  // macro body in macro.h; must not expand function block range
+			{51, 15, 51, 23, 0, 1, 0, 0}, // uncovered macro return region
+		},
+		Branches: [][]int64{
+			{51, 9, 51, 13, 0, 1, 1, 0, 4}, // branch in macro.h mapped to test.c line 3
+		},
+	}})
+	got, err := parseExportJSON(data, sourceDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("function count = %d, want 1", len(got))
+	}
+	if got[0].startLine != 2 || got[0].endLine != 5 {
+		t.Fatalf("function range = %d-%d, want main-file range 2-5", got[0].startLine, got[0].endLine)
+	}
+	if len(got[0].uncovered) != 1 {
+		t.Fatalf("uncovered branches = %#v, want 1", got[0].uncovered)
+	}
+	branch := got[0].uncovered[0]
+	if branch.File != macroFile || branch.Location != [2]int{51, 9} {
+		t.Fatalf("macro branch source = file %q loc %#v, want macro.h L51:9", branch.File, branch.Location)
+	}
+	if branch.ExpansionFile != sourceFile || branch.ExpansionLine != 3 || branch.ExpansionColumn != 3 {
+		t.Fatalf("macro branch expansion = %q L%d:%d, want test.c L3:3", branch.ExpansionFile, branch.ExpansionLine, branch.ExpansionColumn)
+	}
+}
+
+// TestParseBranchReachBuildDir mirrors the buildDir filter for proof-seed
+// branch-site reach validation.
 func TestParseBranchReachBuildDir(t *testing.T) {
 	sourceDir := t.TempDir()
 	buildDir := t.TempDir()

@@ -72,7 +72,7 @@ printf '%s\n' '{"analysis_summary":"built by fake Codex","build_system":"cmake",
 	logDir := filepath.Join(root, "logs")
 	var events []json.RawMessage
 	client := Client{
-		Command: fakeCodex, Timeout: 5 * time.Second, Runner: runner.Runner{},
+		Command: fakeCodex + " -p off", Timeout: 5 * time.Second, Runner: runner.Runner{},
 		EventSink: func(event json.RawMessage) { events = append(events, event) },
 	}
 	result, err := client.Build(context.Background(), Request{
@@ -94,8 +94,9 @@ printf '%s\n' '{"analysis_summary":"built by fake Codex","build_system":"cmake",
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(commandLog), `"--json"`) {
-		t.Fatalf("Codex command did not include --json: %s", commandLog)
+	commandText := string(commandLog)
+	if !strings.Contains(commandText, `"-p" "off"`) || !strings.Contains(commandText, `"--json"`) {
+		t.Fatalf("Codex command did not include expected args: %s", commandText)
 	}
 }
 
@@ -105,4 +106,3 @@ func TestValidateReportRejectsEscape(t *testing.T) {
 		t.Fatal("expected path escape to be rejected")
 	}
 }
-

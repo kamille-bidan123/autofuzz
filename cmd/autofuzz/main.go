@@ -22,6 +22,7 @@ func main() {
 	flag.StringVar(&options.PythonPath, "python", options.PythonPath, "Python executable from the PromeFuzz virtual environment (default: <promefuzz>/.venv/bin/python)")
 	flag.IntVar(&options.PoolSize, "pool-size", options.PoolSize, "PromeFuzz/Codex concurrency")
 	flag.IntVar(&options.Jobs, "jobs", options.Jobs, "Build parallelism")
+	flag.IntVar(&options.MaxFuzzDrivers, "max-fuzz-drivers", options.MaxFuzzDrivers, "Maximum child fuzz drivers to run concurrently (default: nproc)")
 	flag.StringVar(&options.CodexCommand, "codex-command", options.CodexCommand, "Codex CLI executable used for autonomous build and configuration")
 	flag.StringVar(&options.CodexModel, "codex-model", options.CodexModel, "Optional Codex model for autonomous build and configuration")
 	flag.StringVar(&options.CodexProfile, "codex-profile", options.CodexProfile, "Optional Codex profile for autonomous build and configuration")

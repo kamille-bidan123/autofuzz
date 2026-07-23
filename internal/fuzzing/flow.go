@@ -13,17 +13,23 @@ import (
 type FuzzFlowPhase string
 
 const (
-	FuzzFlowStarting   FuzzFlowPhase = "starting"
-	FuzzFlowFuzzing    FuzzFlowPhase = "fuzzing"
-	FuzzFlowCollecting FuzzFlowPhase = "collecting"
-	FuzzFlowAnalyzing  FuzzFlowPhase = "analyzing"
-	FuzzFlowApplying   FuzzFlowPhase = "applying"
-	FuzzFlowRebuilding FuzzFlowPhase = "rebuilding"
+	FuzzFlowStarting    FuzzFlowPhase = "starting"
+	FuzzFlowFuzzing     FuzzFlowPhase = "fuzzing"
+	FuzzFlowCollecting  FuzzFlowPhase = "collecting"
+	FuzzFlowSelecting   FuzzFlowPhase = "selecting_target"
+	FuzzFlowPrechecking FuzzFlowPhase = "prechecking"
+	FuzzFlowAnalyzing   FuzzFlowPhase = "analyzing"
+	FuzzFlowApplying    FuzzFlowPhase = "applying"
+	FuzzFlowValidating  FuzzFlowPhase = "validating"
+	FuzzFlowPromoting   FuzzFlowPhase = "promoting"
+	FuzzFlowRebuilding  FuzzFlowPhase = "rebuilding"
+	FuzzFlowRestarting  FuzzFlowPhase = "restarting"
 )
 
 type FuzzFlowResult struct {
 	Iteration      int       `json:"iteration"`
 	DriverSeq      int       `json:"driver_seq"`
+	DriverID       int       `json:"driver_id,omitempty"`
 	Trigger        string    `json:"trigger,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
 	FinishedAt     time.Time `json:"finished_at"`
@@ -31,12 +37,15 @@ type FuzzFlowResult struct {
 	NeedsUpdate    bool      `json:"needs_update"`
 	Regenerated    bool      `json:"regenerated"`
 	Analysis       string    `json:"analysis,omitempty"`
+	TargetBranch   string    `json:"target_branch,omitempty"`
 	Error          string    `json:"error,omitempty"`
 }
 
 type FuzzFlowSnapshot struct {
 	Iteration    int             `json:"iteration"`
 	DriverSeq    int             `json:"driver_seq"`
+	DriverID     int             `json:"driver_id,omitempty"`
+	TargetCount  int             `json:"target_count,omitempty"`
 	Phase        FuzzFlowPhase   `json:"phase"`
 	Status       string          `json:"status"`
 	Trigger      string          `json:"trigger,omitempty"`

@@ -2,16 +2,46 @@ package codex
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
+
+func TestCommandArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    []string
+	}{
+		{
+			name:    "default",
+			command: "",
+			args:    []string{"exec", "--json"},
+			want:    []string{"codex", "exec", "--json"},
+		},
+		{
+			name:    "profile prefix",
+			command: "codex -p off",
+			args:    []string{"exec", "--json"},
+			want:    []string{"codex", "-p", "off", "exec", "--json"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CommandArgv(tt.command, tt.args...); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("CommandArgv() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestExtractJSONObject(t *testing.T) {
 	object := `{"build_system":"Makefile","language":"c","static_libraries":["libbz2.a"]}`
 	tests := map[string]string{
-		object:                                                         object,
+		object: object,
 		"Build completed. Here's the report: ```json\n" + object + "\n```": object,
-		"Build completed. ```\n" + object + "\n```":                     object,
-		"Prose before. " + object + " prose after":                     object,
+		"Build completed. ```\n" + object + "\n```":                        object,
+		"Prose before. " + object + " prose after":                         object,
 	}
 	for input, expected := range tests {
 		got := ExtractJSONObject([]byte(input))

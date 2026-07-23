@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"autofuzz/internal/codex"
@@ -29,6 +30,67 @@ type AnalysisResponse struct {
 	NeedsUpdate    bool   `json:"needs_update"`
 }
 
+type TargetBranch struct {
+	File     string `json:"file"`
+	Function string `json:"function"`
+	Line     int    `json:"line"`
+	Column   int    `json:"column"`
+	Missing  string `json:"missing"`
+}
+
+type TargetAnalysisRequest struct {
+	DriverID       int                  `json:"driver_id"`
+	FuzzStatus     FuzzStatus           `json:"fuzz_status"`
+	CoverageStatus CorpusCoverageStatus `json:"coverage_status"`
+	SourceDir      string               `json:"source_dir"`
+	WorkDir        string               `json:"work_dir"`
+	BuildScript    string               `json:"build_script"`
+	BinaryPath     string               `json:"binary_path"`
+}
+
+type TargetAnalysisResponse struct {
+	DriverID      int          `json:"driver_id"`
+	NeedsUpdate   bool         `json:"needs_update"`
+	TargetBranch  TargetBranch `json:"target_branch"`
+	ChangedFiles  []string     `json:"changed_files"`
+	ProofSeed     string       `json:"proof_seed"`
+	CompilePassed bool         `json:"compile_passed"`
+	BranchCovered bool         `json:"branch_covered"`
+	Analysis      string       `json:"analysis"`
+}
+
+type CrashAnalysisRequest struct {
+	SnapshotDir     string `json:"snapshot_dir"`
+	SourceDir       string `json:"source_dir"`
+	BinaryPath      string `json:"binary_path"`
+	CrashPath       string `json:"crash_path"`
+	UniqueCrashPath string `json:"unique_crash_path"`
+	CrashFile       string `json:"crash_file"`
+	CrashType       string `json:"crash_type"`
+	Stack           string `json:"stack"`
+	ASanReport      string `json:"asan_report"`
+}
+
+type CrashLLMReport struct {
+	CrashFile                  string   `json:"crash_file"`
+	Reproduced                 bool     `json:"reproduced"`
+	Classification             string   `json:"classification"`
+	Confidence                 string   `json:"confidence"`
+	CrashType                  string   `json:"crash_type"`
+	ASanReport                 string   `json:"asan_report"`
+	RootCause                  string   `json:"root_cause"`
+	TriggerMechanism           string   `json:"trigger_mechanism"`
+	AffectedFile               string   `json:"affected_file"`
+	AffectedFunction           string   `json:"affected_function"`
+	AffectedLine               int      `json:"affected_line"`
+	FuzzDriverAssessment       string   `json:"fuzz_driver_assessment"`
+	LibraryVulnerabilityReport string   `json:"library_vulnerability_report"`
+	ReproductionSteps          []string `json:"reproduction_steps"`
+	Evidence                   []string `json:"evidence"`
+	RecommendedAction          string   `json:"recommended_action"`
+	Analysis                   string   `json:"analysis"`
+}
+
 // analysisSchema defines the JSON schema for Codex output.
 const analysisSchema = `{
   "type":"object","additionalProperties":false,
@@ -39,6 +101,75 @@ const analysisSchema = `{
     "needs_update":{"type":"boolean"}
   }
 }`
+
+const targetAnalysisSchema = `{
+  "type":"object","additionalProperties":false,
+  "required":["driver_id","needs_update","target_branch","changed_files","proof_seed","compile_passed","branch_covered","analysis"],
+  "properties":{
+    "driver_id":{"type":"integer"},
+    "needs_update":{"type":"boolean"},
+    "target_branch":{
+      "type":"object","additionalProperties":false,
+      "required":["file","function","line","column","missing"],
+      "properties":{
+        "file":{"type":"string"},
+        "function":{"type":"string"},
+        "line":{"type":"integer"},
+        "column":{"type":"integer"},
+        "missing":{"type":"string"}
+      }
+    },
+    "changed_files":{"type":"array","items":{"type":"string"}},
+    "proof_seed":{"type":"string"},
+    "compile_passed":{"type":"boolean"},
+    "branch_covered":{"type":"boolean"},
+    "analysis":{"type":"string","description":"必须使用简体中文说明平台期判断、目标未覆盖分支、driver 修改、proof seed 验证命令和结果；函数名、文件名、API 名和代码标识符可保留英文"}
+  }
+}`
+
+const crashAnalysisSchema = `{
+  "type":"object","additionalProperties":false,
+  "required":["crash_file","reproduced","classification","confidence","crash_type","asan_report","root_cause","trigger_mechanism","affected_file","affected_function","affected_line","fuzz_driver_assessment","library_vulnerability_report","reproduction_steps","evidence","recommended_action","analysis"],
+  "properties":{
+    "crash_file":{"type":"string"},
+    "reproduced":{"type":"boolean"},
+    "classification":{"type":"string","enum":["fuzz_driver_bug","library_bug","unknown"]},
+    "confidence":{"type":"string","enum":["high","medium","low"]},
+    "crash_type":{"type":"string"},
+    "asan_report":{"type":"string","description":"复现时获得的 ASan/UBSan/崩溃 stderr 关键报告；保留错误类型、访问地址、top stack frames 和 SUMMARY，必要时摘要化"},
+    "root_cause":{"type":"string"},
+    "trigger_mechanism":{"type":"string"},
+    "affected_file":{"type":"string"},
+    "affected_function":{"type":"string"},
+    "affected_line":{"type":"integer"},
+    "fuzz_driver_assessment":{"type":"string"},
+    "library_vulnerability_report":{"type":"string"},
+    "reproduction_steps":{"type":"array","items":{"type":"string"}},
+    "evidence":{"type":"array","items":{"type":"string"}},
+    "recommended_action":{"type":"string"},
+    "analysis":{"type":"string","description":"必须使用简体中文说明复现结果、根因判断、为什么是 fuzz_driver 问题/库问题/未知，以及证据"}
+  }
+}`
+
+var crashAnalysisRequiredFields = []string{
+	"crash_file",
+	"reproduced",
+	"classification",
+	"confidence",
+	"crash_type",
+	"asan_report",
+	"root_cause",
+	"trigger_mechanism",
+	"affected_file",
+	"affected_function",
+	"affected_line",
+	"fuzz_driver_assessment",
+	"library_vulnerability_report",
+	"reproduction_steps",
+	"evidence",
+	"recommended_action",
+	"analysis",
+}
 
 // CodexAnalyzer wraps the Codex CLI to analyze fuzz status.
 type CodexAnalyzer struct {
@@ -79,9 +210,9 @@ func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir 
 
 	c.logf("[fuzzing] ===== prompt sent to Codex CLI =====\n%s\n[fuzzing] ===== end of prompt =====", prompt)
 
-	args := []string{c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write",
+	args := codex.CommandArgv(c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write",
 		"--ignore-rules", "--json", "--skip-git-repo-check", "--color", "never",
-		"--output-schema", schemaPath, "--output-last-message", responsePath}
+		"--output-schema", schemaPath, "--output-last-message", responsePath)
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
@@ -94,8 +225,8 @@ func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir 
 	defer cancel()
 	onStdout := codex.JSONLineSink(c.EventSink)
 	// Run Codex with cwd = DriverDir so its workspace-write sandbox can edit the
-	// synthesized driver sources directly. The library source (SourceDir) is
-	// read via its absolute path in the prompt.
+	// driver sources directly. The library source (SourceDir) is read via its
+	// absolute path in the prompt.
 	if _, err := c.Runner.RunInputStreaming(commandCtx, logDir, "codex", req.DriverDir, nil, prompt, onStdout, nil, args...); err != nil {
 		return AnalysisResponse{}, fmt.Errorf("Codex fuzz analysis failed: %w", err)
 	}
@@ -123,6 +254,176 @@ func (c CodexAnalyzer) Analyze(ctx context.Context, req AnalysisRequest, logDir 
 	return resp, nil
 }
 
+func (c CodexAnalyzer) AnalyzeTarget(ctx context.Context, req TargetAnalysisRequest, logDir string) (TargetAnalysisResponse, error) {
+	if c.Command == "" {
+		c.Command = "codex"
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 30 * time.Minute
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return TargetAnalysisResponse{}, err
+	}
+
+	schemaPath := filepath.Join(logDir, "response.schema.json")
+	responsePath := filepath.Join(logDir, "response.json")
+	if err := os.WriteFile(schemaPath, []byte(targetAnalysisSchema), 0o644); err != nil {
+		return TargetAnalysisResponse{}, err
+	}
+
+	prompt := buildTargetAnalysisPrompt(req)
+	if err := os.WriteFile(filepath.Join(logDir, "prompt.txt"), []byte(prompt), 0o644); err != nil {
+		return TargetAnalysisResponse{}, err
+	}
+
+	c.logf("[fuzzing] ===== target prompt sent to Codex CLI =====\n%s\n[fuzzing] ===== end of target prompt =====", prompt)
+
+	args := codex.CommandArgv(c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write",
+		"--ignore-rules", "--json", "--skip-git-repo-check", "--color", "never",
+		"--output-schema", schemaPath, "--output-last-message", responsePath)
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	if c.Profile != "" {
+		args = append(args, "--profile", c.Profile)
+	}
+	args = append(args, "-")
+
+	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	onStdout := codex.JSONLineSink(c.EventSink)
+	if _, err := c.Runner.RunInputStreaming(commandCtx, logDir, "codex", req.WorkDir, nil, prompt, onStdout, nil, args...); err != nil {
+		return TargetAnalysisResponse{}, fmt.Errorf("Codex target fuzz analysis failed: %w", err)
+	}
+
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		return TargetAnalysisResponse{}, fmt.Errorf("read Codex target analysis response: %w", err)
+	}
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
+	var resp TargetAnalysisResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return TargetAnalysisResponse{}, fmt.Errorf("decode Codex target analysis response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c CodexAnalyzer) AnalyzeCrash(ctx context.Context, req CrashAnalysisRequest, logDir string) (CrashLLMReport, error) {
+	if c.Command == "" {
+		c.Command = "codex"
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 30 * time.Minute
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return CrashLLMReport{}, err
+	}
+
+	schemaPath := filepath.Join(logDir, "response.schema.json")
+	responsePath := filepath.Join(logDir, "response.json")
+	if err := os.WriteFile(schemaPath, []byte(crashAnalysisSchema), 0o644); err != nil {
+		return CrashLLMReport{}, err
+	}
+
+	prompt := buildCrashAnalysisPrompt(req)
+	if err := os.WriteFile(filepath.Join(logDir, "prompt.txt"), []byte(prompt), 0o644); err != nil {
+		return CrashLLMReport{}, err
+	}
+
+	c.logf("[fuzzing] ===== crash prompt sent to Codex CLI =====\n%s\n[fuzzing] ===== end of crash prompt =====", prompt)
+
+	args := codex.CommandArgv(c.Command, "exec", "--ephemeral", "--sandbox", "danger-full-access",
+		"--ignore-rules", "--json", "--skip-git-repo-check", "--color", "never",
+		"--output-schema", schemaPath, "--output-last-message", responsePath)
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	if c.Profile != "" {
+		args = append(args, "--profile", c.Profile)
+	}
+	args = append(args, "-")
+
+	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	onStdout := codex.JSONLineSink(c.EventSink)
+	if _, err := c.Runner.RunInputStreaming(commandCtx, logDir, "codex-crash", req.SnapshotDir, nil, prompt, onStdout, nil, args...); err != nil {
+		return CrashLLMReport{}, fmt.Errorf("Codex crash analysis failed: %w", err)
+	}
+
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		return CrashLLMReport{}, fmt.Errorf("read Codex crash analysis response: %w", err)
+	}
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
+	if err := validateCrashAnalysisPayload(payload); err != nil {
+		return CrashLLMReport{}, fmt.Errorf("validate Codex crash analysis response: %w", err)
+	}
+	var resp CrashLLMReport
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return CrashLLMReport{}, fmt.Errorf("decode Codex crash analysis response: %w", err)
+	}
+	if err := validateCrashLLMReport(resp); err != nil {
+		return CrashLLMReport{}, fmt.Errorf("validate Codex crash analysis response: %w", err)
+	}
+	if resp.CrashFile == "" {
+		resp.CrashFile = req.CrashFile
+	}
+	if resp.CrashType == "" {
+		resp.CrashType = req.CrashType
+	}
+	if resp.ASanReport == "" {
+		resp.ASanReport = req.ASanReport
+	}
+	return resp, nil
+}
+
+func validateCrashAnalysisPayload(payload []byte) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return err
+	}
+	if obj == nil {
+		return fmt.Errorf("response is not a JSON object")
+	}
+	for _, field := range crashAnalysisRequiredFields {
+		raw, ok := obj[field]
+		if !ok {
+			return fmt.Errorf("missing required field %q", field)
+		}
+		if strings.TrimSpace(string(raw)) == "null" {
+			return fmt.Errorf("required field %q is null", field)
+		}
+	}
+	return nil
+}
+
+func validateCrashLLMReport(resp CrashLLMReport) error {
+	switch resp.Classification {
+	case "fuzz_driver_bug", "library_bug", "unknown":
+	default:
+		return fmt.Errorf("invalid classification %q", resp.Classification)
+	}
+	switch resp.Confidence {
+	case "high", "medium", "low":
+	default:
+		return fmt.Errorf("invalid confidence %q", resp.Confidence)
+	}
+	if strings.TrimSpace(resp.Analysis) == "" {
+		return fmt.Errorf("analysis is empty")
+	}
+	return nil
+}
+
 func buildAnalysisPrompt(req AnalysisRequest) string {
 	coverageJSON, _ := json.MarshalIndent(req.CoverageStatus, "", "  ")
 	fuzzJSON, _ := json.MarshalIndent(req.FuzzStatus, "", "  ")
@@ -132,7 +433,7 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 你对目标库源码 %s 有读权限。
 你对 fuzz driver 目录 %s 有写权限（具体是 %s/synthesized/*.c：各个子 driver 源码 1.c、2.c …… 以及 entry.c/entry.cpp 分派器；你还可以运行该目录下的 build_cov_synthesized_driver.sh 编译脚本验证你的修改能否编译成功）。
 
-下方的覆盖数据是 PER-CORPUS-SEED 的：fuzzer 没有被停止，而是把每个已保存的 corpus 输入逐个 replay 跑过带覆盖插桩的 driver。"uncovered" 列出的是从未被走过的分支；每条包含 line（行号）、function（所属函数）、condition（条件）、missing（缺失的方向）、counts（哪一侧为 0）以及 reaching_seeds：replay 时真正执行到该分支点（控制流评估过该分支）的 seed，即最接近这条卡点分支的输入。只关注 driver 已经到达却触发不了的分支：分析为何该分支条件从未被满足。
+下方的覆盖数据来自运行期 LLVM aggregate coverage。"uncovered" 列出的是已执行函数中仍未覆盖的分支；每条包含 file、function、line、column、condition、missing 和 counts（哪一侧为 0）。只关注 driver 已经触达但还没覆盖完整的函数/分支：分析为何该分支条件从未被满足。
 
 步骤：
 1. 判断 fuzz 是否已到达平台期（覆盖在较长时间内停滞）。无论结论如何，fuzzer 都会继续运行；该信号仅用于决定本轮是否需要改 driver。
@@ -145,7 +446,7 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 ## Fuzz 运行状态
 %s
 
-## 覆盖状态（逐 seed replay）
+## 覆盖状态（aggregate coverage）
 %s
 
 若 fuzz 未到达平台期：plateau_reached=false 且 needs_update=false，并在 "analysis" 里用简体中文说明尚未到达平台期的判断依据。
@@ -157,6 +458,80 @@ func buildAnalysisPrompt(req AnalysisRequest) string {
 最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹、不要写 "## Analysis" 之类的标题）。harness 会用 json.Unmarshal 直接解析你的最终消息，任何 JSON 之外的文字都会导致解析失败、你的改动不会被 rebuild。字段为：plateau_reached（布尔）、analysis（简体中文字符串）、needs_update（布尔）。`,
 		req.SourceDir, req.DriverDir, req.DriverDir,
 		req.SourceDir, req.DriverDir, req.DriverDir,
+		string(fuzzJSON), string(coverageJSON))
+}
+
+func buildCrashAnalysisPrompt(req CrashAnalysisRequest) string {
+	return fmt.Sprintf(`你是一位 crash 根因分析专家，任务是分析一个 libFuzzer unique crash。
+
+你对 fuzz 快照目录 %s 有读权限和执行权限。当前工作目录就是这个快照目录。
+你对目标库源码 %s 有读权限。不要修改库源码，不要修改 fuzz driver，不要修改 corpus/crash 输入。
+
+快照中的关键文件：
+- fuzz driver 二进制：%s
+- 原始 crash 输入：%s
+- dedup 后 unique crash 输入：%s
+- 快照内 driver 源码通常在 driver/ 或 synthesized/ 下
+- 构建脚本通常在当前快照目录下
+
+Go 侧已经做过一次快速复现和栈去重，信息如下：
+- crash_file: %s
+- crash_type: %s
+- stack_signature: %s
+- asan_report:
+%s
+
+	你的任务：
+	1. 自己在当前快照目录复现 crash，例如运行二进制加 -runs=1 和 unique crash 输入；必要时设置 LLVM_PROFILE_FILE=/dev/null。注意 ASan/LSan 符号化会显著拖慢运行，ASAN_OPTIONS=symbolize=1 是开启符号化，ASAN_OPTIONS=symbolize=0 是关闭符号化。复现策略：先用 ASAN_OPTIONS=symbolize=0 快速确认 crash/leak/timeout 是否能复现；如果能复现或需要栈信息，再切到 ASAN_OPTIONS=symbolize=1，并给 timeout 留出更长等待时间以获取符号化 top stack frames 和 SUMMARY。
+	2. 阅读快照内 fuzz driver 源码和目标库源码，确认 crash 是 fuzz_driver 使用 API/构造对象不当导致，还是库在合理输入/API 调用下的真实缺陷。
+3. 分类只能是：
+   - fuzz_driver_bug：driver 违反 API 前置条件、构造了不可能由真实调用方产生的非法对象、生命周期/回调/内存归属明显错误，或 crash 发生在 driver 自身逻辑。
+   - library_bug：输入通过目标库公开/预期 API 到达库代码，driver 没有明显违反前置条件，crash 根因在库代码。
+   - unknown：证据不足，无法可靠判断。
+4. asan_report 字段必须填写你复现或 Go 侧提供的 ASan/UBSan/崩溃报告关键内容，至少包含错误类型、top stack frames 和 SUMMARY；如果不是 ASan 报告，也要填写 stderr 中能说明 crash/timeout/OOM 的关键内容。
+5. 如果是 fuzz_driver_bug，fuzz_driver_assessment 必须说明 driver 哪里错、为什么不是库漏洞、建议如何改 driver；library_vulnerability_report 置为空字符串。
+6. 如果是 library_bug，library_vulnerability_report 必须写成详细漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现步骤和建议修复；fuzz_driver_assessment 可以说明 driver 为什么是合理调用。
+7. 如果 unknown，明确缺失哪些证据以及下一步需要什么验证。
+
+	最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。字段只能为：
+	crash_file、reproduced、classification、confidence、crash_type、asan_report、root_cause、trigger_mechanism、affected_file、affected_function、affected_line、fuzz_driver_assessment、library_vulnerability_report、reproduction_steps、evidence、recommended_action、analysis。
+	不要输出 severity、impact、title 等额外字段。analysis 必须使用简体中文。`,
+		req.SnapshotDir, req.SourceDir, req.BinaryPath, req.CrashPath, req.UniqueCrashPath,
+		req.CrashFile, req.CrashType, req.Stack, req.ASanReport)
+}
+
+func buildTargetAnalysisPrompt(req TargetAnalysisRequest) string {
+	coverageJSON, _ := json.MarshalIndent(req.CoverageStatus, "", "  ")
+	fuzzJSON, _ := json.MarshalIndent(req.FuzzStatus, "", "  ")
+
+	return fmt.Sprintf(`你是一位 fuzz driver 优化专家。你这次只能优化一个子 driver：driver_id=%d。
+
+你对目标库源码 %s 有读权限。
+你的工作目录是 %s。当前子 driver 源码在该目录的 driver/ 子目录下，文件名保持 PromeFuzz 原始输出形式（如 fuzz_driver_N.c/fuzz_driver_N.cpp）。你只能修改 driver/ 下的当前子 driver 源码以及当前目录的构建脚本，不要修改其他 task 文件、不要修改库源码。
+
+当前 target 的构建脚本是 %s，编译产物必须是 %s。
+
+下方覆盖数据只属于当前 driver，不是全局合一 driver。uncovered 列表中的每条分支包含 file、function、line、column、condition、missing 和 counts。
+
+你的任务：
+1. 判断当前 driver 是否到达平台期。本轮 Go 侧已经用硬策略选择了它，你仍需在 analysis 里说明依据。
+2. 如果你判断不应该修改，直接返回 needs_update=false。
+3. 如果需要修改，选择一个明确的未覆盖分支作为目标，必须填写 target_branch：file、function、line、column、missing。column 直接使用 coverage 中该分支的 column。
+4. 修改 driver/ 下的当前子 driver 源码，使输入构造/API 调用顺序有机会覆盖该分支；不要新建合一 dispatcher，不要引用已经演进过的旧 synthesized driver。
+5. 运行构建脚本验证编译通过。
+6. 自己创建一个 proof seed 文件，并用编译后的 fuzz driver 运行它；然后用 llvm-profdata/llvm-cov 或等价命令确认 target_branch 的 missing direction 已覆盖。
+7. 只有在编译通过且 proof seed 覆盖目标分支时，才能返回 needs_update=true、compile_passed=true、branch_covered=true，并填写 proof_seed 路径。
+
+如果编译失败、无法构造 proof seed、无法证明目标分支覆盖，必须回滚自己的修改并返回 needs_update=false。
+
+## Fuzz 运行状态
+%s
+
+## 当前 Driver 覆盖状态
+%s
+
+最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。analysis 必须使用简体中文。`,
+		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath,
 		string(fuzzJSON), string(coverageJSON))
 }
 

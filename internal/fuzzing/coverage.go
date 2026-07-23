@@ -25,23 +25,123 @@ type CoverageSummary struct {
 }
 
 type FunctionCoverage struct {
-	Function   string `json:"function"`
-	File       string `json:"file"`
-	EntryCount int64  `json:"entry_count"`
+	Function   string           `json:"function"`
+	File       string           `json:"file"`
+	StartLine  int              `json:"start_line,omitempty"`
+	EndLine    int              `json:"end_line,omitempty"`
+	EntryCount int64            `json:"entry_count"`
+	Regions    []CoverageRegion `json:"-"`
 }
 
 type PartialFunctionCoverage struct {
 	Function          string            `json:"function"`
 	File              string            `json:"file"`
+	StartLine         int               `json:"start_line,omitempty"`
+	EndLine           int               `json:"end_line,omitempty"`
 	EntryCount        int64             `json:"entry_count"`
 	UncoveredBranches []UncoveredBranch `json:"uncovered_branches"`
+	Regions           []CoverageRegion  `json:"-"`
+}
+
+type CoverageRegion struct {
+	StartLine      int
+	StartColumn    int
+	EndLine        int
+	EndColumn      int
+	Count          int64
+	FileID         int
+	ExpandedFileID int
+	Kind           int64
 }
 
 type UncoveredBranch struct {
-	Location  [2]int           `json:"location"`
-	Condition string           `json:"condition"`
-	Missing   string           `json:"missing"`
-	Counts    map[string]int64 `json:"counts"`
+	Location        [2]int           `json:"location"`
+	File            string           `json:"file,omitempty"`
+	ExpansionFile   string           `json:"expansion_file,omitempty"`
+	ExpansionLine   int              `json:"expansion_line,omitempty"`
+	ExpansionColumn int              `json:"expansion_column,omitempty"`
+	Condition       string           `json:"condition"`
+	Missing         string           `json:"missing"`
+	Counts          map[string]int64 `json:"counts"`
+}
+
+func CloneCoverageSnapshot(snapshot CoverageSnapshot) CoverageSnapshot {
+	snapshot.Coverage = CloneCoverageStatus(snapshot.Coverage)
+	return snapshot
+}
+
+func CloneMultiCoverageSnapshot(snapshot MultiCoverageSnapshot) MultiCoverageSnapshot {
+	snapshot.RunningTargets = append([]int(nil), snapshot.RunningTargets...)
+	snapshot.QueuedTargets = append([]int(nil), snapshot.QueuedTargets...)
+	snapshot.NextTargets = append([]int(nil), snapshot.NextTargets...)
+	if snapshot.NextAnalysisAt != nil {
+		next := *snapshot.NextAnalysisAt
+		snapshot.NextAnalysisAt = &next
+	}
+	snapshot.Coverage = CloneCoverageStatus(snapshot.Coverage)
+	snapshot.Targets = append([]TargetCoverageSnapshot(nil), snapshot.Targets...)
+	for index := range snapshot.Targets {
+		snapshot.Targets[index].Coverage = CloneCoverageStatus(snapshot.Targets[index].Coverage)
+	}
+	return snapshot
+}
+
+func CloneCoverageStatus(status CoverageStatus) CoverageStatus {
+	status.Full = append([]FunctionCoverage(nil), status.Full...)
+	for index := range status.Full {
+		status.Full[index].Regions = append([]CoverageRegion(nil), status.Full[index].Regions...)
+	}
+	status.Partial = append([]PartialFunctionCoverage(nil), status.Partial...)
+	for index := range status.Partial {
+		status.Partial[index].UncoveredBranches = cloneUncoveredBranches(status.Partial[index].UncoveredBranches)
+		status.Partial[index].Regions = append([]CoverageRegion(nil), status.Partial[index].Regions...)
+	}
+	return status
+}
+
+func CloneCoverageData(data any) any {
+	switch value := data.(type) {
+	case CoverageSnapshot:
+		return CloneCoverageSnapshot(value)
+	case *CoverageSnapshot:
+		if value == nil {
+			return data
+		}
+		cloned := CloneCoverageSnapshot(*value)
+		return &cloned
+	case MultiCoverageSnapshot:
+		return CloneMultiCoverageSnapshot(value)
+	case *MultiCoverageSnapshot:
+		if value == nil {
+			return data
+		}
+		cloned := CloneMultiCoverageSnapshot(*value)
+		return &cloned
+	default:
+		return data
+	}
+}
+
+func cloneUncoveredBranches(branches []UncoveredBranch) []UncoveredBranch {
+	if branches == nil {
+		return nil
+	}
+	out := append([]UncoveredBranch(nil), branches...)
+	for index := range out {
+		out[index].Counts = cloneCounts(out[index].Counts)
+	}
+	return out
+}
+
+func cloneCounts(counts map[string]int64) map[string]int64 {
+	if counts == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(counts))
+	for key, value := range counts {
+		out[key] = value
+	}
+	return out
 }
 
 // CollectCoverageStatus runs llvm-cov export on the given profdata file
@@ -63,12 +163,9 @@ func CollectCoverageStatusWithDriverDir(profdataPath, binaryPath, sourceDir, bui
 // CollectBranchReach runs llvm-cov export and returns, per function name
 // (restricted to sourceDir, entry_count > 0), the set of branch locations
 // [line, col] that were actually evaluated at least once (trueCount +
-// falseCount > 0). This is used to attribute each aggregate uncovered branch
-// to the seeds that reached the branch SITE (not merely entered its function):
-// a seed that entered the function but returned before the branch is excluded.
-// Unlike CollectCoverageStatus it does not extract condition text, so it is
-// cheaper per seed; branch detail (condition/counts) still comes from the one
-// aggregate CollectCoverageStatus call.
+// falseCount > 0). This is used by proof-seed validation to ensure the target
+// branch site was actually reached before checking whether the missing branch
+// direction became covered.
 func CollectBranchReach(profdataPath, binaryPath, sourceDir, buildDir string) (map[string]map[[2]int]bool, error) {
 	covBin := findCovTool()
 	if covBin == "" {
@@ -159,14 +256,20 @@ func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driver
 			status.Full = append(status.Full, FunctionCoverage{
 				Function:   fc.name,
 				File:       fc.file,
+				StartLine:  fc.startLine,
+				EndLine:    fc.endLine,
 				EntryCount: fc.entryCount,
+				Regions:    fc.regions,
 			})
 		} else {
 			status.Partial = append(status.Partial, PartialFunctionCoverage{
 				Function:          fc.name,
 				File:              fc.file,
+				StartLine:         fc.startLine,
+				EndLine:           fc.endLine,
 				EntryCount:        fc.entryCount,
 				UncoveredBranches: fc.uncovered,
+				Regions:           fc.regions,
 			})
 		}
 	}
@@ -183,9 +286,12 @@ func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driver
 type funcCoverageData struct {
 	name       string
 	file       string
+	startLine  int
+	endLine    int
 	entryCount int64
 	full       bool
 	uncovered  []UncoveredBranch
+	regions    []CoverageRegion
 }
 
 type exportFunc struct {
@@ -237,6 +343,9 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 		if entryCount == 0 {
 			continue
 		}
+		regions := coverageRegionsFromExport(fn)
+		expansions := expansionRegionsByFileID(regions)
+		startLine, endLine := functionLineRange(fn)
 
 		var uncovered []UncoveredBranch
 		// Use branches: [line, col, endLine, endCol, trueCount, falseCount, ...]
@@ -250,14 +359,33 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 			endCol := int(br[3])
 			trueCount := br[4]
 			falseCount := br[5]
+			fileID := 0
+			if len(br) >= 7 {
+				fileID = int(br[6])
+			}
+			branchFile := filenameForID(fn.Filenames, fileID)
+			expansionFile := ""
+			expansionLine := 0
+			expansionColumn := 0
+			if fileID != 0 {
+				if expansion, ok := expansions[fileID]; ok {
+					expansionFile = filenameForID(fn.Filenames, expansion.FileID)
+					expansionLine = expansion.StartLine
+					expansionColumn = expansion.StartColumn
+				}
+			}
 
-			cond := extractCondition(fnFile, line, col, endLine, endCol)
+			cond := extractCondition(branchFile, line, col, endLine, endCol)
 
 			if trueCount == 0 {
 				uncovered = append(uncovered, UncoveredBranch{
-					Location:  [2]int{line, col},
-					Condition: cond,
-					Missing:   "true",
+					Location:        [2]int{line, col},
+					File:            branchFile,
+					ExpansionFile:   expansionFile,
+					ExpansionLine:   expansionLine,
+					ExpansionColumn: expansionColumn,
+					Condition:       cond,
+					Missing:         "true",
 					Counts: map[string]int64{
 						"true":  0,
 						"false": falseCount,
@@ -266,9 +394,13 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 			}
 			if falseCount == 0 {
 				uncovered = append(uncovered, UncoveredBranch{
-					Location:  [2]int{line, col},
-					Condition: cond,
-					Missing:   "false",
+					Location:        [2]int{line, col},
+					File:            branchFile,
+					ExpansionFile:   expansionFile,
+					ExpansionLine:   expansionLine,
+					ExpansionColumn: expansionColumn,
+					Condition:       cond,
+					Missing:         "false",
 					Counts: map[string]int64{
 						"true":  trueCount,
 						"false": 0,
@@ -280,13 +412,114 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 		result = append(result, funcCoverageData{
 			name:       fn.Name,
 			file:       fnFile,
+			startLine:  startLine,
+			endLine:    endLine,
 			entryCount: entryCount,
 			full:       len(uncovered) == 0,
 			uncovered:  uncovered,
+			regions:    regions,
 		})
 	}
 
 	return result, nil
+}
+
+func coverageRegionsFromExport(fn exportFunc) []CoverageRegion {
+	regions := make([]CoverageRegion, 0, len(fn.Regions))
+	for _, raw := range fn.Regions {
+		if len(raw) < 5 {
+			continue
+		}
+		region := CoverageRegion{
+			StartLine:   int(raw[0]),
+			StartColumn: int(raw[1]),
+			EndLine:     int(raw[2]),
+			EndColumn:   int(raw[3]),
+			Count:       raw[4],
+		}
+		if len(raw) >= 7 {
+			region.FileID = int(raw[5])
+			region.ExpandedFileID = int(raw[6])
+		}
+		if len(raw) >= 8 {
+			region.Kind = raw[7]
+		}
+		if region.StartLine <= 0 || region.EndLine <= 0 {
+			continue
+		}
+		regions = append(regions, region)
+	}
+	return regions
+}
+
+func expansionRegionsByFileID(regions []CoverageRegion) map[int]CoverageRegion {
+	out := map[int]CoverageRegion{}
+	for _, region := range regions {
+		if region.Kind != 1 || region.ExpandedFileID <= 0 {
+			continue
+		}
+		if _, exists := out[region.ExpandedFileID]; !exists {
+			out[region.ExpandedFileID] = region
+		}
+	}
+	return out
+}
+
+func filenameForID(filenames []string, id int) string {
+	if id >= 0 && id < len(filenames) {
+		return filenames[id]
+	}
+	if len(filenames) > 0 {
+		return filenames[0]
+	}
+	return ""
+}
+
+func functionLineRange(fn exportFunc) (int, int) {
+	startLine := 0
+	endLine := 0
+	for _, region := range coverageRegionsFromExport(fn) {
+		if region.FileID != 0 || region.Kind == 3 {
+			continue
+		}
+		start := region.StartLine
+		end := region.EndLine
+		if start <= 0 || end <= 0 {
+			continue
+		}
+		if startLine == 0 || start < startLine {
+			startLine = start
+		}
+		if end > endLine {
+			endLine = end
+		}
+	}
+	if startLine == 0 {
+		for _, branch := range fn.Branches {
+			if len(branch) < 4 {
+				continue
+			}
+			fileID := 0
+			if len(branch) >= 7 {
+				fileID = int(branch[6])
+			}
+			if fileID != 0 {
+				continue
+			}
+			start := int(branch[0])
+			end := int(branch[2])
+			if start <= 0 || end <= 0 {
+				continue
+			}
+			if startLine == 0 || start < startLine {
+				startLine = start
+			}
+			if end > endLine {
+				endLine = end
+			}
+		}
+	}
+	return startLine, endLine
 }
 
 // extractCondition reads the source file and extracts the code text

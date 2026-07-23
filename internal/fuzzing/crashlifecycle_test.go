@@ -3,6 +3,7 @@ package fuzzing
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,5 +40,24 @@ func TestCopyFilePreservesMode(t *testing.T) {
 func TestCopyFileMissingSource(t *testing.T) {
 	if err := copyFile(filepath.Join(t.TempDir(), "nope"), filepath.Join(t.TempDir(), "dst")); err == nil {
 		t.Fatal("expected error for missing source")
+	}
+}
+
+func TestTrimASanReport(t *testing.T) {
+	short := "ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer"
+	if got := trimASanReport(short); got != short {
+		t.Fatalf("short report changed: %q", got)
+	}
+	long := strings.Repeat("A", maxASanReportBytes+20)
+	got := trimASanReport(long)
+	if len(got) <= maxASanReportBytes || !strings.Contains(got, "truncated") {
+		t.Fatalf("long report was not truncated with marker: len=%d", len(got))
+	}
+}
+
+func TestParseASanTypeRecognizesLeakSanitizer(t *testing.T) {
+	stderr := "==3==ERROR: LeakSanitizer: detected memory leaks"
+	if got := parseASanType(stderr); got != "leak" {
+		t.Fatalf("parseASanType() = %q, want leak", got)
 	}
 }

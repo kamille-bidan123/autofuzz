@@ -132,14 +132,25 @@ var asanTypeRe = regexp.MustCompile(`AddressSanitizer:\s+(\S+)`)
 
 // CrashAnalysisEntry is one unique crash in a snapshot's crash-analysis.json.
 type CrashAnalysisEntry struct {
-	File  string `json:"file"`
-	Type  string `json:"type"`
-	Stack string `json:"stack"`
+	File            string `json:"file"`
+	Type            string `json:"type"`
+	Stack           string `json:"stack"`
+	ASanReport      string `json:"asan_report,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+	UniquePath      string `json:"unique_path,omitempty"`
+	ReportPath      string `json:"report_path,omitempty"`
+	ReportStatus    string `json:"report_status,omitempty"`
+	ReportError     string `json:"report_error,omitempty"`
+	ReportUpdatedAt string `json:"report_updated_at,omitempty"`
+	Classification  string `json:"classification,omitempty"`
 }
 
 // parseASanType extracts the ASan error type (e.g. "heap-use-after-free",
 // "SEGV", "heap-buffer-overflow") from the crash stderr.
 func parseASanType(stderr string) string {
+	if strings.Contains(stderr, "LeakSanitizer") {
+		return "leak"
+	}
 	m := asanTypeRe.FindStringSubmatch(stderr)
 	if m == nil {
 		return "unknown"
@@ -164,11 +175,28 @@ func parseASanStack(stderr string) string {
 	return "stack: " + strings.Join(fns, " <- ")
 }
 
-// replayCrash runs the given binary once on a crash input. Returns whether it
-// crashed (non-zero exit), the ASan error type, and the symbolized stack
-// signature (top 5 frames) for dedup. ASan symbolization is kept ON (not
-// symbolize=0) because the stack function names are needed for dedup.
-func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (reproduced bool, crashType string, stack string) {
+const maxASanReportBytes = 12 * 1024
+
+type crashReplayResult struct {
+	Reproduced bool
+	Type       string
+	Stack      string
+	ASanReport string
+}
+
+func trimASanReport(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if len(stderr) <= maxASanReportBytes {
+		return stderr
+	}
+	return stderr[:maxASanReportBytes] + "\n... <ASan report truncated>"
+}
+
+// replayCrashDetailed runs the given binary once on a crash input and returns
+// the full crash triage data needed by unique-crash LLM analysis. ASan
+// symbolization is kept ON (not symbolize=0) because the stack function names
+// are needed for dedup and the human/LLM report.
+func replayCrashDetailed(ctx context.Context, binary, driverDir, crashPath string) crashReplayResult {
 	replayCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(replayCtx, binary, "-runs=1", crashPath)
@@ -177,13 +205,22 @@ func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (repr
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+	stderrText := stderr.String()
 	if replayCtx.Err() == context.DeadlineExceeded {
-		return false, "timeout", "(timeout)"
+		return crashReplayResult{Reproduced: false, Type: "timeout", Stack: "(timeout)", ASanReport: trimASanReport(stderrText)}
 	}
 	if runErr != nil {
-		return true, parseASanType(stderr.String()), parseASanStack(stderr.String())
+		return crashReplayResult{Reproduced: true, Type: parseASanType(stderrText), Stack: parseASanStack(stderrText), ASanReport: trimASanReport(stderrText)}
 	}
-	return false, "", ""
+	return crashReplayResult{ASanReport: trimASanReport(stderrText)}
+}
+
+// replayCrash runs the given binary once on a crash input. Returns whether it
+// crashed (non-zero exit), the ASan error type, and the symbolized stack
+// signature (top 5 frames) for existing dedup/triage callers.
+func replayCrash(ctx context.Context, binary, driverDir, crashPath string) (reproduced bool, crashType string, stack string) {
+	result := replayCrashDetailed(ctx, binary, driverDir, crashPath)
+	return result.Reproduced, result.Type, result.Stack
 }
 
 type crashReportEntry struct {
