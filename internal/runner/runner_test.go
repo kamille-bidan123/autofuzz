@@ -67,10 +67,29 @@ func TestRunForwardsCommandAndCarriageReturnProgress(t *testing.T) {
 		!strings.Contains(lines[0].line, `argv="sh" "-c"`) {
 		t.Fatalf("command event = %#v", lines[0])
 	}
-	for index, want := range []string{"step 1", "step 2", "done"} {
+	for index, want := range []string{"step 1\r", "step 2", "done"} {
 		got := lines[index+1]
 		if got.stream != "stdout" || got.line != want {
 			t.Fatalf("output event %d = %#v, want %q", index, got, want)
 		}
+	}
+}
+
+func TestLineWriterForwardsTqdmStyleCarriageProgress(t *testing.T) {
+	var lines []string
+	writer := &lineWriter{callback: func(line string) {
+		lines = append(lines, line)
+	}}
+	if _, err := writer.Write([]byte("\rLoading 0%")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("\rLoading 8%")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"\r", "Loading 0%\r", "\r", "Loading 8%\r", "\n"}; !reflect.DeepEqual(lines, want) {
+		t.Fatalf("progress lines = %#v, want %#v", lines, want)
 	}
 }

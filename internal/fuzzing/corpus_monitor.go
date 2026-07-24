@@ -24,10 +24,11 @@ var liveCorpusMonitors = struct {
 // CoverageSnapshot is a cached llvm-cov export result, updated periodically by
 // the monitor's coverage loop for the web UI.
 type CoverageSnapshot struct {
-	Timestamp time.Time      `json:"timestamp"`
-	Available bool           `json:"available"`
-	SeedCount int            `json:"seed_count"`
-	Coverage  CoverageStatus `json:"coverage"`
+	Timestamp   time.Time          `json:"timestamp"`
+	Available   bool               `json:"available"`
+	SeedCount   int                `json:"seed_count"`
+	Coverage    CoverageStatus     `json:"coverage"`
+	APICoverage *APICoverageReport `json:"api_coverage,omitempty"`
 }
 
 // CorpusMonitor watches runtime LLVM profile output in the background. The

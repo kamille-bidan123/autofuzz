@@ -11,9 +11,12 @@ let renderedLines = 0;
 let disposed = false;
 
 function writeLine(line) {
-  const source = line.source ? `\x1b[36m${line.source}\x1b[0m ` : '';
-  const message = String(line.message || '').replace(/\r?\n/g, '\r\n');
-  terminal?.write(`${source}${message}\r\n`);
+  const rawMessage = String(line.message ?? '');
+  const controlOnly = rawMessage.replace(/[\r\n]/g, '') === '';
+  const source = !controlOnly && line.source ? `\x1b[36m${line.source}\x1b[0m ` : '';
+  const message = rawMessage.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+  const suffix = message.endsWith('\r') || message.endsWith('\n') ? '' : '\r\n';
+  terminal?.write(`${source}${message}${suffix}`);
 }
 
 function renderPendingLines(forceReset = false) {

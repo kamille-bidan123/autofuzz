@@ -34,6 +34,30 @@ const ui = useAutofuzz();
         </div>
       </section>
 
+      <section class="coverage-card api-coverage-card">
+        <div class="coverage-card-head"><h3>导出 API 覆盖</h3><span>{{ ui.apiCoverageMeta }}</span></div>
+        <div v-if="!ui.apiCoverage" class="cov-empty">等待 API 预处理产物</div>
+        <div v-else-if="!ui.apiCoverage.available" class="cov-empty">{{ ui.apiCoverage.error || '等待 API 预处理产物' }}</div>
+        <div v-else class="api-coverage-list">
+          <div class="api-coverage-row head">
+            <div></div>
+            <div>API</div>
+            <div>子 driver</div>
+          </div>
+          <div v-for="api in ui.apiCoverageRows" :key="`${api.name}:${api.decl_location || api.location || api.header}`" class="api-coverage-row" :class="{covered: api.covered}">
+            <div class="api-state"><span class="api-state-icon" :class="{covered: api.covered}" :title="api.covered ? '已覆盖' : '未覆盖'"></span></div>
+            <div class="api-name-cell">
+              <strong>{{ api.name }}</strong>
+              <span>{{ api.headerName }}</span>
+            </div>
+            <div class="api-driver-icons">
+              <span v-for="driver in api.drivers" :key="`${api.name}:${driver.driver_id}:${driver.seq || 0}`" class="api-driver-icon" :title="ui.apiDriverTitle(driver)">{{ ui.apiDriverLabel(driver) }}</span>
+              <span v-if="!api.drivers.length" class="api-driver-icon empty" title="未覆盖">-</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section v-if="ui.coverageIsMulti" class="coverage-card">
         <div class="coverage-card-head"><h3>子 driver</h3><span>{{ ui.coverageDriverMeta }}</span></div>
         <div class="driver-cov-list">

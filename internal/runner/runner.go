@@ -137,10 +137,10 @@ func combineLineCallbacks(command, stream string, global func(string, string, st
 }
 
 type lineWriter struct {
-	writers       []io.Writer
-	callback      func(string)
-	pending       []byte
-	afterCarriage bool
+	writers      []io.Writer
+	callback     func(string)
+	pending      []byte
+	progressOpen bool
 }
 
 func (w *lineWriter) Write(data []byte) (int, error) {
@@ -153,22 +153,38 @@ func (w *lineWriter) Write(data []byte) (int, error) {
 		return len(data), nil
 	}
 	w.pending = append(w.pending, data...)
+	sawCarriage := bytes.IndexByte(data, '\r') >= 0
 	for {
-		if w.afterCarriage && len(w.pending) > 0 {
-			if w.pending[0] == '\n' {
-				w.pending = w.pending[1:]
-			}
-			w.afterCarriage = false
-		}
 		index := bytes.IndexAny(w.pending, "\r\n")
 		if index < 0 {
 			break
 		}
 		delimiter := w.pending[index]
 		line := string(w.pending[:index])
+		if delimiter == '\r' {
+			if index+1 < len(w.pending) && w.pending[index+1] == '\n' {
+				w.pending = w.pending[index+2:]
+				w.callback(line)
+				w.progressOpen = false
+				continue
+			}
+			w.pending = w.pending[index+1:]
+			w.callback(line + "\r")
+			w.progressOpen = true
+			continue
+		}
 		w.pending = w.pending[index+1:]
-		w.callback(line)
-		w.afterCarriage = delimiter == '\r'
+		if line == "" && w.progressOpen {
+			w.callback("\n")
+		} else {
+			w.callback(line)
+		}
+		w.progressOpen = false
+	}
+	if sawCarriage && len(w.pending) > 0 {
+		w.callback(string(w.pending) + "\r")
+		w.pending = nil
+		w.progressOpen = true
 	}
 	return len(data), nil
 }
@@ -178,7 +194,7 @@ func (w *lineWriter) Flush() {
 		w.callback(string(w.pending))
 	}
 	w.pending = nil
-	w.afterCarriage = false
+	w.progressOpen = false
 }
 
 func quoteArgv(argv []string) string {

@@ -546,9 +546,14 @@ func (m *Manager) TriggerFuzzAnalysis(id string) error {
 // CoverageData returns the cached coverage snapshot from the task's corpus
 // monitor (in-memory), or reads from disk for historical tasks.
 func (m *Manager) CoverageData(id string, driverID, seq int) any {
+	targetDir := m.targetDirFor(id)
 	task, exists := m.Get(id)
 	if !exists {
-		return historicalCoverageData(id, driverID, seq)
+		data := historicalCoverageData(id, driverID, seq)
+		if driverID > 0 {
+			return data
+		}
+		return attachAPICoverage(data, targetDir)
 	}
 	task.mu.RLock()
 	agent := task.agent
@@ -560,7 +565,44 @@ func (m *Manager) CoverageData(id string, driverID, seq int) any {
 	if driverID > 0 {
 		return filterCoverageDataByDriver(data, driverID, seq)
 	}
-	return data
+	return attachAPICoverage(data, targetDir)
+}
+
+func attachAPICoverage(data any, targetDir string) any {
+	if targetDir == "" {
+		return data
+	}
+	report, _ := fuzzing.CollectAPICoverage(targetDir)
+	switch value := data.(type) {
+	case fuzzing.CoverageSnapshot:
+		value.APICoverage = &report
+		return value
+	case *fuzzing.CoverageSnapshot:
+		if value == nil {
+			return map[string]any{"available": false, "api_coverage": report}
+		}
+		cloned := fuzzing.CloneCoverageSnapshot(*value)
+		cloned.APICoverage = &report
+		return cloned
+	case fuzzing.MultiCoverageSnapshot:
+		value.APICoverage = &report
+		return value
+	case *fuzzing.MultiCoverageSnapshot:
+		if value == nil {
+			return map[string]any{"available": false, "api_coverage": report}
+		}
+		cloned := fuzzing.CloneMultiCoverageSnapshot(*value)
+		cloned.APICoverage = &report
+		return cloned
+	case map[string]any:
+		value["api_coverage"] = report
+		return value
+	default:
+		if data == nil {
+			return map[string]any{"available": false, "api_coverage": report}
+		}
+		return data
+	}
 }
 
 func filterCoverageDataByDriver(data any, driverID, seq int) any {

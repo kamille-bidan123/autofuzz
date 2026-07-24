@@ -275,6 +275,27 @@
     .cov-stat .lbl { font-size: 11px; color: var(--muted); font-weight: 700; }
     .cov-stat.full .num { color: var(--green); }
     .cov-stat.partial .num { color: var(--orange); }
+    .api-coverage-list { max-height: 420px; overflow: auto; }
+    .api-coverage-row {
+      min-width: 720px; display: grid; grid-template-columns: 34px minmax(260px, 1fr) minmax(220px, .7fr);
+      gap: 10px; align-items: center; padding: 9px 12px; border-bottom: 1px dashed var(--line); font-size: 12px;
+    }
+    .api-coverage-row.head { position: sticky; top: 0; z-index: 1; background: white; color: var(--muted); font-size: 11px; font-weight: 900; border-bottom: 2px solid var(--line); }
+    .api-coverage-row.covered { background: #fbfffd; }
+    .api-state { display: flex; justify-content: center; }
+    .api-state-icon {
+      width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c8d1de; background: white; display: inline-block;
+    }
+    .api-state-icon.covered { border-color: #38a169; background: #38a169; box-shadow: inset 0 0 0 3px white; }
+    .api-name-cell { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .api-name-cell strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: #26344d; }
+    .api-name-cell span { min-width: 0; overflow-wrap: anywhere; font-size: 10px; color: var(--muted); font-weight: 750; }
+    .api-driver-icons { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+    .api-driver-icon {
+      width: 28px; height: 28px; border-radius: 50%; display: inline-grid; place-items: center;
+      background: var(--blue-soft); color: var(--blue); font-size: 10px; font-weight: 950; line-height: 1;
+    }
+    .api-driver-icon.empty { background: #f1f4f8; color: #9aa6b8; }
     .driver-cov-list { max-height: 520px; overflow: auto; }
     .driver-cov-row { min-width: 1020px; display: grid; grid-template-columns: 66px 92px 50px 86px repeat(4, minmax(104px, 1fr)) 68px; gap: 8px; align-items: center; padding: 9px 12px; border-bottom: 1px dashed var(--line); font-size: 11px; }
     .driver-cov-row.head { position: sticky; top: 0; z-index: 1; background: white; border-bottom: 2px solid var(--line); color: var(--muted); font-weight: 900; }

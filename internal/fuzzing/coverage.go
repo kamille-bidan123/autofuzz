@@ -67,6 +67,7 @@ type UncoveredBranch struct {
 
 func CloneCoverageSnapshot(snapshot CoverageSnapshot) CoverageSnapshot {
 	snapshot.Coverage = CloneCoverageStatus(snapshot.Coverage)
+	snapshot.APICoverage = CloneAPICoverageReport(snapshot.APICoverage)
 	return snapshot
 }
 
@@ -82,6 +83,7 @@ func CloneMultiCoverageSnapshot(snapshot MultiCoverageSnapshot) MultiCoverageSna
 		snapshot.NextAnalysisAt = &next
 	}
 	snapshot.Coverage = CloneCoverageStatus(snapshot.Coverage)
+	snapshot.APICoverage = CloneAPICoverageReport(snapshot.APICoverage)
 	snapshot.Targets = append([]TargetCoverageSnapshot(nil), snapshot.Targets...)
 	for index := range snapshot.Targets {
 		snapshot.Targets[index].Coverage = CloneCoverageStatus(snapshot.Targets[index].Coverage)

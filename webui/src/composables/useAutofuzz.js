@@ -498,6 +498,35 @@ function sortedCoverageFunctions(functions) {
   return [...(functions || [])].sort(compareCoverageFunctions);
 }
 
+function apiCoveragePercent(report) {
+  const value = Number(report?.coverage || 0);
+  return `${Math.round(value * 100)}%`;
+}
+
+function apiDriverLabel(driver) {
+  const id = Number(driver?.driver_id || 0);
+  return id > 0 ? `d${id}` : 'd-';
+}
+
+function apiDriverTitle(driver) {
+  const label = apiDriverLabel(driver);
+  const seq = Number(driver?.seq || 0);
+  const version = seq > 0 ? ` / v${seq}` : '';
+  return `${label}${version}`;
+}
+
+function apiHeaderName(path = '') {
+  const text = String(path || '');
+  return text.split('/').pop() || text || '-';
+}
+
+function compareAPICoverageRows(a, b) {
+  if (a.covered !== b.covered) return a.covered ? -1 : 1;
+  const nameDelta = String(a.name || '').localeCompare(String(b.name || ''));
+  if (nameDelta !== 0) return nameDelta;
+  return String(a.header || '').localeCompare(String(b.header || ''));
+}
+
 function branchLocation(branch) {
   const loc = branch?.location || [];
   if (branch?.expansion_line) {
@@ -910,6 +939,21 @@ export function useAutofuzzController() {
         meta: `${(fn.file || '').split('/').pop()} · 调用 ${fn.entry_count || 0} 次`
       }))
     );
+    const apiCoverage = computed(() => coverageData.value?.api_coverage || null);
+    const apiCoverageRows = computed(() =>
+      [...(apiCoverage.value?.apis || [])]
+        .map(api => ({
+          ...api,
+          drivers: [...(api.drivers || [])].sort((a, b) => Number(a.driver_id || 0) - Number(b.driver_id || 0)),
+          headerName: apiHeaderName(api.header)
+        }))
+        .sort(compareAPICoverageRows)
+    );
+    const apiCoverageMeta = computed(() => {
+      const report = apiCoverage.value;
+      if (!report?.available) return '等待 API 数据';
+      return `${report.covered_apis || 0}/${report.total_apis || 0} · ${apiCoveragePercent(report)}`;
+    });
     const driverSchedule = computed(() =>
       buildDriverSchedule(coverageData.value, coverageTargets.value, nowMs.value, coverageReceivedAtMs.value)
     );
@@ -2564,6 +2608,11 @@ export function useAutofuzzController() {
       coverageDriverMeta,
       coverageIsMulti,
       coveragePartials,
+      apiCoverage,
+      apiCoverageRows,
+      apiCoverageMeta,
+      apiDriverLabel,
+      apiDriverTitle,
       driverSchedule,
       coverageStats,
       coverageTargets,

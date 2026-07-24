@@ -79,6 +79,7 @@ type MultiCoverageSnapshot struct {
 	AnalysisRemainingSeconds int64                    `json:"analysis_remaining_seconds,omitempty"`
 	Coverage                 CoverageStatus           `json:"coverage"`
 	Targets                  []TargetCoverageSnapshot `json:"targets"`
+	APICoverage              *APICoverageReport       `json:"api_coverage,omitempty"`
 }
 
 type TargetCoverageSnapshot struct {

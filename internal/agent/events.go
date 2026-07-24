@@ -58,7 +58,7 @@ func (a *Agent) stageFailed(stage state.Stage, message string) {
 }
 
 func (a *Agent) onCommandLine(command, stream, line string) {
-	if strings.TrimSpace(line) == "" {
+	if strings.TrimSpace(line) == "" && line != "\n" {
 		return
 	}
 	// Codex stdout is JSONL and is published as a structured codex event.

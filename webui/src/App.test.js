@@ -51,6 +51,17 @@ describe('App routing', () => {
           mode: 'multi',
           available: true,
           timestamp: '2026-07-24T09:00:00+08:00',
+          api_coverage: {
+            available: true,
+            total_apis: 2,
+            covered_apis: 1,
+            coverage: 0.5,
+            driver_count: 1,
+            apis: [
+              {name: 'sample_context_create', header: '/src/sample.h', covered: true, drivers: [{driver_id: 1, seq: 2}]},
+              {name: 'sample_context_destroy', header: '/src/sample.h', covered: false, drivers: []}
+            ]
+          },
           targets: [{
             driver_id: 1,
             status: 'running',
@@ -137,5 +148,32 @@ describe('App routing', () => {
     await flushPromises();
 
     expect(router.currentRoute.value.fullPath).toBe('/tasks/run-1/coverage');
+  });
+
+  it('renders exported API coverage with driver icons', async () => {
+    const defaultFetch = fetch.getMockImplementation();
+    fetch.mockImplementation(url => {
+      if (String(url) !== '/api/runs/run-1') return defaultFetch(url);
+      return jsonResponse({
+        id: 'run-1',
+        status: 'completed',
+        request: {repository_url: '/src/libexif'},
+        stages: [{id: 'cloned', status: 'completed'}],
+        target_dir: '/work/libexif'
+      });
+    });
+
+    wrapper = mount(App, {global: {plugins: [router]}});
+    await flushPromises();
+
+    await router.push('/tasks/run-1/coverage');
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('导出 API 覆盖');
+    expect(wrapper.text()).toContain('1/2 · 50%');
+    expect(wrapper.text()).toContain('sample_context_create');
+    expect(wrapper.text()).toContain('sample_context_destroy');
+    expect(wrapper.find('.api-driver-icon').text()).toBe('d1');
   });
 });
