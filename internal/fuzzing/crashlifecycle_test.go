@@ -55,9 +55,38 @@ func TestTrimASanReport(t *testing.T) {
 	}
 }
 
+func TestCrashReplayEnvUnsetsDebugInfodURLs(t *testing.T) {
+	env := crashReplayEnv([]string{
+		"PATH=/usr/bin",
+		"DEBUGINFOD_URLS=https://debuginfod.example/",
+		"ASAN_OPTIONS=detect_leaks=1",
+	})
+
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DEBUGINFOD_URLS=") {
+			t.Fatalf("DEBUGINFOD_URLS was not unset: %v", env)
+		}
+	}
+	if !containsEnv(env, "LLVM_PROFILE_FILE=/dev/null") {
+		t.Fatalf("LLVM_PROFILE_FILE not set for replay: %v", env)
+	}
+	if !containsEnv(env, "ASAN_OPTIONS=detect_leaks=1") {
+		t.Fatalf("unrelated ASAN_OPTIONS was not preserved: %v", env)
+	}
+}
+
 func TestParseASanTypeRecognizesLeakSanitizer(t *testing.T) {
 	stderr := "==3==ERROR: LeakSanitizer: detected memory leaks"
 	if got := parseASanType(stderr); got != "leak" {
 		t.Fatalf("parseASanType() = %q, want leak", got)
 	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
 }

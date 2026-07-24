@@ -277,11 +277,6 @@ function reportSection(title, text) {
   return {title, text: value};
 }
 
-function reportListSection(title, items) {
-  if (!Array.isArray(items) || !items.length) return null;
-  return {title, items: items.map(item => codexString(item)).filter(Boolean)};
-}
-
 function crashReportAnalyzeLabel(status) {
   if (status === 'queued') return '排队中';
   if (status === 'running') return '分析中';
@@ -313,29 +308,19 @@ function buildCrashReportCard(item, focusFile) {
   const file = entry.file || report.crash_file || '(unknown crash)';
   const meta = [
     `状态: ${crashReportStatusLabel(status)}`,
-    entry.type || report.crash_type ? `类型: ${entry.type || report.crash_type}` : '',
-    report.confidence ? `置信度: ${report.confidence}` : ''
+    entry.type ? `类型: ${entry.type}` : ''
   ].filter(Boolean).join(' · ');
-  const affected = [report.affected_file, report.affected_function, report.affected_line ? `L${report.affected_line}` : '']
-    .filter(Boolean)
-    .join(' · ');
   const asanReport = report.asan_report || entry.asan_report || envelope.asan_report || envelope.stack_signature || '';
   const sections = [
     reportSection('ASan 报告', asanReport),
-    reportSection('根因判断', report.root_cause || report.analysis || entry.report_error || item?.error || '等待 LLM 分析输出'),
-    reportSection('触发机制', report.trigger_mechanism),
-    reportSection('fuzz_driver 评估', report.fuzz_driver_assessment),
-    reportSection('库漏洞报告', report.library_vulnerability_report),
-    reportListSection('复现步骤', report.reproduction_steps),
-    reportListSection('证据', report.evidence),
-    reportSection('建议动作', report.recommended_action),
+    reportSection('分析结论', report.analysis || entry.report_error || item?.error || '等待 LLM 分析输出'),
     reportSection('错误', entry.report_error || item?.error)
   ].filter(Boolean);
   if (!sections.length) sections.push({title: '状态', text: '暂无报告正文'});
   return {
     file,
     meta,
-    affected,
+    affected: '',
     sections,
     status,
     badge: crashReportBadge(status, classification),

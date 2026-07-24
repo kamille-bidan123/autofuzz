@@ -4,3 +4,16 @@
 *.tmp
 /autofuzz
 /autofuzz-web
+
+# Web UI local dependencies and transient outputs.
+/webui/node_modules/
+/webui/.vite/
+/webui/.vite-temp/
+/webui/dist/
+/webui/coverage/
+
+# Package manager logs.
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -19,7 +19,7 @@ func TestCrashAnalysisSchedulerDeduplicatesQueuedOrRunningJob(t *testing.T) {
 		case <-ctx.Done():
 			return CrashLLMReport{}, ctx.Err()
 		case <-release:
-			return CrashLLMReport{CrashFile: entry.File, Classification: "unknown"}, nil
+			return CrashLLMReport{Classification: "unknown"}, nil
 		}
 	})
 	job := CrashAnalysisJob{
@@ -64,7 +64,7 @@ func TestCrashAnalysisSchedulerAllowsRequeueAfterCompletion(t *testing.T) {
 	var runs atomic.Int32
 	scheduler := newCrashAnalysisScheduler(func(ctx context.Context, cfg FuzzConfig, snapshotDir string, entry CrashAnalysisEntry) (CrashLLMReport, error) {
 		runs.Add(1)
-		return CrashLLMReport{CrashFile: entry.File, Classification: "unknown"}, nil
+		return CrashLLMReport{Classification: "unknown"}, nil
 	})
 	job := CrashAnalysisJob{
 		SnapshotDir: t.TempDir(),
@@ -111,7 +111,7 @@ func TestCrashAnalysisSchedulerSnapshotAndRemoveQueued(t *testing.T) {
 		case <-ctx.Done():
 			return CrashLLMReport{}, ctx.Err()
 		case <-release:
-			return CrashLLMReport{CrashFile: entry.File, Classification: "unknown"}, nil
+			return CrashLLMReport{Classification: "unknown"}, nil
 		}
 	})
 	snapDir := t.TempDir()

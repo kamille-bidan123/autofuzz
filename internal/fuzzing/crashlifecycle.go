@@ -192,6 +192,19 @@ func trimASanReport(stderr string) string {
 	return stderr[:maxASanReportBytes] + "\n... <ASan report truncated>"
 }
 
+func crashReplayEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DEBUGINFOD_URLS=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	// Keep ASan symbolization enabled, but prevent llvm-symbolizer from spending
+	// replay time on debuginfod lookups.
+	return append(out, "LLVM_PROFILE_FILE=/dev/null")
+}
+
 // replayCrashDetailed runs the given binary once on a crash input and returns
 // the full crash triage data needed by unique-crash LLM analysis. ASan
 // symbolization is kept ON (not symbolize=0) because the stack function names
@@ -201,7 +214,7 @@ func replayCrashDetailed(ctx context.Context, binary, driverDir, crashPath strin
 	defer cancel()
 	cmd := exec.CommandContext(replayCtx, binary, "-runs=1", crashPath)
 	cmd.Dir = driverDir
-	cmd.Env = append(os.Environ(), "LLVM_PROFILE_FILE=/dev/null")
+	cmd.Env = crashReplayEnv(os.Environ())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()

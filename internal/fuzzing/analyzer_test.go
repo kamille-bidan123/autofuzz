@@ -43,56 +43,60 @@ func TestCrashAnalysisPromptRequiresCrashClassification(t *testing.T) {
 		`fuzz_driver_bug`,
 		`library_bug`,
 		`unknown`,
-		`library_vulnerability_report 必须写成详细漏洞报告`,
 		`ASAN_OPTIONS=symbolize=0`,
 		`ASAN_OPTIONS=symbolize=1`,
 		`先用 ASAN_OPTIONS=symbolize=0 快速确认`,
 		`给 timeout 留出更长等待时间`,
+		`如果 classification 为 fuzz_driver_bug`,
+		`具体修改建议`,
 		`最后回复必须是且仅是一个 JSON 对象`,
-		`不要输出 severity`,
+		`classification、analysis`,
+		`不要输出 crash_file`,
 	} {
 		if !strings.Contains(prompt, requirement) {
 			t.Fatalf("crash prompt is missing requirement %q", requirement)
 		}
 	}
-	if !strings.Contains(crashAnalysisSchema, `"classification"`) || !strings.Contains(crashAnalysisSchema, `"library_bug"`) || !strings.Contains(crashAnalysisSchema, `"asan_report"`) {
+	for _, field := range []string{
+		`crash_file`,
+		`reproduced`,
+		`confidence`,
+		`crash_type`,
+		`asan_report`,
+		`root_cause`,
+		`trigger_mechanism`,
+		`affected_file`,
+		`affected_function`,
+		`affected_line`,
+		`fuzz_driver_assessment`,
+		`library_vulnerability_report`,
+		`reproduction_steps`,
+		`evidence`,
+		`recommended_action`,
+	} {
+		if strings.Contains(crashAnalysisSchema, field) {
+			t.Fatalf("crash schema should not include %s", field)
+		}
+	}
+	if !strings.Contains(crashAnalysisSchema, `"classification"`) || !strings.Contains(crashAnalysisSchema, `"library_bug"`) || !strings.Contains(crashAnalysisSchema, `"analysis"`) {
 		t.Fatal("crash schema does not require a classification enum")
 	}
 }
 
 func TestValidateCrashAnalysisPayloadRejectsPartialResponse(t *testing.T) {
 	payload := []byte(`{
-		"analysis":"只返回分析正文",
-		"crash_type":"leak",
-		"asan_report":"SUMMARY: AddressSanitizer: leaked",
-		"fuzz_driver_assessment":"",
-		"library_vulnerability_report":"report"
+		"analysis":"只返回分析正文"
 	}`)
 
 	err := validateCrashAnalysisPayload(payload)
-	if err == nil || !strings.Contains(err.Error(), `missing required field "crash_file"`) {
-		t.Fatalf("validateCrashAnalysisPayload() error = %v, want missing crash_file", err)
+	if err == nil || !strings.Contains(err.Error(), `missing required field "classification"`) {
+		t.Fatalf("validateCrashAnalysisPayload() error = %v, want missing classification", err)
 	}
 }
 
 func TestValidateCrashAnalysisPayloadAcceptsCompleteResponse(t *testing.T) {
 	payload := []byte(`{
-		"crash_file":"leak-a",
-		"reproduced":true,
 		"classification":"library_bug",
-		"confidence":"high",
-		"crash_type":"leak",
-		"asan_report":"SUMMARY: AddressSanitizer: leaked",
-		"root_cause":"library leaks an entry",
-		"trigger_mechanism":"load/save/unref",
-		"affected_file":"exif-data.c",
-		"affected_function":"exif_data_save_data_content",
-		"affected_line":788,
-		"fuzz_driver_assessment":"",
-		"library_vulnerability_report":"detailed report",
-		"reproduction_steps":["run the binary"],
-		"evidence":["LSan report"],
-		"recommended_action":"fix count handling",
 		"analysis":"这是库缺陷。"
 	}`)
 
@@ -108,36 +112,15 @@ func TestValidateCrashAnalysisPayloadAcceptsCompleteResponse(t *testing.T) {
 	}
 }
 
-func TestValidateCrashAnalysisPayloadIgnoresExtraFields(t *testing.T) {
+func TestValidateCrashAnalysisPayloadRejectsExtraFields(t *testing.T) {
 	payload := []byte(`{
-		"crash_file":"leak-a",
-		"reproduced":true,
 		"classification":"library_bug",
-		"confidence":"medium",
-		"crash_type":"leak",
-		"asan_report":"SUMMARY: AddressSanitizer: leaked",
-		"root_cause":"library leaks an entry",
-		"trigger_mechanism":"load/save/unref",
-		"affected_file":"exif-data.c",
-		"affected_function":"exif_data_save_data_content",
-		"affected_line":788,
-		"fuzz_driver_assessment":"",
-		"library_vulnerability_report":"detailed report",
-		"reproduction_steps":["run the binary"],
-		"evidence":["LSan report"],
-		"recommended_action":"fix count handling",
-		"analysis":"这是库缺陷。",
-		"severity":"high"
+		"asan_report":"SUMMARY: AddressSanitizer: stack-buffer-overflow",
+		"analysis":"这是库缺陷。"
 	}`)
 
-	if err := validateCrashAnalysisPayload(payload); err != nil {
-		t.Fatalf("validateCrashAnalysisPayload(): %v", err)
-	}
-	var report CrashLLMReport
-	if err := json.Unmarshal(payload, &report); err != nil {
-		t.Fatalf("unmarshal report: %v", err)
-	}
-	if err := validateCrashLLMReport(report); err != nil {
-		t.Fatalf("validateCrashLLMReport(): %v", err)
+	err := validateCrashAnalysisPayload(payload)
+	if err == nil || !strings.Contains(err.Error(), `unexpected field "asan_report"`) {
+		t.Fatalf("validateCrashAnalysisPayload() error = %v, want unexpected asan_report", err)
 	}
 }

@@ -72,23 +72,8 @@ type CrashAnalysisRequest struct {
 }
 
 type CrashLLMReport struct {
-	CrashFile                  string   `json:"crash_file"`
-	Reproduced                 bool     `json:"reproduced"`
-	Classification             string   `json:"classification"`
-	Confidence                 string   `json:"confidence"`
-	CrashType                  string   `json:"crash_type"`
-	ASanReport                 string   `json:"asan_report"`
-	RootCause                  string   `json:"root_cause"`
-	TriggerMechanism           string   `json:"trigger_mechanism"`
-	AffectedFile               string   `json:"affected_file"`
-	AffectedFunction           string   `json:"affected_function"`
-	AffectedLine               int      `json:"affected_line"`
-	FuzzDriverAssessment       string   `json:"fuzz_driver_assessment"`
-	LibraryVulnerabilityReport string   `json:"library_vulnerability_report"`
-	ReproductionSteps          []string `json:"reproduction_steps"`
-	Evidence                   []string `json:"evidence"`
-	RecommendedAction          string   `json:"recommended_action"`
-	Analysis                   string   `json:"analysis"`
+	Classification string `json:"classification"`
+	Analysis       string `json:"analysis"`
 }
 
 // analysisSchema defines the JSON schema for Codex output.
@@ -129,45 +114,15 @@ const targetAnalysisSchema = `{
 
 const crashAnalysisSchema = `{
   "type":"object","additionalProperties":false,
-  "required":["crash_file","reproduced","classification","confidence","crash_type","asan_report","root_cause","trigger_mechanism","affected_file","affected_function","affected_line","fuzz_driver_assessment","library_vulnerability_report","reproduction_steps","evidence","recommended_action","analysis"],
+  "required":["classification","analysis"],
   "properties":{
-    "crash_file":{"type":"string"},
-    "reproduced":{"type":"boolean"},
     "classification":{"type":"string","enum":["fuzz_driver_bug","library_bug","unknown"]},
-    "confidence":{"type":"string","enum":["high","medium","low"]},
-    "crash_type":{"type":"string"},
-    "asan_report":{"type":"string","description":"复现时获得的 ASan/UBSan/崩溃 stderr 关键报告；保留错误类型、访问地址、top stack frames 和 SUMMARY，必要时摘要化"},
-    "root_cause":{"type":"string"},
-    "trigger_mechanism":{"type":"string"},
-    "affected_file":{"type":"string"},
-    "affected_function":{"type":"string"},
-    "affected_line":{"type":"integer"},
-    "fuzz_driver_assessment":{"type":"string"},
-    "library_vulnerability_report":{"type":"string"},
-    "reproduction_steps":{"type":"array","items":{"type":"string"}},
-    "evidence":{"type":"array","items":{"type":"string"}},
-    "recommended_action":{"type":"string"},
-    "analysis":{"type":"string","description":"必须使用简体中文说明复现结果、根因判断、为什么是 fuzz_driver 问题/库问题/未知，以及证据"}
+    "analysis":{"type":"string","description":"必须使用简体中文说明复现结果、根因判断和证据；如果 classification 为 fuzz_driver_bug，必须写清楚 fuzz driver 的错误位置、错误原因以及具体修改建议"}
   }
 }`
 
 var crashAnalysisRequiredFields = []string{
-	"crash_file",
-	"reproduced",
 	"classification",
-	"confidence",
-	"crash_type",
-	"asan_report",
-	"root_cause",
-	"trigger_mechanism",
-	"affected_file",
-	"affected_function",
-	"affected_line",
-	"fuzz_driver_assessment",
-	"library_vulnerability_report",
-	"reproduction_steps",
-	"evidence",
-	"recommended_action",
 	"analysis",
 }
 
@@ -375,15 +330,6 @@ func (c CodexAnalyzer) AnalyzeCrash(ctx context.Context, req CrashAnalysisReques
 	if err := validateCrashLLMReport(resp); err != nil {
 		return CrashLLMReport{}, fmt.Errorf("validate Codex crash analysis response: %w", err)
 	}
-	if resp.CrashFile == "" {
-		resp.CrashFile = req.CrashFile
-	}
-	if resp.CrashType == "" {
-		resp.CrashType = req.CrashType
-	}
-	if resp.ASanReport == "" {
-		resp.ASanReport = req.ASanReport
-	}
 	return resp, nil
 }
 
@@ -394,6 +340,15 @@ func validateCrashAnalysisPayload(payload []byte) error {
 	}
 	if obj == nil {
 		return fmt.Errorf("response is not a JSON object")
+	}
+	allowed := make(map[string]bool, len(crashAnalysisRequiredFields))
+	for _, field := range crashAnalysisRequiredFields {
+		allowed[field] = true
+	}
+	for field := range obj {
+		if !allowed[field] {
+			return fmt.Errorf("unexpected field %q", field)
+		}
 	}
 	for _, field := range crashAnalysisRequiredFields {
 		raw, ok := obj[field]
@@ -412,11 +367,6 @@ func validateCrashLLMReport(resp CrashLLMReport) error {
 	case "fuzz_driver_bug", "library_bug", "unknown":
 	default:
 		return fmt.Errorf("invalid classification %q", resp.Classification)
-	}
-	switch resp.Confidence {
-	case "high", "medium", "low":
-	default:
-		return fmt.Errorf("invalid confidence %q", resp.Confidence)
 	}
 	if strings.TrimSpace(resp.Analysis) == "" {
 		return fmt.Errorf("analysis is empty")
@@ -488,14 +438,14 @@ Go 侧已经做过一次快速复现和栈去重，信息如下：
    - fuzz_driver_bug：driver 违反 API 前置条件、构造了不可能由真实调用方产生的非法对象、生命周期/回调/内存归属明显错误，或 crash 发生在 driver 自身逻辑。
    - library_bug：输入通过目标库公开/预期 API 到达库代码，driver 没有明显违反前置条件，crash 根因在库代码。
    - unknown：证据不足，无法可靠判断。
-4. asan_report 字段必须填写你复现或 Go 侧提供的 ASan/UBSan/崩溃报告关键内容，至少包含错误类型、top stack frames 和 SUMMARY；如果不是 ASan 报告，也要填写 stderr 中能说明 crash/timeout/OOM 的关键内容。
-5. 如果是 fuzz_driver_bug，fuzz_driver_assessment 必须说明 driver 哪里错、为什么不是库漏洞、建议如何改 driver；library_vulnerability_report 置为空字符串。
-6. 如果是 library_bug，library_vulnerability_report 必须写成详细漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现步骤和建议修复；fuzz_driver_assessment 可以说明 driver 为什么是合理调用。
-7. 如果 unknown，明确缺失哪些证据以及下一步需要什么验证。
+4. analysis 必须写成一段完整的简体中文分析，包含复现结果、关键证据、根因判断，以及为什么分类为 fuzz_driver_bug / library_bug / unknown。
+5. 如果 classification 为 fuzz_driver_bug，analysis 必须写清楚 fuzz driver 的错误位置、错误原因、为什么不是库漏洞，以及具体修改建议。
+6. 如果 classification 为 library_bug，analysis 必须写成库漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现方式和建议修复。
+7. 如果 classification 为 unknown，analysis 必须明确缺失哪些证据以及下一步需要什么验证。
 
 	最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。字段只能为：
-	crash_file、reproduced、classification、confidence、crash_type、asan_report、root_cause、trigger_mechanism、affected_file、affected_function、affected_line、fuzz_driver_assessment、library_vulnerability_report、reproduction_steps、evidence、recommended_action、analysis。
-	不要输出 severity、impact、title 等额外字段。analysis 必须使用简体中文。`,
+	classification、analysis。
+	不要输出 crash_file、reproduced、confidence、crash_type、asan_report、root_cause、trigger_mechanism、affected_file、affected_function、affected_line、fuzz_driver_assessment、library_vulnerability_report、evidence、recommended_action、severity、impact、title 等额外字段。analysis 必须使用简体中文。`,
 		req.SnapshotDir, req.SourceDir, req.BinaryPath, req.CrashPath, req.UniqueCrashPath,
 		req.CrashFile, req.CrashType, req.Stack, req.ASanReport)
 }

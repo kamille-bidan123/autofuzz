@@ -4,11 +4,11 @@ import { buildCrashReportCards } from './useAutofuzz';
 const reports = [
   {
     entry: {file: 'crash-a', report_status: 'completed'},
-    report: {root_cause: 'root cause A'}
+    report: {analysis: 'root cause A'}
   },
   {
     entry: {file: 'crash-b', report_status: 'completed'},
-    report: {root_cause: 'root cause B'}
+    report: {analysis: 'root cause B'}
   }
 ];
 
