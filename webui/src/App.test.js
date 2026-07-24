@@ -175,5 +175,49 @@ describe('App routing', () => {
     expect(wrapper.text()).toContain('sample_context_create');
     expect(wrapper.text()).toContain('sample_context_destroy');
     expect(wrapper.find('.api-driver-icon').text()).toBe('d1');
+
+    const toggleButtons = wrapper.findAll('.api-coverage-toggle button');
+    expect(toggleButtons.map(button => button.text())).toEqual(['API -> Driver', 'Driver -> API']);
+    await toggleButtons[1].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('d1 / v2');
+    expect(wrapper.text()).toContain('1 个 API · 运行中');
+    expect(wrapper.find('.driver-api-chip strong').text()).toBe('sample_context_create');
+    expect(wrapper.text()).not.toContain('sample_context_destroy');
+  });
+
+  it('shows a loading state while coverage data is being fetched', async () => {
+    const defaultFetch = fetch.getMockImplementation();
+    let releaseCoverage;
+    fetch.mockImplementation(url => {
+      const path = String(url);
+      if (path === '/api/runs/run-1') {
+        return jsonResponse({
+          id: 'run-1',
+          status: 'completed',
+          request: {repository_url: '/src/libexif'},
+          stages: [{id: 'cloned', status: 'completed'}],
+          target_dir: '/work/libexif'
+        });
+      }
+      if (path !== '/api/runs/run-1/coverage') return defaultFetch(url);
+      return new Promise(resolve => {
+        releaseCoverage = () => defaultFetch(url).then(resolve);
+      });
+    });
+
+    wrapper = mount(App, {global: {plugins: [router]}});
+    await flushPromises();
+
+    await router.push('/tasks/run-1/coverage');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('正在加载覆盖数据...');
+    expect(wrapper.text()).toContain('正在加载 API 覆盖数据...');
+    expect(wrapper.text()).not.toContain('覆盖数据将在 fuzzing 阶段开始后可用');
+
+    releaseCoverage();
+    await flushPromises();
   });
 });

@@ -269,6 +269,16 @@
     .coverage-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: #fbfcff; }
     .coverage-card-head h3 { margin: 0; font-size: 14px; }
     .coverage-card-head span { color: var(--muted); font-size: 11px; font-weight: 700; text-align: right; }
+    .api-coverage-head { align-items: flex-start; flex-wrap: wrap; }
+    .api-coverage-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; min-width: 0; }
+    .segmented-control { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid #d6deeb; border-radius: 8px; background: white; }
+    .segmented-control button {
+      min-height: 26px; padding: 4px 9px; border-radius: 6px; background: transparent; color: var(--muted);
+      font-size: 11px; font-weight: 900; white-space: nowrap;
+    }
+    .segmented-control button.active { color: white; background: var(--blue); }
+    .segmented-control button:hover:not(:disabled) { transform: none; }
+    .segmented-control button:hover:not(:disabled):not(.active) { background: var(--blue-soft); color: var(--blue); transform: none; }
     .cov-summary { display: flex; gap: 16px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); font-size: 13px; }
     .cov-stat { display: flex; flex-direction: column; gap: 2px; }
     .cov-stat .num { font-size: 22px; font-weight: 900; }
@@ -296,6 +306,22 @@
       background: var(--blue-soft); color: var(--blue); font-size: 10px; font-weight: 950; line-height: 1;
     }
     .api-driver-icon.empty { background: #f1f4f8; color: #9aa6b8; }
+    .driver-api-coverage-row {
+      min-width: 720px; display: grid; grid-template-columns: 190px minmax(320px, 1fr);
+      gap: 12px; align-items: start; padding: 10px 12px; border-bottom: 1px dashed var(--line); font-size: 12px;
+    }
+    .driver-api-coverage-row.head { position: sticky; top: 0; z-index: 1; background: white; color: var(--muted); font-size: 11px; font-weight: 900; border-bottom: 2px solid var(--line); }
+    .api-driver-cell { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .api-driver-cell > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .api-driver-cell strong { color: #26344d; font-size: 12px; }
+    .api-driver-cell span:not(.api-driver-icon) { color: var(--muted); font-size: 10px; font-weight: 750; text-align: left; }
+    .driver-api-list { display: flex; flex-wrap: wrap; gap: 7px; min-width: 0; }
+    .driver-api-chip {
+      display: inline-flex; flex-direction: column; gap: 1px; max-width: 260px; min-height: 32px;
+      padding: 5px 8px; border: 1px solid #dce6f5; border-radius: 8px; background: #fbfdff;
+    }
+    .driver-api-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #26344d; font-size: 11px; line-height: 1.2; }
+    .driver-api-chip small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 9.5px; font-weight: 750; }
     .driver-cov-list { max-height: 520px; overflow: auto; }
     .driver-cov-row { min-width: 1020px; display: grid; grid-template-columns: 66px 92px 50px 86px repeat(4, minmax(104px, 1fr)) 68px; gap: 8px; align-items: center; padding: 9px 12px; border-bottom: 1px dashed var(--line); font-size: 11px; }
     .driver-cov-row.head { position: sticky; top: 0; z-index: 1; background: white; border-bottom: 2px solid var(--line); color: var(--muted); font-weight: 900; }

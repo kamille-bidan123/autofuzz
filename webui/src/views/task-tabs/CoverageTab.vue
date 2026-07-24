@@ -15,7 +15,9 @@ const ui = useAutofuzz();
           </div>
         </div>
         <div class="cov-list">
-          <div v-if="!ui.coverageData || !ui.coverageData.timestamp" class="cov-empty">覆盖数据将在 fuzzing 阶段开始后可用</div>
+          <div v-if="ui.coverageLoading" class="cov-empty">正在加载覆盖数据...</div>
+          <div v-else-if="ui.coverageError" class="cov-empty error-text">{{ ui.coverageMessage || '覆盖数据读取失败' }}</div>
+          <div v-else-if="!ui.coverageData || !ui.coverageData.timestamp" class="cov-empty">覆盖数据将在 fuzzing 阶段开始后可用</div>
           <div v-else-if="!ui.coverageData.available" class="cov-empty">等待 corpus monitor 采集覆盖数据...</div>
           <div v-else-if="!ui.coveragePartials.length" class="cov-empty">所有已执行函数均为完全覆盖</div>
           <details v-for="fn in ui.coveragePartials" v-else :key="`${fn.file}:${fn.function}:${fn.start_line}`" class="cov-fn">
@@ -35,10 +37,31 @@ const ui = useAutofuzz();
       </section>
 
       <section class="coverage-card api-coverage-card">
-        <div class="coverage-card-head"><h3>导出 API 覆盖</h3><span>{{ ui.apiCoverageMeta }}</span></div>
-        <div v-if="!ui.apiCoverage" class="cov-empty">等待 API 预处理产物</div>
+        <div class="coverage-card-head api-coverage-head">
+          <h3>导出 API 覆盖</h3>
+          <div class="api-coverage-head-actions">
+            <span>{{ ui.apiCoverageMeta }}</span>
+            <div class="segmented-control api-coverage-toggle" role="group" aria-label="导出 API 覆盖视角">
+              <button
+                type="button"
+                :class="{active: ui.apiCoverageView === 'api'}"
+                :aria-pressed="ui.apiCoverageView === 'api'"
+                @click="ui.setApiCoverageView('api')"
+              >API -> Driver</button>
+              <button
+                type="button"
+                :class="{active: ui.apiCoverageView === 'driver'}"
+                :aria-pressed="ui.apiCoverageView === 'driver'"
+                @click="ui.setApiCoverageView('driver')"
+              >Driver -> API</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="ui.coverageLoading" class="cov-empty">正在加载 API 覆盖数据...</div>
+        <div v-else-if="ui.coverageError" class="cov-empty error-text">{{ ui.coverageMessage || 'API 覆盖数据读取失败' }}</div>
+        <div v-else-if="!ui.apiCoverage" class="cov-empty">等待 API 预处理产物</div>
         <div v-else-if="!ui.apiCoverage.available" class="cov-empty">{{ ui.apiCoverage.error || '等待 API 预处理产物' }}</div>
-        <div v-else class="api-coverage-list">
+        <div v-else-if="ui.apiCoverageView === 'api'" class="api-coverage-list">
           <div class="api-coverage-row head">
             <div></div>
             <div>API</div>
@@ -53,6 +76,33 @@ const ui = useAutofuzz();
             <div class="api-driver-icons">
               <span v-for="driver in api.drivers" :key="`${api.name}:${driver.driver_id}:${driver.seq || 0}`" class="api-driver-icon" :title="ui.apiDriverTitle(driver)">{{ ui.apiDriverLabel(driver) }}</span>
               <span v-if="!api.drivers.length" class="api-driver-icon empty" title="未覆盖">-</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="api-coverage-list driver-api-coverage-list">
+          <div class="driver-api-coverage-row head">
+            <div>子 driver</div>
+            <div>覆盖 API</div>
+          </div>
+          <div v-if="!ui.apiDriverCoverageRows.length" class="cov-empty">暂无 driver 覆盖导出 API</div>
+          <div v-for="driver in ui.apiDriverCoverageRows" v-else :key="driver.key" class="driver-api-coverage-row">
+            <div class="api-driver-cell">
+              <span class="api-driver-icon" :title="ui.apiDriverTitle(driver)">{{ ui.apiDriverLabel(driver) }}</span>
+              <div>
+                <strong>{{ ui.apiDriverTitle(driver) }}</strong>
+                <span>{{ driver.meta }}</span>
+              </div>
+            </div>
+            <div class="driver-api-list">
+              <span
+                v-for="api in driver.apis"
+                :key="`${driver.key}:${api.name}:${api.decl_location || api.location || api.header}`"
+                class="driver-api-chip"
+                :title="api.headerName"
+              >
+                <strong>{{ api.name }}</strong>
+                <small>{{ api.headerName }}</small>
+              </span>
             </div>
           </div>
         </div>
