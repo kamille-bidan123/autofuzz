@@ -3,6 +3,7 @@ package configagent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,35 @@ func TestValidateConfigRejectsInvalidTOML(t *testing.T) {
 	_, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root})
 	if err == nil {
 		t.Fatal("expected malformed TOML to be rejected")
+	}
+}
+
+func TestValidateConfigRejectsEmptyDocumentFiles(t *testing.T) {
+	root := t.TempDir()
+	include := filepath.Join(root, "source", "include")
+	if err := os.MkdirAll(include, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(root, "libsample.a")
+	compile := filepath.Join(root, "compile_commands.json")
+	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	emptyDoc := filepath.Join(root, "source", "pending_code_changes.txt")
+	if err := os.WriteFile(emptyDoc, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "library.toml")
+	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = [\"" + emptyDoc + "\"]\ndocument_has_api_usage = true\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
+	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, CompileCommands: compile, StaticLibraries: []string{library}})
+	if err == nil || !strings.Contains(err.Error(), "empty document file") {
+		t.Fatalf("expected empty document file rejection, got: %v", err)
 	}
 }
 

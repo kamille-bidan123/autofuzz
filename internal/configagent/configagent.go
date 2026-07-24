@@ -131,6 +131,7 @@ type libraryConfigTable struct {
 	HeaderPaths         []string `toml:"header_paths"`
 	DriverBuildArgs     []string `toml:"driver_build_args"`
 	ConsumerCasePaths   []string `toml:"consumer_case_paths"`
+	ExcludePaths        []string `toml:"exclude_paths"`
 	APIBanListPath      string   `toml:"api_ban_list_path"`
 	APIHintsPath        string   `toml:"api_hints_path"`
 }
@@ -171,8 +172,8 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 			return Result{}, fmt.Errorf("library.toml has document_has_api_usage=true but document_paths is empty")
 		}
 		for _, p := range cfg.DocumentPaths {
-			if !validDocPath(p) {
-				return Result{}, fmt.Errorf("document_paths entry is neither an existing local path nor a valid URL: %s", p)
+			if err := validateDocPath(p, cfg.ExcludePaths); err != nil {
+				return Result{}, fmt.Errorf("document_paths entry is invalid: %w", err)
 			}
 		}
 	} else if len(cfg.DocumentPaths) > 0 {
@@ -241,13 +242,73 @@ func validateJSONFile(path string, target interface{}) error {
 	return nil
 }
 
-// validDocPath accepts an http(s) URL or an existing local file/directory.
-func validDocPath(p string) bool {
+// validateDocPath accepts a URL or an existing local file/directory, and rejects
+// empty local documents that PromeFuzz's RAG loader cannot embed.
+func validateDocPath(p string, excludePaths []string) error {
 	if u, err := url.Parse(p); err == nil && u.Scheme != "" && u.Host != "" {
+		return nil
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return fmt.Errorf("neither an existing local path nor a valid URL: %s", p)
+	}
+	if !info.IsDir() {
+		return validateNonEmptyDocumentFile(p)
+	}
+	return filepath.WalkDir(p, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !isPromeFuzzDocumentFile(entry.Name()) || pathExcluded(path, excludePaths) {
+			return nil
+		}
+		if err := validateNonEmptyDocumentFile(path); err != nil {
+			return fmt.Errorf("directory %s contains %w", p, err)
+		}
+		return nil
+	})
+}
+
+func validateNonEmptyDocumentFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("unreadable document file %s: %w", path, err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("empty document file %s", path)
+	}
+	return nil
+}
+
+func isPromeFuzzDocumentFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".txt", ".html", ".htm", ".pdf", ".adoc", ".rst":
 		return true
 	}
-	if _, err := os.Stat(p); err == nil {
+	switch name {
+	case "README", "readme", "USAGE", "usage":
 		return true
+	}
+	return false
+}
+
+func pathExcluded(path string, excludePaths []string) bool {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	for _, excludePath := range excludePaths {
+		excludeAbs, err := filepath.Abs(excludePath)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(excludeAbs, absolute)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return true
+		}
 	}
 	return false
 }
@@ -290,7 +351,7 @@ func buildPrompt(request Request) string {
   3) 若有 embed 配置：在工作区写一个 curl 脚本，向 <base_url>/embeddings 发 POST 请求，body 为 {"model":"<model>","input":"test"}，按需带 Authorization/api_key 头，并运行它。
      - 若返回 HTTP 200 且响应体是合法的 OpenAI embeddings 格式（含 embedding 向量数组）：设 document_has_api_usage=true，并填充 document_paths——须同时包含源码目录里已有的本地文档（README*、docs/、*.md、*.txt、*.rst、*.html、*.pdf 等的绝对路径，可递归整目录），以及用 web_search 工具找到的该库官方文档 URL。
      - 否则（连接失败 / 非 200 / 响应格式错误）：回退 document_paths=[] 且 document_has_api_usage=false，并在 analysis 里简述失败原因。
-  document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL。
+  document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL；不要包含空文件或只有空白字符的本地文档（如空的 *.txt/README），PromeFuzz RAG 无法为这类文档生成 embedding。
 - compile_commands_path 必须严格等于下方已校验的路径；
 - output_path 必须在目标工作区内；
 - header_paths 必须是编译器观察到的源码/构建头文件位置，而非 AST 不一致的已安装副本；
