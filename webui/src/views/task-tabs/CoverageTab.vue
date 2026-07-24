@@ -6,6 +6,12 @@ const ui = useAutofuzz();
 <template>
   <section class="panel">
     <div class="panel-head compact"><div><h2>覆盖数据</h2><p>任务 union 与子 driver 明细</p></div><span class="panel-meta">{{ ui.coverageTotalMeta }}</span></div>
+    <div class="coverage-summary-strip">
+      <div v-for="item in ui.coverageSummaryItems" :key="item.label" :class="item.className">
+        <span>{{ item.label }}</span>
+        <strong>{{ item.value }}</strong>
+      </div>
+    </div>
     <div class="coverage-cards">
       <section class="coverage-card">
         <div class="coverage-card-head"><h3>任务总覆盖</h3></div>
@@ -47,15 +53,23 @@ const ui = useAutofuzz();
                 :class="{active: ui.apiCoverageView === 'api'}"
                 :aria-pressed="ui.apiCoverageView === 'api'"
                 @click="ui.setApiCoverageView('api')"
-              >API -> Driver</button>
+              >按 API</button>
               <button
                 type="button"
                 :class="{active: ui.apiCoverageView === 'driver'}"
                 :aria-pressed="ui.apiCoverageView === 'driver'"
                 @click="ui.setApiCoverageView('driver')"
-              >Driver -> API</button>
+              >按 Driver</button>
             </div>
           </div>
+        </div>
+        <div class="coverage-toolstrip">
+          <input v-model="ui.apiCoverageQuery" type="search" placeholder="搜索 API 或 header" aria-label="搜索导出 API">
+          <label class="compact-check" :class="{disabled: ui.apiCoverageView !== 'api'}">
+            <input v-model="ui.apiCoverageOnlyMissing" type="checkbox" :disabled="ui.apiCoverageView !== 'api'">
+            <span>只看未覆盖 API</span>
+          </label>
+          <button type="button" class="text-button" @click="ui.resetApiCoverageTools">重置</button>
         </div>
         <div v-if="ui.coverageLoading" class="cov-empty">正在加载 API 覆盖数据...</div>
         <div v-else-if="ui.coverageError" class="cov-empty error-text">{{ ui.coverageMessage || 'API 覆盖数据读取失败' }}</div>
@@ -67,7 +81,8 @@ const ui = useAutofuzz();
             <div>API</div>
             <div>子 driver</div>
           </div>
-          <div v-for="api in ui.apiCoverageRows" :key="`${api.name}:${api.decl_location || api.location || api.header}`" class="api-coverage-row" :class="{covered: api.covered}">
+          <div v-if="!ui.apiCoverageVisibleRows.length" class="cov-empty">当前筛选没有匹配的 API</div>
+          <div v-for="api in ui.apiCoverageVisibleRows" v-else :key="`${api.name}:${api.decl_location || api.location || api.header}`" class="api-coverage-row" :class="{covered: api.covered}">
             <div class="api-state"><span class="api-state-icon" :class="{covered: api.covered}" :title="api.covered ? '已覆盖' : '未覆盖'"></span></div>
             <div class="api-name-cell">
               <strong>{{ api.name }}</strong>
@@ -84,8 +99,8 @@ const ui = useAutofuzz();
             <div>子 driver</div>
             <div>覆盖 API</div>
           </div>
-          <div v-if="!ui.apiDriverCoverageRows.length" class="cov-empty">暂无 driver 覆盖导出 API</div>
-          <div v-for="driver in ui.apiDriverCoverageRows" v-else :key="driver.key" class="driver-api-coverage-row">
+          <div v-if="!ui.apiDriverCoverageVisibleRows.length" class="cov-empty">暂无 driver 覆盖导出 API</div>
+          <div v-for="driver in ui.apiDriverCoverageVisibleRows" v-else :key="driver.key" class="driver-api-coverage-row">
             <div class="api-driver-cell">
               <span class="api-driver-icon" :title="ui.apiDriverTitle(driver)">{{ ui.apiDriverLabel(driver) }}</span>
               <div>
@@ -110,22 +125,42 @@ const ui = useAutofuzz();
 
       <section v-if="ui.coverageIsMulti" class="coverage-card">
         <div class="coverage-card-head"><h3>子 driver</h3><span>{{ ui.coverageDriverMeta }}</span></div>
+        <div class="coverage-driver-tools">
+          <div class="coverage-filter-pills" aria-label="driver 覆盖筛选">
+            <button
+              v-for="option in ui.coverageDriverFilters"
+              :key="option.id"
+              type="button"
+              :class="{active: ui.coverageDriverFilter === option.id}"
+              @click="ui.setCoverageDriverFilter(option.id)"
+            >{{ option.label }}</button>
+          </div>
+          <label class="filter-control compact-select">
+            <span>排序</span>
+            <select :value="ui.coverageDriverSort" @change="ui.setCoverageDriverSort($event.target.value)">
+              <option v-for="option in ui.coverageDriverSorts" :key="option.id" :value="option.id">{{ option.label }}</option>
+            </select>
+          </label>
+        </div>
         <div class="driver-cov-list">
           <div v-if="!ui.coverageTargets.length" class="cov-empty">等待 multi-driver 调度数据</div>
+          <div v-else-if="!ui.coverageDriverRows.length" class="cov-empty">当前筛选没有匹配的子 driver</div>
           <template v-else>
             <div class="driver-cov-row head">
               <div v-for="column in ui.driverColumns" :key="column.id" class="driver-th"><span>{{ column.label }}</span><span class="help" :title="column.help" tabindex="0">?</span></div>
             </div>
-            <div v-for="target in ui.coverageTargets" :key="`${target.driver_id || 0}:${target.seq || 0}`" class="driver-cov-row" :class="ui.driverRowClass(target)">
-              <div class="driver">d{{ target.driver_id || '-' }}</div>
-              <div class="status">{{ ui.targetStatusLabel(target.status) }}</div>
+            <div v-for="target in ui.coverageDriverRows" :key="target.key" class="driver-cov-row" :class="target.className">
+              <div class="driver">d{{ target.driverId || '-' }}</div>
+              <div class="status">{{ target.status }}</div>
               <div>v{{ target.seq || 0 }}</div>
-              <div>{{ target.seed_count || 0 }}</div>
-              <div>{{ (target.summary || {}).executed_functions || 0 }}</div>
-              <div>{{ (target.summary || {}).full_functions || 0 }}</div>
-              <div>{{ (target.summary || {}).partial_functions || 0 }}</div>
-              <div>{{ target.uncovered_count || 0 }}</div>
-              <div><button class="driver-detail-button" type="button" :disabled="!ui.hasDriverCoverageDetails(target)" @click="ui.openDriverCoverage(target.driver_id || 0, target.seq || 0)">查看</button></div>
+              <div>{{ target.seeds }}</div>
+              <div>{{ target.executed }}</div>
+              <div>{{ target.full }}</div>
+              <div>{{ target.partial }}</div>
+              <div>{{ target.uncovered }}</div>
+              <div>{{ target.apiCount }}</div>
+              <div>{{ target.crashCount }}</div>
+              <div><button class="driver-detail-button" type="button" :disabled="!target.hasDetails" @click="ui.openDriverCoverage(target.driverId, target.seq)">查看</button></div>
             </div>
           </template>
         </div>

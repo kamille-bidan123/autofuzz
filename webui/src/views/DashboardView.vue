@@ -1,4 +1,5 @@
 <script setup>
+import { Activity, AlertTriangle, ArrowRight, ClipboardList, RadioTower } from '@lucide/vue';
 import { useAutofuzz } from '../appContext';
 
 const ui = useAutofuzz();
@@ -13,22 +14,34 @@ const ui = useAutofuzz();
     </section>
     <section v-else class="dashboard-kpis" aria-label="运行指标">
       <article class="kpi-card">
-        <span>总任务</span>
+        <div class="kpi-card-top">
+          <span class="kpi-label"><ClipboardList :size="15" aria-hidden="true" />总任务</span>
+          <span class="kpi-icon"><ClipboardList :size="18" aria-hidden="true" /></span>
+        </div>
         <strong>{{ ui.taskCounts.total }}</strong>
         <em>{{ ui.totalTaskNote }}</em>
       </article>
       <article class="kpi-card accent">
-        <span>运行中</span>
+        <div class="kpi-card-top">
+          <span class="kpi-label"><RadioTower :size="15" aria-hidden="true" />运行中</span>
+          <span class="kpi-icon"><RadioTower :size="18" aria-hidden="true" /></span>
+        </div>
         <strong>{{ ui.runningTasks }}</strong>
         <em>执行中或停止中</em>
       </article>
       <article class="kpi-card warn">
-        <span>发现问题</span>
+        <div class="kpi-card-top">
+          <span class="kpi-label"><AlertTriangle :size="15" aria-hidden="true" />发现问题</span>
+          <span class="kpi-icon"><AlertTriangle :size="18" aria-hidden="true" /></span>
+        </div>
         <strong>{{ ui.discoveredIssues }}</strong>
         <em>{{ ui.issueNote }}</em>
       </article>
       <article class="kpi-card danger">
-        <span>待分析</span>
+        <div class="kpi-card-top">
+          <span class="kpi-label"><Activity :size="15" aria-hidden="true" />待分析</span>
+          <span class="kpi-icon"><Activity :size="18" aria-hidden="true" /></span>
+        </div>
         <strong>{{ ui.queueTotal }}</strong>
         <em>{{ ui.queueNote }}</em>
       </article>
@@ -38,12 +51,12 @@ const ui = useAutofuzz();
       <section class="panel">
         <div class="panel-head compact">
           <div><h2>任务状态</h2><p>按生命周期分组</p></div>
-          <button class="text-button" type="button" @click="ui.navigate('tasks')">查看全部</button>
+          <button class="text-button icon-text-button" type="button" @click="ui.navigate('tasks')">查看全部<ArrowRight :size="14" aria-hidden="true" /></button>
         </div>
         <div class="status-board">
           <section v-for="column in ui.statusColumns" :key="column.label" class="status-column">
             <div class="status-column-head">
-              <span>{{ column.label }}</span>
+              <span class="status-column-title"><i class="status-column-dot" aria-hidden="true"></i>{{ column.label }}</span>
               <span class="status-column-count">{{ column.tasks.length }}</span>
             </div>
             <button
@@ -54,7 +67,7 @@ const ui = useAutofuzz();
               @click="ui.openTask(task.id)"
             >
               <strong>{{ task.name || task.id }}</strong>
-              <span>{{ task.current_stage || ui.statusLabel(task.status) || '-' }}</span>
+              <span class="status-task-meta">{{ task.current_stage || ui.statusLabel(task.status) || '-' }}</span>
             </button>
             <button v-if="column.tasks.length > 4" class="column-more" type="button" @click="ui.navigate('tasks')">
               还有 {{ column.tasks.length - 4 }} 个
@@ -78,10 +91,12 @@ const ui = useAutofuzz();
             @click="ui.openIssue(issue)"
           >
             <div class="dashboard-row-head">
-              <strong>{{ issue.file || '(unknown crash)' }}</strong>
+              <div class="dashboard-row-main">
+                <strong>{{ issue.file || '(unknown crash)' }}</strong>
+                <p>{{ issue.task_name || issue.task_id || '-' }} · {{ ui.issueDriverLabel(issue) }} · {{ issue.type || '-' }}</p>
+              </div>
               <span class="crash-class" :class="ui.crashBadge(issue).className">{{ ui.crashBadge(issue).label }}</span>
             </div>
-            <p>{{ issue.task_name || issue.task_id || '-' }} · {{ ui.issueDriverLabel(issue) }} · {{ issue.type || '-' }}</p>
           </button>
         </div>
       </section>

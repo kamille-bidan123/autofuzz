@@ -13,9 +13,9 @@ const statusLabels = {
 };
 
 const mainViewTitles = {
-  dashboard: ['Dashboard', '任务状态、发现问题与 crash 分析队列概览'],
-  tasks: ['Tasks', '创建、启动并查看所有 Autofuzz 任务'],
-  detail: ['Task Detail', '查看阶段、覆盖、crash、snapshot 与日志']
+  dashboard: ['运行看板', '任务状态、发现问题与 crash 分析队列概览'],
+  tasks: ['任务列表', '创建、启动并查看所有 Autofuzz 任务'],
+  detail: ['任务中控', '查看阶段、覆盖、crash、snapshot 与日志']
 };
 
 const statusColumns = [
@@ -42,12 +42,12 @@ const crashFixChildStageDefs = [
 ];
 
 const detailTabs = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'coverage', label: 'Coverage' },
-  { id: 'crashes', label: 'Crashes' },
-  { id: 'snapshots', label: 'Snapshots' },
-  { id: 'codex', label: 'Codex Events' },
-  { id: 'logs', label: 'Logs' }
+  { id: 'overview', label: '总览' },
+  { id: 'coverage', label: '覆盖' },
+  { id: 'crashes', label: 'Crash' },
+  { id: 'snapshots', label: 'Snapshot' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'logs', label: '日志' }
 ];
 
 const flowPhaseLabels = {
@@ -139,6 +139,37 @@ function crashReportStatusLabel(value) {
 }
 
 const uniqueCrashFilterColumns = ['crash', 'status', 'type'];
+const crashQuickFilters = [
+  {id: 'all', label: '全部'},
+  {id: 'pending', label: '待分析'},
+  {id: 'active', label: '分析中'},
+  {id: 'library_bug', label: '库问题'},
+  {id: 'fuzz_driver_bug', label: 'driver 问题'},
+  {id: 'unknown', label: '根因未知'},
+  {id: 'fixable', label: '可修复'}
+];
+const crashSortOptions = [
+  {id: 'last_analysis', label: '最近分析'},
+  {id: 'created', label: '发现时间'},
+  {id: 'driver', label: 'driver/version'},
+  {id: 'type', label: '类型'},
+  {id: 'status', label: '状态'}
+];
+const coverageDriverFilters = [
+  {id: 'all', label: '全部'},
+  {id: 'running', label: '运行中'},
+  {id: 'failed', label: '失败'},
+  {id: 'risk', label: '有缺口'},
+  {id: 'api', label: '覆盖 API'},
+  {id: 'crash', label: '有 crash'}
+];
+const coverageDriverSorts = [
+  {id: 'risk', label: '风险优先'},
+  {id: 'uncovered', label: '未覆盖分支'},
+  {id: 'partial', label: '部分覆盖'},
+  {id: 'api', label: 'API 数'},
+  {id: 'driver', label: 'driver/version'}
+];
 
 function filterText(value, fallback = '未标注') {
   const text = String(value || '').trim();
@@ -219,6 +250,130 @@ export function filterUniqueCrashItems(items, selections = {}) {
     const selected = normalizedSelection(selections[column]);
     return !selected || selected.has(uniqueCrashFilterValue(column, item));
   }));
+}
+
+function quickCrashFilterMatches(item, quickFilter) {
+  if (!quickFilter || quickFilter === 'all') return true;
+  const entry = crashEntryForFilter(item);
+  const status = entry.report_status || 'pending';
+  const classification = entry.classification || '';
+  if (quickFilter === 'pending') return status === 'pending' || status === '';
+  if (quickFilter === 'active') return status === 'queued' || status === 'running';
+  if (quickFilter === 'fixable') {
+    return status === 'completed' && classification === 'library_bug' && isOOBCrashType(entry.type);
+  }
+  return classification === quickFilter;
+}
+
+function crashStackPreview(entry = {}) {
+  const stack = String(entry.stack || '').trim();
+  if (stack) return stack;
+  const asan = String(entry.asan_report || '').trim();
+  if (!asan) return '暂无栈签名';
+  const summary = asan.split('\n').find(line => line.includes('SUMMARY:')) || asan.split('\n')[0] || '';
+  return summary.trim() || '暂无栈签名';
+}
+
+function shortCrashText(value, limit = 180) {
+  const text = String(value || '').trim();
+  if (!text) return '暂无';
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function uniqueCrashSearchText(item) {
+  const entry = crashEntryForFilter(item);
+  const badge = crashReportBadge(entry.report_status || 'pending', entry.classification || '');
+  return [
+    item?.driver_id ? `d${item.driver_id}` : '',
+    item?.driver_id || '',
+    item?.seq ? `v${item.seq}` : '',
+    item?.seq || '',
+    entry.file,
+    entry.type,
+    entry.report_status,
+    crashReportStatusLabel(entry.report_status || 'pending'),
+    entry.classification,
+    badge.label,
+    entry.stack,
+    entry.asan_report,
+    entry.report_error,
+    entry.analysis,
+    item?.error
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+function uniqueCrashMatchesSearch(item, query) {
+  const terms = String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const text = uniqueCrashSearchText(item);
+  return terms.every(term => text.includes(term));
+}
+
+function crashTimeMs(...values) {
+  for (const value of values) {
+    const time = Date.parse(value || '');
+    if (Number.isFinite(time)) return time;
+  }
+  return 0;
+}
+
+function uniqueCrashCreatedMs(item) {
+  const entry = crashEntryForFilter(item);
+  return crashTimeMs(item?.crash_created_at, entry.crash_created_at);
+}
+
+function uniqueCrashLastAnalysisMs(item) {
+  const entry = crashEntryForFilter(item);
+  return crashTimeMs(item?.last_analysis_at, entry.last_analysis_at, item?.crash_created_at, entry.crash_created_at);
+}
+
+function compareUniqueCrashDriver(a, b) {
+  const driverDelta = Number(a?.driver_id || 0) - Number(b?.driver_id || 0);
+  if (driverDelta !== 0) return driverDelta;
+  const seqDelta = Number(a?.seq || 0) - Number(b?.seq || 0);
+  if (seqDelta !== 0) return seqDelta;
+  return String(crashEntryForFilter(a).file || '').localeCompare(String(crashEntryForFilter(b).file || ''));
+}
+
+function compareUniqueCrashItems(sortKey) {
+  return (a, b) => {
+    if (sortKey === 'created') return uniqueCrashCreatedMs(b) - uniqueCrashCreatedMs(a) || compareUniqueCrashDriver(a, b);
+    if (sortKey === 'driver') return compareUniqueCrashDriver(a, b);
+    if (sortKey === 'type') {
+      const type = String(crashEntryForFilter(a).type || '').localeCompare(String(crashEntryForFilter(b).type || ''));
+      return type || compareUniqueCrashDriver(a, b);
+    }
+    if (sortKey === 'status') {
+      const status = uniqueCrashStatusFilterValue(a).localeCompare(uniqueCrashStatusFilterValue(b));
+      return status || uniqueCrashLastAnalysisMs(b) - uniqueCrashLastAnalysisMs(a) || compareUniqueCrashDriver(a, b);
+    }
+    return uniqueCrashLastAnalysisMs(b) - uniqueCrashLastAnalysisMs(a) || compareUniqueCrashDriver(a, b);
+  };
+}
+
+function coverageTargetMatches(row, filter) {
+  if (!filter || filter === 'all') return true;
+  if (filter === 'risk') return Number(row.uncovered || 0) > 0 || Number(row.partial || 0) > 0;
+  if (filter === 'api') return Number(row.apiCount || 0) > 0;
+  if (filter === 'crash') return Number(row.crashCount || 0) > 0;
+  return row.className === filter;
+}
+
+function coverageDriverRiskScore(row) {
+  return Number(row.crashCount || 0) * 100000 +
+    Number(row.uncovered || 0) * 1000 +
+    Number(row.partial || 0) * 100 +
+    Number(row.apiCount || 0);
+}
+
+function compareCoverageDriverRows(sortKey) {
+  return (a, b) => {
+    if (sortKey === 'uncovered') return Number(b.uncovered || 0) - Number(a.uncovered || 0) || compareAPIDrivers(a, b);
+    if (sortKey === 'partial') return Number(b.partial || 0) - Number(a.partial || 0) || compareAPIDrivers(a, b);
+    if (sortKey === 'api') return Number(b.apiCount || 0) - Number(a.apiCount || 0) || compareAPIDrivers(a, b);
+    if (sortKey === 'driver') return compareAPIDrivers(a, b);
+    return coverageDriverRiskScore(b) - coverageDriverRiskScore(a) || compareAPIDrivers(a, b);
+  };
 }
 
 function formatLocalDateTime(value) {
@@ -345,6 +500,8 @@ const driverColumns = [
   { id: 'full', label: '完全覆盖函数', help: '已执行且没有剩余未覆盖分支的函数数量' },
   { id: 'partial', label: '部分覆盖函数', help: '已执行但仍存在未覆盖分支的函数数量' },
   { id: 'uncovered', label: '未覆盖分支数量', help: '部分覆盖函数中仍未走到的具体分支数量，不是未执行函数数量' },
+  { id: 'api', label: '导出 API', help: '该子 driver 当前覆盖到的导出 API 数量' },
+  { id: 'crash', label: 'unique crash', help: '该子 driver/version 当前关联的 unique crash 数量' },
   { id: 'detail', label: '详情', help: '查看该子 driver 完全覆盖和部分覆盖的函数明细' }
 ];
 
@@ -515,6 +672,13 @@ function apiDriverTitle(driver) {
   return `${label}${version}`;
 }
 
+function driverVersionLabel(target) {
+  const id = Number(target?.driver_id || 0);
+  const seq = Number(target?.seq || 0);
+  const driver = id > 0 ? `d${id}` : 'd-';
+  return seq > 0 ? `${driver}/v${seq}` : `${driver}/v-`;
+}
+
 function apiDriverKey(driver) {
   return `${Number(driver?.driver_id || 0)}:${Number(driver?.seq || 0)}`;
 }
@@ -563,6 +727,14 @@ function buildAPIDriverCoverageRows(apiRows, targets = []) {
       meta: `${row.apis.length} 个 API${row.status ? ' · ' + targetStatusLabel(row.status) : ''}`
     }))
     .sort(compareAPIDrivers);
+}
+
+function compareRecentCrashes(a, b) {
+  const ae = a?.entry || {};
+  const be = b?.entry || {};
+  const at = Date.parse(a?.item?.crash_created_at || ae.crash_created_at || a?.item?.last_analysis_at || ae.last_analysis_at || '');
+  const bt = Date.parse(b?.item?.crash_created_at || be.crash_created_at || b?.item?.last_analysis_at || be.last_analysis_at || '');
+  return (Number.isFinite(bt) ? bt : 0) - (Number.isFinite(at) ? at : 0);
 }
 
 function branchLocation(branch) {
@@ -707,6 +879,14 @@ export function useAutofuzzController() {
     const crashFixMessage = ref('');
     const selectedCrashFixKeys = ref(new Set());
     const selectedCrashDeleteKeys = ref(new Set());
+    const crashQuickFilter = ref('all');
+    const crashSearchQuery = ref('');
+    const crashSort = ref('last_analysis');
+    const selectedUniqueCrashKey = ref('');
+    const coverageDriverFilter = ref('all');
+    const coverageDriverSort = ref('risk');
+    const apiCoverageQuery = ref('');
+    const apiCoverageOnlyMissing = ref(false);
     const uniqueCrashFilters = reactive({
       open: '',
       selections: {
@@ -741,7 +921,7 @@ export function useAutofuzzController() {
     const pathPickerDebounce = new Map();
     const detail = reactive({
       id: '',
-      name: 'Task 详情',
+      name: '任务详情',
       repo: '',
       taskKind: '',
       parentTaskId: '',
@@ -827,8 +1007,8 @@ export function useAutofuzzController() {
     const recentTasks = computed(() => dashboardOverview.value.recent_tasks || []);
     const recentIssues = computed(() => dashboardOverview.value.recent_issues || []);
     const topbarTitle = computed(() => activeMainView.value === 'detail' ? detail.name : (mainViewTitles[activeMainView.value] || mainViewTitles.dashboard)[0]);
-    const topbarSubtitle = computed(() => activeMainView.value === 'detail' ? (detail.id ? `Task ${detail.id}` : mainViewTitles.detail[1]) : (mainViewTitles[activeMainView.value] || mainViewTitles.dashboard)[1]);
-    const runningSidebarLabel = computed(() => `${runningTasks.value} running`);
+    const topbarSubtitle = computed(() => activeMainView.value === 'detail' ? (detail.id ? `任务 ${detail.id}` : mainViewTitles.detail[1]) : (mainViewTitles[activeMainView.value] || mainViewTitles.dashboard)[1]);
+    const runningSidebarLabel = computed(() => `${runningTasks.value} 运行中`);
     const hasTaskDetail = computed(() => Boolean(selectedTaskId.value));
     const statusColumnsView = computed(() =>
       statusColumns.map(column => ({
@@ -904,6 +1084,30 @@ export function useAutofuzzController() {
         };
       })
     );
+    const overviewCurrentStage = computed(() => {
+      const stages = [...linearStages.value, fuzzStage.value, analysisStage.value].filter(Boolean);
+      return stages.find(stage => stage.status === 'running' || stage.status === 'warning') ||
+        stages.find(stage => stage.status === 'failed') ||
+        [...stages].reverse().find(stage => stage.status === 'completed') ||
+        stages[0] ||
+        {name: '-', status: 'pending', detail: ''};
+    });
+    const controlLoopSummary = computed(() => {
+      const flow = detail.fuzzFlow || {};
+      const phase = flow.phase || '';
+      const activeDrivers = coverageTargets.value.filter(target => target.status === 'running');
+      const latest = flowRows.value[0];
+      return {
+        phase: flowPhaseLabels[phase] || phase || (detail.status === 'running' ? '等待 loop 数据' : detail.statusText),
+        stage: overviewCurrentStage.value.name || '-',
+        statusClass: safeClass(overviewCurrentStage.value.status || detail.status),
+        drivers: activeDrivers.length ? activeDrivers.slice(0, 4).map(driverVersionLabel).join(' · ') : '暂无运行中 driver',
+        driverOverflow: Math.max(0, activeDrivers.length - 4),
+        countdown: driverSchedule.value?.countdown || '无倒计时',
+        result: analysisStage.value.result || latest?.summary || '尚无优化结果',
+        latest: latest ? `第 ${latest.iteration} 轮 · ${latest.outcome}` : '尚无优化记录'
+      };
+    });
     const detailResumable = computed(() => ['stopped', 'interrupted', 'failed'].includes(detail.status));
     const canTriggerFuzz = computed(() => {
       const phase = detail.fuzzFlow?.phase;
@@ -923,8 +1127,52 @@ export function useAutofuzzController() {
       status: buildUniqueCrashFilterOptions(uniqueCrashAllItems.value, 'status'),
       type: buildUniqueCrashFilterOptions(uniqueCrashAllItems.value, 'type')
     }));
-    const uniqueCrashItems = computed(() => filterUniqueCrashItems(uniqueCrashAllItems.value, uniqueCrashFilters.selections));
+    const uniqueCrashColumnFilteredItems = computed(() =>
+      filterUniqueCrashItems(uniqueCrashAllItems.value, uniqueCrashFilters.selections)
+        .filter(item => uniqueCrashMatchesSearch(item, crashSearchQuery.value))
+    );
+    const uniqueCrashItems = computed(() =>
+      [...uniqueCrashColumnFilteredItems.value.filter(item => quickCrashFilterMatches(item, crashQuickFilter.value))]
+        .sort(compareUniqueCrashItems(crashSort.value))
+    );
     const uniqueCrashTotalCount = computed(() => uniqueCrashAllItems.value.length);
+    const uniqueCrashQuickFilterOptions = computed(() =>
+      crashQuickFilters.map(option => ({
+        ...option,
+        count: option.id === 'all'
+          ? uniqueCrashColumnFilteredItems.value.length
+          : uniqueCrashColumnFilteredItems.value
+            .filter(item => quickCrashFilterMatches(item, option.id)).length
+      }))
+    );
+    const uniqueCrashTriageSummary = computed(() => {
+      const items = uniqueCrashAllItems.value;
+      let pending = 0;
+      let active = 0;
+      let library = 0;
+      let driver = 0;
+      let unknown = 0;
+      for (const item of items) {
+        const entry = uniqueCrashEntry(item);
+        const status = entry.report_status || 'pending';
+        if (status === 'pending' || !status) pending++;
+        if (status === 'queued' || status === 'running') active++;
+        if (entry.classification === 'library_bug') library++;
+        else if (entry.classification === 'fuzz_driver_bug') driver++;
+        else if (entry.classification === 'unknown') unknown++;
+      }
+      return {
+        total: items.length,
+        visible: uniqueCrashItems.value.length,
+        pending,
+        active,
+        library,
+        driver,
+        unknown,
+        fixable: items.filter(item => crashFixEligible(item)).length,
+        queue: sortedCrashQueue.value.length
+      };
+    });
     const selectedCrashFixItems = computed(() => {
       const keys = selectedCrashFixKeys.value;
       return uniqueCrashItems.value.filter(item => keys.has(uniqueCrashKey(item)));
@@ -942,6 +1190,31 @@ export function useAutofuzzController() {
     const crashFixSelectionCount = computed(() => selectedCrashFixItems.value.length);
     const crashDeleteSelectionCount = computed(() => selectedCrashDeleteItems.value.length);
     const uniqueCrashRepairableCount = computed(() => uniqueCrashItems.value.filter(item => crashFixEligible(item)).length);
+    const selectedUniqueCrashItem = computed(() => {
+      if (!uniqueCrashItems.value.length) return null;
+      return uniqueCrashItems.value.find(item => uniqueCrashKey(item) === selectedUniqueCrashKey.value) || uniqueCrashItems.value[0] || null;
+    });
+    const uniqueCrashTriagePreview = computed(() => {
+      const item = selectedUniqueCrashItem.value;
+      if (!item) return null;
+      const entry = uniqueCrashEntry(item);
+      const badge = crashReportBadge(entry.report_status || 'pending', entry.classification || '');
+      return {
+        item,
+        file: entry.file || '(unknown crash)',
+        driver: item?.driver_id ? `d${item.driver_id}` : '未标注',
+        version: `v${item?.seq || '-'}`,
+        type: entry.type || '-',
+        status: crashReportStatusLabel(entry.report_status || 'pending'),
+        classification: badge.label,
+        badge,
+        stack: crashStackPreview(entry),
+        asan: shortCrashText(entry.asan_report, 360),
+        createdAt: uniqueCrashCreatedAt(item),
+        lastAnalysisAt: uniqueCrashLastAnalysisAt(item),
+        fixable: crashFixEligible(item)
+      };
+    });
     const snapshotRows = computed(() => detail.snapshots || []);
     const snapshotsMulti = computed(() => snapshotRows.value.some(snapshot => snapshot.driver_id));
     const crashReportCards = computed(() =>
@@ -998,6 +1271,28 @@ export function useAutofuzzController() {
     const apiDriverCoverageRows = computed(() =>
       buildAPIDriverCoverageRows(apiCoverageRows.value, coverageTargets.value)
     );
+    const apiCoverageVisibleRows = computed(() => {
+      const query = apiCoverageQuery.value.trim().toLowerCase();
+      return apiCoverageRows.value.filter(api => {
+        if (apiCoverageOnlyMissing.value && api.covered) return false;
+        if (!query) return true;
+        return [api.name, api.headerName, api.header, api.decl_location, api.location]
+          .some(value => String(value || '').toLowerCase().includes(query));
+      });
+    });
+    const apiDriverCoverageVisibleRows = computed(() => {
+      const query = apiCoverageQuery.value.trim().toLowerCase();
+      return apiDriverCoverageRows.value
+        .map(driver => ({
+          ...driver,
+          apis: driver.apis.filter(api => {
+            if (!query) return true;
+            return [api.name, api.headerName, api.header, api.decl_location, api.location, apiDriverTitle(driver)]
+              .some(value => String(value || '').toLowerCase().includes(query));
+          })
+        }))
+        .filter(driver => driver.apis.length > 0 || !query);
+    });
     const apiCoverageMeta = computed(() => {
       const report = apiCoverage.value;
       if (!report?.available) return '等待 API 数据';
@@ -1011,6 +1306,124 @@ export function useAutofuzzController() {
       if (!data || data.mode !== 'multi') return '等待调度';
       const {targets, queued} = schedulerLists(data);
       return `运行 ${data.active_targets || 0}/${targets.length} · queued ${queued.length}`;
+    });
+    const driverBoardRows = computed(() => {
+      const apiCountByKey = new Map(apiDriverCoverageRows.value.map(row => [row.key, row.apis.length]));
+      const crashCountByKey = new Map();
+      for (const item of uniqueCrashAllItems.value || []) {
+        const key = apiDriverKey({driver_id: item?.driver_id, seq: item?.seq});
+        crashCountByKey.set(key, (crashCountByKey.get(key) || 0) + 1);
+      }
+      return coverageTargets.value.map(target => {
+        const summary = target.summary || {};
+        const key = apiDriverKey(target);
+        return {
+          key,
+          driverId: Number(target.driver_id || 0),
+          seq: Number(target.seq || 0),
+          label: driverVersionLabel(target),
+          status: targetStatusLabel(target.status),
+          className: driverRowClass(target) || 'idle',
+          seeds: target.seed_count || 0,
+          executed: summary.executed_functions || 0,
+          full: summary.full_functions || 0,
+          partial: summary.partial_functions || 0,
+          uncovered: target.uncovered_count || 0,
+          apiCount: apiCountByKey.get(key) || 0,
+          crashCount: crashCountByKey.get(key) || 0,
+          hasDetails: hasDriverCoverageDetails(target)
+        };
+      });
+    });
+    const coverageDriverRows = computed(() =>
+      driverBoardRows.value
+        .filter(row => coverageTargetMatches(row, coverageDriverFilter.value))
+        .sort(compareCoverageDriverRows(coverageDriverSort.value))
+    );
+    const coverageSummaryItems = computed(() => {
+      const summary = coverageData.value?.coverage?.summary || {};
+      const report = apiCoverage.value || {};
+      const missingApis = Math.max(0, Number(report.total_apis || 0) - Number(report.covered_apis || 0));
+      return [
+        {label: '已执行函数', value: summary.executed_functions || 0, className: ''},
+        {label: '部分覆盖', value: summary.partial_functions || 0, className: Number(summary.partial_functions || 0) > 0 ? 'warning' : ''},
+        {label: '未覆盖分支', value: coverageData.value?.uncovered_count || 0, className: Number(coverageData.value?.uncovered_count || 0) > 0 ? 'failed' : ''},
+        {label: '导出 API', value: report.available ? `${report.covered_apis || 0}/${report.total_apis || 0}` : '等待', className: report.available && missingApis === 0 ? 'completed' : ''},
+        {label: '缺失 API', value: report.available ? missingApis : '-', className: missingApis > 0 ? 'warning' : ''},
+        {label: '活跃 driver', value: coverageData.value?.active_targets || 0, className: Number(coverageData.value?.active_targets || 0) > 0 ? 'running' : ''}
+      ];
+    });
+    const taskControlSummaryItems = computed(() => {
+      const summary = coverageData.value?.coverage?.summary || {};
+      const activeTargets = Number(coverageData.value?.active_targets || 0) ||
+        coverageTargets.value.filter(target => target.status === 'running').length;
+      return [
+        {label: '状态', value: detail.statusText || '-', className: safeClass(detail.status)},
+        {label: '当前阶段', value: overviewCurrentStage.value.name || '-', className: safeClass(overviewCurrentStage.value.status)},
+        {label: 'Loop', value: controlLoopSummary.value.phase || '-', className: controlLoopSummary.value.statusClass},
+        {label: '活跃 driver', value: String(activeTargets), className: activeTargets > 0 ? 'running' : ''},
+        {label: 'Unique Crash', value: String(uniqueCrashTotalCount.value), className: uniqueCrashTotalCount.value > 0 ? 'failed' : ''},
+        {label: 'API 覆盖', value: apiCoverage.value?.available ? apiCoverageMeta.value : (coverageLoading.value ? '加载中' : '等待 API'), className: apiCoverage.value?.covered_apis ? 'completed' : ''},
+        {label: '函数覆盖', value: summary.executed_functions ? `${summary.executed_functions} 函数` : coverageTotalMeta.value, className: coverageLoading.value ? 'running' : ''}
+      ];
+    });
+    const coverageGapSummary = computed(() => {
+      const summary = coverageData.value?.coverage?.summary || {};
+      const report = apiCoverage.value || {};
+      const missingApis = apiCoverageRows.value.filter(api => !api.covered).slice(0, 5);
+      const topDrivers = [...apiDriverCoverageRows.value]
+        .sort((a, b) => b.apis.length - a.apis.length || compareAPIDrivers(a, b))
+        .slice(0, 4);
+      return {
+        loading: coverageLoading.value,
+        available: Boolean(coverageData.value?.available),
+        executed: summary.executed_functions || 0,
+        full: summary.full_functions || 0,
+        partial: summary.partial_functions || 0,
+        uncoveredBranches: coverageData.value?.uncovered_count || 0,
+        apiMeta: report.available ? apiCoverageMeta.value : (coverageLoading.value ? '加载中' : '等待 API 数据'),
+        missingCount: Math.max(0, Number(report.total_apis || 0) - Number(report.covered_apis || 0)),
+        missingApis,
+        topDrivers
+      };
+    });
+    const crashWorkbenchSummary = computed(() => {
+      const items = uniqueCrashAllItems.value || [];
+      const statusCounts = {pending: 0, queued: 0, running: 0, completed: 0, failed: 0, skipped: 0};
+      let classified = 0;
+      for (const item of items) {
+        const entry = uniqueCrashEntry(item);
+        const status = entry.report_status || 'pending';
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+        if (entry.classification) classified++;
+      }
+      const recent = items
+        .map(item => {
+          const entry = uniqueCrashEntry(item);
+          return {
+            item,
+            entry,
+            file: entry.file || '(unknown crash)',
+            driver: item?.driver_id ? `d${item.driver_id}/v${item.seq || '-'}` : `v${item?.seq || '-'}`,
+            type: entry.type || '-',
+            badge: crashReportBadge(entry.report_status || 'pending', entry.classification || '')
+          };
+        })
+        .sort(compareRecentCrashes)
+        .slice(0, 5);
+      return {
+        total: items.length,
+        pending: statusCounts.pending || 0,
+        queued: statusCounts.queued || 0,
+        running: statusCounts.running || 0,
+        completed: statusCounts.completed || 0,
+        failed: statusCounts.failed || 0,
+        classified,
+        fixable: items.filter(item => crashFixEligible(item)).length,
+        queueRunning: sortedCrashQueue.value.filter(item => item.status === 'running').length,
+        queuePending: sortedCrashQueue.value.filter(item => item.status !== 'running').length,
+        recent
+      };
     });
     const selectedCoverageTarget = computed(() =>
       findCoverageTarget(detail.coverageDetail.driverId, detail.coverageDetail.seq)
@@ -1091,14 +1504,14 @@ export function useAutofuzzController() {
       overviewLoading.value = true;
       try {
         const response = await fetch('/api/overview');
-        overview.value = await responseJSON(response, 'Dashboard 汇总读取失败');
+        overview.value = await responseJSON(response, '看板汇总读取失败');
         overviewFallback.value = false;
         messages.dashboard = '';
       } catch (error) {
         overview.value = overviewFromRuns(tasks.value);
         overviewFallback.value = true;
         if (activeMainView.value === 'dashboard') {
-          messages.dashboard = `${error.message || 'Dashboard 汇总读取失败'}，已使用任务列表降级统计。`;
+          messages.dashboard = `${error.message || '看板汇总读取失败'}，已使用任务列表降级统计。`;
         }
       } finally {
         overviewLoading.value = false;
@@ -1275,7 +1688,7 @@ export function useAutofuzzController() {
     async function submitCreateTask() {
       if (createForm.submitting) return;
       createForm.submitting = true;
-      createForm.message = '正在创建 Task…';
+      createForm.message = '正在创建任务...';
       try {
         const response = await fetch('/api/runs', {
           method: 'POST',
@@ -1285,7 +1698,7 @@ export function useAutofuzzController() {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || '任务创建失败');
         closeCreateModal();
-        setMessage(activeMainView.value === 'dashboard' ? 'dashboard' : 'list', `Task ${result.id} 已创建，请在 Tasks 中启动。`);
+        setMessage(activeMainView.value === 'dashboard' ? 'dashboard' : 'list', `任务 ${result.id} 已创建，请在任务列表中启动。`);
         await refreshTaskData();
       } catch (error) {
         createForm.message = error.message;
@@ -1296,7 +1709,7 @@ export function useAutofuzzController() {
 
     function openCreateModal() {
       createModalOpen.value = true;
-      createForm.message = '填写运行配置后创建 Task；创建后需在列表中手动点击“开始”。';
+      createForm.message = '填写运行配置后创建任务；创建后需在列表中手动点击“开始”。';
       nextTick(() => {
         document.getElementById('repository_url')?.focus();
       });
@@ -1319,7 +1732,7 @@ export function useAutofuzzController() {
         detail.id = patch.id || '';
         selectedTaskId.value = detail.id;
       }
-      if (Object.prototype.hasOwnProperty.call(patch, 'name')) detail.name = patch.name || 'Task 详情';
+      if (Object.prototype.hasOwnProperty.call(patch, 'name')) detail.name = patch.name || '任务详情';
       if (Object.prototype.hasOwnProperty.call(patch, 'repo')) detail.repo = patch.repo || '';
       if (Object.prototype.hasOwnProperty.call(patch, 'taskKind')) detail.taskKind = patch.taskKind || '';
       if (Object.prototype.hasOwnProperty.call(patch, 'parentTaskId')) detail.parentTaskId = patch.parentTaskId || '';
@@ -1377,6 +1790,19 @@ export function useAutofuzzController() {
       apiCoverageView.value = view === 'driver' ? 'driver' : 'api';
     }
 
+    function setCoverageDriverFilter(filter) {
+      coverageDriverFilter.value = coverageDriverFilters.some(option => option.id === filter) ? filter : 'all';
+    }
+
+    function setCoverageDriverSort(sortKey) {
+      coverageDriverSort.value = coverageDriverSorts.some(option => option.id === sortKey) ? sortKey : 'risk';
+    }
+
+    function resetApiCoverageTools() {
+      apiCoverageQuery.value = '';
+      apiCoverageOnlyMissing.value = false;
+    }
+
     async function resumeTask() {
       const id = detail.id;
       if (!id || detailActionBusy.resume) return;
@@ -1396,7 +1822,7 @@ export function useAutofuzzController() {
 
     async function cancelTask() {
       const id = detail.id;
-      if (!id || detailActionBusy.cancel || !window.confirm('确认停止此 Task？之后可以从当前状态恢复。')) return;
+      if (!id || detailActionBusy.cancel || !window.confirm('确认停止此任务？之后可以从当前状态恢复。')) return;
       detailActionBusy.cancel = true;
       detail.message = '正在停止任务…';
       try {
@@ -1405,7 +1831,7 @@ export function useAutofuzzController() {
         if (detail.id !== id) return;
         detail.status = 'stopping';
         detail.statusText = statusLabels.stopping;
-        detail.message = 'Task 正在停止';
+        detail.message = '任务正在停止';
         await refreshTaskData(false);
       } catch (error) {
         if (detail.id === id) detail.message = error.message || '停止失败';
@@ -1440,6 +1866,8 @@ export function useAutofuzzController() {
       detail.uniqueCrashes = Array.isArray(items) ? items : [];
       pruneUniqueCrashFilters();
       pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
     }
 
     function uniqueCrashEntry(item) {
@@ -1448,6 +1876,10 @@ export function useAutofuzzController() {
 
     function uniqueCrashKey(item) {
       return `${item?.driver_id || 0}:${item?.seq || 0}:${uniqueCrashEntry(item).file || ''}`;
+    }
+
+    function selectUniqueCrashPreview(item) {
+      selectedUniqueCrashKey.value = item ? uniqueCrashKey(item) : '';
     }
 
     function uniqueCrashCreatedAt(item) {
@@ -1508,6 +1940,8 @@ export function useAutofuzzController() {
     function setUniqueCrashFilterAll(column, checked) {
       uniqueCrashFilters.selections[column] = checked ? null : new Set();
       pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
     }
 
     function setUniqueCrashFilterValue(column, value, checked) {
@@ -1522,6 +1956,8 @@ export function useAutofuzzController() {
       }
       uniqueCrashFilters.selections[column] = selected.size === options.length ? null : selected;
       pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
     }
 
     function pruneUniqueCrashFilters() {
@@ -1619,6 +2055,34 @@ export function useAutofuzzController() {
       if (next.size !== selectedCrashDeleteKeys.value.size) selectedCrashDeleteKeys.value = next;
     }
 
+    function pruneSelectedUniqueCrash() {
+      if (!selectedUniqueCrashKey.value) return;
+      const live = new Set(uniqueCrashItems.value.map(item => uniqueCrashKey(item)));
+      if (!live.has(selectedUniqueCrashKey.value)) selectedUniqueCrashKey.value = uniqueCrashItems.value[0] ? uniqueCrashKey(uniqueCrashItems.value[0]) : '';
+    }
+
+    function setCrashQuickFilter(filter) {
+      crashQuickFilter.value = crashQuickFilters.some(option => option.id === filter) ? filter : 'all';
+      pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
+    }
+
+    function setCrashSort(sort) {
+      crashSort.value = crashSortOptions.some(option => option.id === sort) ? sort : 'last_analysis';
+    }
+
+    function resetUniqueCrashFilters() {
+      crashQuickFilter.value = 'all';
+      crashSearchQuery.value = '';
+      crashSort.value = 'last_analysis';
+      for (const column of uniqueCrashFilterColumns) uniqueCrashFilters.selections[column] = null;
+      uniqueCrashFilters.open = '';
+      pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
+    }
+
     function toggleCrashFixMode() {
       crashDeleteMode.value = false;
       selectedCrashDeleteKeys.value = new Set();
@@ -1668,22 +2132,22 @@ export function useAutofuzzController() {
         crashes: items.map(item => uniqueCrashEntry(item).file || '').filter(Boolean)
       };
       crashFixBusy.value = true;
-      crashFixMessage.value = '正在创建修复子 task…';
+      crashFixMessage.value = '正在创建修复子任务...';
       try {
         const response = await fetch(`/api/runs/${encodeURIComponent(id)}/crash-fix-tasks`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload)
         });
-        const child = await responseJSON(response, '创建修复子 task 失败');
+        const child = await responseJSON(response, '创建修复子任务失败');
         cancelCrashFixSelection();
-        detail.message = `已创建修复子 task ${child.id || ''}`;
+        detail.message = `已创建修复子任务 ${child.id || ''}`;
         await refreshTaskData(false);
         if (child.id) {
           router.push({name: 'task-detail', params: {taskId: child.id, tab: 'overview'}});
         }
       } catch (error) {
-        crashFixMessage.value = error.message || '创建修复子 task 失败';
+        crashFixMessage.value = error.message || '创建修复子任务失败';
       } finally {
         crashFixBusy.value = false;
       }
@@ -1969,7 +2433,7 @@ export function useAutofuzzController() {
       driverSourceCache.clear();
       setDetail({
         id,
-        name: 'Task 详情',
+        name: '任务详情',
         repo: '',
         taskKind: '',
         parentTaskId: '',
@@ -2210,7 +2674,7 @@ export function useAutofuzzController() {
       setSnapshotDiff({
         visible: true,
         title: `${driverId ? `driver ${driverId} · ` : ''}v${targetSeq - 1} -> v${targetSeq} Driver 差异`,
-        meta: `Task ${id} · 对比 target driver 源码`,
+        meta: `任务 ${id} · 对比 target driver 源码`,
         status: 'loading',
         message: '正在加载 Driver 差异...',
         diff: ''
@@ -2241,7 +2705,7 @@ export function useAutofuzzController() {
       setCrashReport({
         visible: true,
         title: `${driverId ? `driver ${driverId} · ` : ''}v${seq} Unique Crash 分析报告`,
-        meta: `Task ${id} · 读取 snapshot 内 crash-reports/`,
+        meta: `任务 ${id} · 读取 snapshot 内 crash-reports/`,
         status: 'loading',
         message: '正在加载 crash 报告...',
         reports: [],
@@ -2549,6 +3013,8 @@ export function useAutofuzzController() {
     watch(uniqueCrashItems, () => {
       pruneCrashFixSelection();
       pruneCrashDeleteSelection();
+      pruneSelectedUniqueCrash();
+      if (!selectedUniqueCrashKey.value && uniqueCrashItems.value[0]) selectedUniqueCrashKey.value = uniqueCrashKey(uniqueCrashItems.value[0]);
     });
     watch(() => route.fullPath, syncRoute, {immediate: true});
 
@@ -2597,25 +3063,25 @@ export function useAutofuzzController() {
     async function startTask(id) {
       await runTaskAction(
         id,
-        '正在启动 Task…',
+        '正在启动任务...',
         async () => {
           const response = await fetch(`/api/runs/${encodeURIComponent(id)}/start`, {method: 'POST'});
-          await responseJSON(response, 'Task 启动失败');
+          await responseJSON(response, '任务启动失败');
         },
-        `Task ${id} 已启动`
+        `任务 ${id} 已启动`
       );
     }
 
     async function stopTask(id) {
-      if (!window.confirm('确认停止此 Task？之后可以从当前状态恢复。')) return;
+      if (!window.confirm('确认停止此任务？之后可以从当前状态恢复。')) return;
       await runTaskAction(
         id,
-        '正在停止 Task…',
+        '正在停止任务...',
         async () => {
           const response = await fetch(`/api/runs/${encodeURIComponent(id)}/cancel`, {method: 'POST'});
-          await responseJSON(response, 'Task 停止失败');
+          await responseJSON(response, '任务停止失败');
         },
-        `Task ${id} 正在停止`
+        `任务 ${id} 正在停止`
       );
     }
 
@@ -2623,12 +3089,12 @@ export function useAutofuzzController() {
       if (!window.confirm('确认删除此任务记录？(不会删除工作目录数据)')) return;
       await runTaskAction(
         id,
-        '正在删除 Task…',
+        '正在删除任务...',
         async () => {
           const response = await fetch(`/api/runs/${encodeURIComponent(id)}`, {method: 'DELETE'});
           await responseJSON(response, '删除失败');
         },
-        `Task ${id} 已删除`
+        `任务 ${id} 已删除`
       );
     }
 
@@ -2666,6 +3132,14 @@ export function useAutofuzzController() {
       crashFixMode,
       crashFixSelectionCount,
       crashReportCards,
+      crashQuickFilter,
+      crashQuickFilterOptions: uniqueCrashQuickFilterOptions,
+      crashSearchQuery,
+      crashSort,
+      crashSortOptions,
+      crashTriageSummary: uniqueCrashTriageSummary,
+      crashWorkbenchSummary,
+      controlLoopSummary,
       coverageBranchLine,
       coverageData,
       coverageDriverMeta,
@@ -2674,11 +3148,22 @@ export function useAutofuzzController() {
       coverageLoading,
       coverageMessage,
       coveragePartials,
+      coverageGapSummary,
+      coverageDriverFilter,
+      coverageDriverFilters,
+      coverageDriverRows,
+      coverageDriverSort,
+      coverageDriverSorts,
+      coverageSummaryItems,
       apiCoverage,
       apiCoverageView,
       apiDriverCoverageRows,
+      apiDriverCoverageVisibleRows,
       apiCoverageRows,
+      apiCoverageVisibleRows,
       apiCoverageMeta,
+      apiCoverageOnlyMissing,
+      apiCoverageQuery,
       apiDriverLabel,
       apiDriverTitle,
       driverSchedule,
@@ -2697,6 +3182,7 @@ export function useAutofuzzController() {
       driverGraphGroups,
       driverGraphNote,
       driverRowClass,
+      driverBoardRows,
       diffLines,
       deleteSelectedUniqueCrashes,
       flowBackActive,
@@ -2725,6 +3211,7 @@ export function useAutofuzzController() {
       openSnapshotDiff,
       openSnapshotReports,
       openUniqueCrash,
+      overviewCurrentStage,
       queueNote,
       queueDriverLabel: item => item.driver_id ? `d${item.driver_id}` : '未标注',
       queueTotal,
@@ -2733,10 +3220,16 @@ export function useAutofuzzController() {
       removeTask,
       removeCrashQueueItem,
       pathPickerState,
+      resetApiCoverageTools,
+      resetUniqueCrashFilters,
       resumeTask,
       runningSidebarLabel,
       runningTasks,
       setApiCoverageView,
+      setCoverageDriverFilter,
+      setCoverageDriverSort,
+      setCrashQuickFilter,
+      setCrashSort,
       setDetailTab,
       shortTime: value => {
         if (!value) return '-';
@@ -2746,6 +3239,7 @@ export function useAutofuzzController() {
       startTask,
       selectCurrentPath,
       selectPathEntry,
+      selectUniqueCrashPreview,
       snapDeltaClass,
       snapDeltaStr,
       snapshotKey: snapshot => `${snapshot.driver_id || 0}:${snapshot.seq || 0}:${snapshot.timestamp || ''}`,
@@ -2760,6 +3254,7 @@ export function useAutofuzzController() {
       submitCrashFixTask,
       submitCreateTask,
       taskCounts,
+      taskControlSummaryItems,
       tasksLoading,
       tasks,
       topbarSubtitle,
@@ -2782,6 +3277,7 @@ export function useAutofuzzController() {
       uniqueCrashItems,
       uniqueCrashKey,
       uniqueCrashLastAnalysisAt,
+      uniqueCrashTriagePreview,
       uniqueCrashTotalCount,
       closeCreateModal,
       closeUniqueCrashFilter,

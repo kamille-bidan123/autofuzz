@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue';
-import { Search } from '@lucide/vue';
+import { Play, RotateCcw, Search, Square, Trash2 } from '@lucide/vue';
 import { useAutofuzz } from '../appContext';
 
 const ui = useAutofuzz();
@@ -73,15 +73,20 @@ const filteredTasks = computed(() => {
     <div v-if="ui.messages.list" class="inline-alert" role="status">{{ ui.messages.list }}</div>
 
     <section class="panel task-list-panel">
+      <div class="task-list-summary">
+        <div><h2>任务清单</h2><p>按仓库、阶段和状态筛选</p></div>
+        <span>{{ filteredTasks.length }} 个匹配</span>
+      </div>
       <div class="task-list-head">
-        <span>Task</span><span>仓库</span><span>阶段</span><span>状态</span><span>创建时间</span><span class="align-right">操作</span>
+        <span>任务</span><span>仓库</span><span>阶段</span><span>状态</span><span>创建时间</span><span class="align-right">操作</span>
       </div>
       <div>
         <div v-if="ui.tasksLoading && !ui.tasks.length" class="task-empty">正在加载任务...</div>
-        <div v-else-if="!ui.tasks.length" class="task-empty">暂无 Task，点击右上角创建。</div>
+        <div v-else-if="!ui.tasks.length" class="task-empty">暂无任务，点击右上角创建。</div>
         <div v-else-if="!filteredTasks.length" class="task-empty">没有匹配当前筛选条件的任务。</div>
-        <div v-for="task in filteredTasks" :key="task.id" class="task-row" :class="{child: task.depth > 0}" @click="ui.openTask(task.id)">
+        <div v-for="task in filteredTasks" :key="task.id" class="task-row" :class="[ui.statusClass(task.status), {child: task.depth > 0}]" @click="ui.openTask(task.id)">
           <div class="task-name" :style="{paddingLeft: `${Math.min(task.depth || 0, 3) * 22}px`}">
+            <span class="task-status-dot" :class="ui.statusClass(task.status)" aria-hidden="true"></span>
             <span v-if="task.depth > 0" class="task-branch" aria-hidden="true"></span>
             <span>{{ task.name || task.id }}</span>
             <span v-if="task.childLabel" class="task-kind">{{ task.childLabel }}</span>
@@ -91,11 +96,11 @@ const filteredTasks = computed(() => {
           <div><span class="task-badge" :class="ui.statusClass(task.status)">{{ ui.statusLabel(task.status) }}</span></div>
           <div class="task-time">{{ task.created_at ? ui.formatDate(task.created_at) : '-' }}</div>
           <div class="task-actions" @click.stop>
-            <button class="task-action danger" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.removeTask(task.id)">删除</button>
-            <button v-if="task.status === 'pending'" class="task-action primary" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.startTask(task.id)">开始</button>
-            <button v-if="task.status === 'running'" class="task-action danger" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.stopTask(task.id)">停止</button>
+            <button class="task-action danger" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.removeTask(task.id)"><Trash2 :size="13" aria-hidden="true" /><span>删除</span></button>
+            <button v-if="task.status === 'pending'" class="task-action primary" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.startTask(task.id)"><Play :size="13" aria-hidden="true" /><span>开始</span></button>
+            <button v-if="task.status === 'running'" class="task-action danger" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.stopTask(task.id)"><Square :size="12" aria-hidden="true" /><span>停止</span></button>
             <button v-if="task.status === 'stopping'" class="task-action" type="button" disabled>停止中</button>
-            <button v-if="ui.isResumable(task.status)" class="task-action primary" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.startTask(task.id)">恢复</button>
+            <button v-if="ui.isResumable(task.status)" class="task-action primary" type="button" :disabled="ui.isTaskBusy(task.id)" @click="ui.startTask(task.id)"><RotateCcw :size="13" aria-hidden="true" /><span>恢复</span></button>
           </div>
         </div>
       </div>

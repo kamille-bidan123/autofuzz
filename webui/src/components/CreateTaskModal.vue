@@ -10,7 +10,7 @@ const ui = useAutofuzz();
   <div v-if="ui.createModalOpen" class="modal" @click.self="ui.closeCreateModal">
     <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="createModalTitle">
       <div class="modal-head">
-        <h2 id="createModalTitle">创建 Task</h2>
+        <h2 id="createModalTitle">创建任务</h2>
         <button class="modal-close icon-button" type="button" aria-label="关闭" @click="ui.closeCreateModal"><X :size="20" /></button>
       </div>
       <div class="modal-body">
@@ -38,7 +38,7 @@ const ui = useAutofuzz();
           </details>
           <div class="modal-actions">
             <button type="button" @click="ui.closeCreateModal">取消</button>
-            <button class="primary" type="submit" :disabled="ui.createForm.submitting">{{ ui.createForm.submitting ? '创建中...' : '创建 Task' }}</button>
+            <button class="primary" type="submit" :disabled="ui.createForm.submitting">{{ ui.createForm.submitting ? '创建中...' : '创建任务' }}</button>
           </div>
           <div v-if="ui.createForm.message" class="notice" role="status">{{ ui.createForm.message }}</div>
         </form>

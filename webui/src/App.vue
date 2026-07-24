@@ -30,7 +30,7 @@ function navigate(name) {
     <aside class="sidebar" aria-label="主导航">
       <div class="side-brand">
         <div class="logo">AF</div>
-        <div class="brand-copy"><strong>Autofuzz</strong><span>Fuzz orchestration</span></div>
+        <div class="brand-copy"><strong>Autofuzz</strong><span>自动化 Fuzz 中控</span></div>
       </div>
       <nav class="side-nav">
         <button class="nav-item" :class="{active: activeView === 'dashboard'}" type="button" @click="navigate('dashboard')">
@@ -58,7 +58,7 @@ function navigate(name) {
         </div>
         <button class="primary command-button" type="button" @click="ui.openCreateModal">
           <Plus :size="17" aria-hidden="true" />
-          <span>创建 Task</span>
+          <span>创建任务</span>
         </button>
       </header>
       <RouterView />

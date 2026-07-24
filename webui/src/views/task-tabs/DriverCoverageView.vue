@@ -12,7 +12,7 @@ const mode = ref('graph');
     <div class="subview-head">
       <button class="back-button icon-text-button" type="button" @click="ui.closeDriverCoverage">
         <ArrowLeft :size="16" />
-        <span>Coverage</span>
+        <span>覆盖</span>
       </button>
       <div>
         <h2>{{ ui.driverCoverageTitle }}</h2>

@@ -7,7 +7,7 @@ const ui = useAutofuzz();
 <template>
   <section class="subview">
     <div class="subview-head">
-      <button class="back-button icon-text-button" type="button" @click="ui.closeSnapshotDiff"><ArrowLeft :size="16" /><span>Snapshots</span></button>
+      <button class="back-button icon-text-button" type="button" @click="ui.closeSnapshotDiff"><ArrowLeft :size="16" /><span>Snapshot</span></button>
       <div><h2>{{ ui.detail.snapshotDiff.title }}</h2><p>{{ ui.detail.snapshotDiff.meta }}</p></div>
     </div>
     <section class="panel">

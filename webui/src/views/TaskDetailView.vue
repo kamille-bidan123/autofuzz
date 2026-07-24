@@ -24,7 +24,7 @@ const ui = useAutofuzz();
       <div class="detail-identity">
         <span class="run-status" :class="ui.statusClass(ui.detail.status)">{{ ui.detail.statusText }}</span>
         <span v-if="ui.detail.taskKind === 'crash_fix_child'" class="detail-kind">
-          修复子 task · d{{ ui.detail.originDriverId || '-' }}/v{{ ui.detail.originDriverSeq || '-' }}
+          修复子任务 · d{{ ui.detail.originDriverId || '-' }}/v{{ ui.detail.originDriverSeq || '-' }}
         </span>
         <span class="detail-repo" :title="ui.detail.repo">{{ ui.detail.repo }}</span>
       </div>
@@ -43,7 +43,7 @@ const ui = useAutofuzz();
 
     <div v-if="ui.detail.message" class="inline-alert" role="status">{{ ui.detail.message }}</div>
 
-    <div class="detail-tabs" role="tablist" aria-label="Task 详情">
+    <div class="detail-tabs" role="tablist" aria-label="任务详情">
       <button
         v-for="tab in ui.detailTabs"
         :key="tab.id"

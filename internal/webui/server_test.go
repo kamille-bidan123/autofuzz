@@ -46,7 +46,7 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 		`id="app"`,
 		`/static/assets/`,
 		`运行看板`,
-		`创建 Task`,
+		`创建任务`,
 		`task-detail`,
 		`linearStages`,
 		`detailTabs`,

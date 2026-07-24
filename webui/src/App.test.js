@@ -150,6 +150,34 @@ describe('App routing', () => {
     expect(router.currentRoute.value.fullPath).toBe('/tasks/run-1/coverage');
   });
 
+  it('renders the task overview control center with coverage-derived driver data', async () => {
+    const defaultFetch = fetch.getMockImplementation();
+    fetch.mockImplementation(url => {
+      if (String(url) !== '/api/runs/run-1') return defaultFetch(url);
+      return jsonResponse({
+        id: 'run-1',
+        status: 'completed',
+        request: {repository_url: '/src/libexif'},
+        stages: [{id: 'cloned', status: 'completed'}, {id: 'fuzzing', status: 'completed'}],
+        target_dir: '/work/libexif'
+      });
+    });
+
+    wrapper = mount(App, {global: {plugins: [router]}});
+    await flushPromises();
+
+    await router.push('/tasks/run-1/overview');
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('当前 Loop');
+    expect(wrapper.text()).toContain('Driver 状态');
+    expect(wrapper.text()).toContain('覆盖缺口');
+    expect(wrapper.text()).toContain('Crash 工作台');
+    expect(wrapper.find('.driver-board-tile').text()).toContain('d1/v2');
+    expect(wrapper.find('.driver-board-tile').text()).toContain('3 seeds');
+  });
+
   it('renders exported API coverage with driver icons', async () => {
     const defaultFetch = fetch.getMockImplementation();
     fetch.mockImplementation(url => {
@@ -177,7 +205,7 @@ describe('App routing', () => {
     expect(wrapper.find('.api-driver-icon').text()).toBe('d1');
 
     const toggleButtons = wrapper.findAll('.api-coverage-toggle button');
-    expect(toggleButtons.map(button => button.text())).toEqual(['API -> Driver', 'Driver -> API']);
+    expect(toggleButtons.map(button => button.text())).toEqual(['按 API', '按 Driver']);
     await toggleButtons[1].trigger('click');
     await flushPromises();
 
