@@ -16,6 +16,11 @@ const (
 	monitorCovInterval = 60 * time.Second
 )
 
+var liveCorpusMonitors = struct {
+	sync.RWMutex
+	bySnapshot map[string]*CorpusMonitor
+}{bySnapshot: map[string]*CorpusMonitor{}}
+
 // CoverageSnapshot is a cached llvm-cov export result, updated periodically by
 // the monitor's coverage loop for the web UI.
 type CoverageSnapshot struct {
@@ -87,6 +92,7 @@ func (m *CorpusMonitor) Start(ctx context.Context) {
 	_ = os.MkdirAll(m.profileDir, 0o755)
 	_ = os.MkdirAll(m.uniqueCrashesDir, 0o755)
 	_ = os.MkdirAll(m.crashReportsDir, 0o755)
+	registerLiveCorpusMonitor(m)
 	// Load existing crash analysis (resume): rebuild dedup state + mark
 	// existing crash files as seen so we only analyze new ones.
 	m.loadCrashAnalysis()
@@ -211,6 +217,35 @@ func (m *CorpusMonitor) Stop() {
 		close(m.stop)
 	}
 	m.wg.Wait()
+	unregisterLiveCorpusMonitor(m)
+}
+
+func registerLiveCorpusMonitor(m *CorpusMonitor) {
+	if m == nil {
+		return
+	}
+	liveCorpusMonitors.Lock()
+	liveCorpusMonitors.bySnapshot[corpusMonitorSnapshotKey(m.snapshotDir)] = m
+	liveCorpusMonitors.Unlock()
+}
+
+func unregisterLiveCorpusMonitor(m *CorpusMonitor) {
+	if m == nil {
+		return
+	}
+	key := corpusMonitorSnapshotKey(m.snapshotDir)
+	liveCorpusMonitors.Lock()
+	if liveCorpusMonitors.bySnapshot[key] == m {
+		delete(liveCorpusMonitors.bySnapshot, key)
+	}
+	liveCorpusMonitors.Unlock()
+}
+
+func corpusMonitorSnapshotKey(snapshotDir string) string {
+	if abs, err := filepath.Abs(snapshotDir); err == nil {
+		snapshotDir = abs
+	}
+	return filepath.Clean(snapshotDir)
 }
 
 // Snapshot returns the current aggregate coverage status instantly. It does
@@ -704,4 +739,45 @@ func (m *CorpusMonitor) CrashAnalysisData() CrashAnalysisSummary {
 	m.crashMu.Lock()
 	defer m.crashMu.Unlock()
 	return CrashAnalysisSummary{Total: m.totalCrashCount, Unique: m.uniqueCrashCount}
+}
+
+// DeleteLiveUniqueCrashes removes unique crash entries from a running monitor,
+// if that monitor owns snapshotDir. It returns false when the snapshot is not
+// currently monitored.
+func DeleteLiveUniqueCrashes(snapshotDir string, files []string) bool {
+	key := corpusMonitorSnapshotKey(snapshotDir)
+	liveCorpusMonitors.RLock()
+	monitor := liveCorpusMonitors.bySnapshot[key]
+	liveCorpusMonitors.RUnlock()
+	if monitor == nil {
+		return false
+	}
+	monitor.deleteUniqueCrashes(files)
+	return true
+}
+
+func (m *CorpusMonitor) deleteUniqueCrashes(files []string) {
+	selected := map[string]bool{}
+	for _, file := range files {
+		name := filepath.Base(strings.TrimSpace(file))
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			continue
+		}
+		selected[name] = true
+	}
+	if len(selected) == 0 {
+		return
+	}
+	m.crashMu.Lock()
+	defer m.crashMu.Unlock()
+	filtered := m.uniqueCrashList[:0]
+	for _, entry := range m.uniqueCrashList {
+		if selected[filepath.Base(entry.File)] {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	m.uniqueCrashList = filtered
+	m.uniqueCrashCount = len(m.uniqueCrashList)
+	m.saveCrashAnalysisLocked()
 }

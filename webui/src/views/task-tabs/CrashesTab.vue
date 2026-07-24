@@ -26,18 +26,32 @@ const ui = useAutofuzz();
         <div><h2>Unique Crash</h2><p>跨 snapshot 去重后的问题列表</p></div>
         <div class="unique-crash-tools">
           <button
-            v-if="!ui.crashFixMode"
+            v-if="!ui.uniqueCrashSelectionMode"
             class="driver-detail-button"
             type="button"
             :disabled="ui.uniqueCrashRepairableCount === 0"
             @click="ui.toggleCrashFixMode"
           >修复 crash 生成新 task</button>
-          <template v-else>
+          <button
+            v-if="!ui.uniqueCrashSelectionMode"
+            class="driver-detail-button danger-mini"
+            type="button"
+            :disabled="ui.uniqueCrashTotalCount === 0"
+            @click="ui.toggleCrashDeleteMode"
+          >删除 unique crash</button>
+          <template v-else-if="ui.crashFixMode">
             <span class="selection-note">{{ ui.crashFixSelectionCount }} 已选</span>
             <button class="task-action primary" type="button" :disabled="ui.crashFixBusy || ui.crashFixSelectionCount === 0" @click="ui.submitCrashFixTask">
               {{ ui.crashFixBusy ? '修复中...' : '修复' }}
             </button>
             <button class="task-action" type="button" :disabled="ui.crashFixBusy" @click="ui.cancelCrashFixSelection">取消</button>
+          </template>
+          <template v-else>
+            <span class="selection-note">{{ ui.crashDeleteSelectionCount }} 已选</span>
+            <button class="task-action danger" type="button" :disabled="ui.crashDeleteBusy || ui.crashDeleteSelectionCount === 0" @click="ui.deleteSelectedUniqueCrashes">
+              {{ ui.crashDeleteBusy ? '删除中...' : '删除' }}
+            </button>
+            <button class="task-action" type="button" :disabled="ui.crashDeleteBusy" @click="ui.cancelCrashDeleteSelection">取消</button>
           </template>
         </div>
       </div>
@@ -45,8 +59,8 @@ const ui = useAutofuzz();
       <div class="unique-crash-list">
         <div v-if="!ui.uniqueCrashTotalCount" class="cov-empty">尚未发现 unique crash</div>
         <template v-else>
-          <div class="unique-crash-row head" :class="{selecting: ui.crashFixMode}">
-            <div v-if="ui.crashFixMode">选择</div>
+          <div class="unique-crash-row head" :class="{selecting: ui.uniqueCrashSelectionMode}">
+            <div v-if="ui.uniqueCrashSelectionMode">选择</div>
             <div>driver</div>
             <div>版本</div>
             <div class="unique-crash-filter-cell">
@@ -118,16 +132,16 @@ const ui = useAutofuzz();
             v-for="item in ui.uniqueCrashItems"
             :key="ui.uniqueCrashKey(item)"
             class="unique-crash-row"
-            :class="{selecting: ui.crashFixMode, 'fix-disabled': ui.crashFixMode && !ui.canSelectCrashFix(item)}"
-            :title="ui.crashFixMode ? ui.crashFixDisabledReason(item) : ''"
+            :class="{selecting: ui.uniqueCrashSelectionMode, 'fix-disabled': ui.crashFixMode && !ui.canSelectCrashFix(item)}"
+            :title="ui.uniqueCrashSelectionDisabledReason(item)"
           >
-            <label v-if="ui.crashFixMode" class="crash-select-cell" @click.stop>
+            <label v-if="ui.uniqueCrashSelectionMode" class="crash-select-cell" @click.stop>
               <input
                 type="checkbox"
-                :checked="ui.isCrashFixSelected(item)"
-                :disabled="!ui.canSelectCrashFix(item)"
+                :checked="ui.isUniqueCrashSelected(item)"
+                :disabled="!ui.canSelectUniqueCrash(item)"
                 :aria-label="`选择 ${ui.uniqueCrashEntry(item).file || 'crash'}`"
-                @change="ui.setCrashFixSelected(item, $event.target.checked)"
+                @change="ui.setUniqueCrashSelected(item, $event.target.checked)"
               >
             </label>
             <div>{{ ui.uniqueCrashDriverLabel(item) }}</div>

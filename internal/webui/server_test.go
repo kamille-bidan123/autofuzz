@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -440,6 +441,114 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	}
 	requireSameRFC3339Instant(t, got.Crashes[0].CrashCreatedAt, crashTime)
 	requireSameRFC3339Instant(t, got.Crashes[0].LastAnalysisAt, reportTime)
+}
+
+func TestDeleteUniqueCrashesEndpointRemovesEntriesAndArtifacts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	targetDir := t.TempDir()
+	workspace := filepath.Dir(targetDir)
+	taskName := filepath.Base(targetDir)
+	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
+	for _, dir := range []string{
+		filepath.Join(snapDir, "crashes"),
+		filepath.Join(snapDir, "unique_crashes"),
+		filepath.Join(snapDir, "crash-reports"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"crash-a", "crash-b"} {
+		if err := os.WriteFile(filepath.Join(snapDir, "crashes", name), []byte("raw-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(snapDir, "unique_crashes", name), []byte("unique-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(snapDir, "crash-reports", name+".json"), []byte(`{"ok":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analysis := crashAnalysisJSON{
+		Total:  2,
+		Unique: 2,
+		List: []fuzzing.CrashAnalysisEntry{
+			{File: "crash-a", Type: "heap-buffer-overflow", UniquePath: "unique_crashes/crash-a", ReportPath: "crash-reports/crash-a.json", ReportStatus: "completed"},
+			{File: "crash-b", Type: "stack-buffer-overflow", UniquePath: "unique_crashes/crash-b", ReportPath: "crash-reports/crash-b.json", ReportStatus: "pending"},
+		},
+	}
+	analysisData, err := json.MarshalIndent(analysis, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), analysisData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(context.Background())
+	createdAt := time.Date(2026, 7, 24, 4, 5, 6, 0, time.UTC)
+	if err := upsertTaskRegistry(registryEntry{
+		ID:            "delete-crash",
+		Workspace:     workspace,
+		Name:          taskName,
+		RepositoryURL: "https://example.com/delete-crash.git",
+		CreatedAt:     createdAt.Format(time.RFC3339),
+		Status:        "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.tasks["delete-crash"] = &Task{id: "delete-crash", status: "running", createdAt: time.Now(), targetDir: targetDir, stages: map[string]string{}}
+	body := []byte(`{"crashes":[{"driver_id":1,"seq":1,"file":"crash-a"}]}`)
+	request := httptest.NewRequest(http.MethodDelete, "/api/runs/delete-crash/unique-crashes", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var result UniqueCrashDeleteResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", result.Deleted)
+	}
+	data, err := os.ReadFile(filepath.Join(snapDir, "crash-analysis.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshed crashAnalysisJSON
+	if err := json.Unmarshal(data, &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Total != 2 || refreshed.Unique != 1 || len(refreshed.List) != 1 || refreshed.List[0].File != "crash-b" {
+		t.Fatalf("unexpected refreshed analysis: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(snapDir, "crashes", "crash-a")); err != nil {
+		t.Fatalf("raw crash artifact should remain: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapDir, "unique_crashes", "crash-a")); !os.IsNotExist(err) {
+		t.Fatalf("unique crash artifact still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapDir, "crash-reports", "crash-a.json")); !os.IsNotExist(err) {
+		t.Fatalf("crash report still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapDir, "unique_crashes", "crash-b")); err != nil {
+		t.Fatalf("remaining unique crash was removed: %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	response = httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("overview status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var overview OverviewResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.Issues.UniqueCrashesTotal != 1 || len(overview.RecentIssues) != 1 || overview.RecentIssues[0].File != "crash-b" {
+		t.Fatalf("overview still includes deleted crash: %#v", overview)
+	}
 }
 
 func requireSameRFC3339Instant(t *testing.T, got string, want time.Time) {

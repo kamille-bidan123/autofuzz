@@ -634,8 +634,11 @@ export function useAutofuzzController() {
     const crashQueueBusy = reactive(new Set());
     const crashFixMode = ref(false);
     const crashFixBusy = ref(false);
+    const crashDeleteMode = ref(false);
+    const crashDeleteBusy = ref(false);
     const crashFixMessage = ref('');
     const selectedCrashFixKeys = ref(new Set());
+    const selectedCrashDeleteKeys = ref(new Set());
     const uniqueCrashFilters = reactive({
       open: '',
       selections: {
@@ -856,12 +859,18 @@ export function useAutofuzzController() {
       const keys = selectedCrashFixKeys.value;
       return uniqueCrashItems.value.filter(item => keys.has(uniqueCrashKey(item)));
     });
+    const selectedCrashDeleteItems = computed(() => {
+      const keys = selectedCrashDeleteKeys.value;
+      return uniqueCrashItems.value.filter(item => keys.has(uniqueCrashKey(item)));
+    });
     const selectedCrashFixGroup = computed(() => {
       const first = selectedCrashFixItems.value[0];
       if (!first) return '';
       return crashFixGroup(first);
     });
+    const uniqueCrashSelectionMode = computed(() => crashFixMode.value || crashDeleteMode.value);
     const crashFixSelectionCount = computed(() => selectedCrashFixItems.value.length);
+    const crashDeleteSelectionCount = computed(() => selectedCrashDeleteItems.value.length);
     const uniqueCrashRepairableCount = computed(() => uniqueCrashItems.value.filter(item => crashFixEligible(item)).length);
     const snapshotRows = computed(() => detail.snapshots || []);
     const snapshotsMulti = computed(() => snapshotRows.value.some(snapshot => snapshot.driver_id));
@@ -1456,6 +1465,14 @@ export function useAutofuzzController() {
       return selectedCrashFixKeys.value.has(uniqueCrashKey(item));
     }
 
+    function isCrashDeleteSelected(item) {
+      return selectedCrashDeleteKeys.value.has(uniqueCrashKey(item));
+    }
+
+    function isUniqueCrashSelected(item) {
+      return crashDeleteMode.value ? isCrashDeleteSelected(item) : isCrashFixSelected(item);
+    }
+
     function setCrashFixSelected(item, checked) {
       if (checked && !canSelectCrashFix(item)) return;
       const next = new Set(selectedCrashFixKeys.value);
@@ -1466,6 +1483,31 @@ export function useAutofuzzController() {
       crashFixMessage.value = '';
     }
 
+    function setCrashDeleteSelected(item, checked) {
+      const next = new Set(selectedCrashDeleteKeys.value);
+      const key = uniqueCrashKey(item);
+      if (checked) next.add(key);
+      else next.delete(key);
+      selectedCrashDeleteKeys.value = next;
+      crashFixMessage.value = '';
+    }
+
+    function setUniqueCrashSelected(item, checked) {
+      if (crashDeleteMode.value) {
+        setCrashDeleteSelected(item, checked);
+        return;
+      }
+      setCrashFixSelected(item, checked);
+    }
+
+    function canSelectUniqueCrash(item) {
+      return crashDeleteMode.value || canSelectCrashFix(item);
+    }
+
+    function uniqueCrashSelectionDisabledReason(item) {
+      return crashFixMode.value ? crashFixDisabledReason(item) : '';
+    }
+
     function pruneCrashFixSelection() {
       if (!selectedCrashFixKeys.value.size) return;
       const live = new Set(uniqueCrashItems.value.map(item => uniqueCrashKey(item)));
@@ -1473,7 +1515,16 @@ export function useAutofuzzController() {
       if (next.size !== selectedCrashFixKeys.value.size) selectedCrashFixKeys.value = next;
     }
 
+    function pruneCrashDeleteSelection() {
+      if (!selectedCrashDeleteKeys.value.size) return;
+      const live = new Set(uniqueCrashItems.value.map(item => uniqueCrashKey(item)));
+      const next = new Set([...selectedCrashDeleteKeys.value].filter(key => live.has(key)));
+      if (next.size !== selectedCrashDeleteKeys.value.size) selectedCrashDeleteKeys.value = next;
+    }
+
     function toggleCrashFixMode() {
+      crashDeleteMode.value = false;
+      selectedCrashDeleteKeys.value = new Set();
       crashFixMode.value = true;
       crashFixMessage.value = uniqueCrashRepairableCount.value
         ? '选择同一 driver/version 下需要修复的 OOB 库问题 crash。'
@@ -1484,6 +1535,21 @@ export function useAutofuzzController() {
       crashFixMode.value = false;
       crashFixMessage.value = '';
       selectedCrashFixKeys.value = new Set();
+    }
+
+    function toggleCrashDeleteMode() {
+      crashFixMode.value = false;
+      selectedCrashFixKeys.value = new Set();
+      crashDeleteMode.value = true;
+      crashFixMessage.value = uniqueCrashTotalCount.value
+        ? '选择需要删除的 unique crash。'
+        : '当前没有 unique crash。';
+    }
+
+    function cancelCrashDeleteSelection() {
+      crashDeleteMode.value = false;
+      crashFixMessage.value = '';
+      selectedCrashDeleteKeys.value = new Set();
     }
 
     async function submitCrashFixTask() {
@@ -1523,6 +1589,57 @@ export function useAutofuzzController() {
         crashFixMessage.value = error.message || '创建修复子 task 失败';
       } finally {
         crashFixBusy.value = false;
+      }
+    }
+
+    async function deleteSelectedUniqueCrashes() {
+      const id = detail.id;
+      if (!id || crashDeleteBusy.value) return;
+      const items = selectedCrashDeleteItems.value;
+      if (!items.length) {
+        crashFixMessage.value = '请先选择要删除的 unique crash。';
+        return;
+      }
+      const count = items.length;
+      if (!window.confirm(`确认删除 ${count} 个 unique crash？相关 LLM crash 报告也会被删除。`)) return;
+      const deletingOpenReport = detail.crashReport.visible && items.some(item => {
+        const entry = uniqueCrashEntry(item);
+        return Number(item?.seq || 0) === Number(detail.crashReport.seq || 0) &&
+          Number(item?.driver_id || 0) === Number(detail.crashReport.driverId || 0) &&
+          (entry.file || '') === (detail.crashReport.focusFile || '');
+      });
+      const payload = {
+        crashes: items.map(item => ({
+          driver_id: Number(item?.driver_id || 0),
+          seq: Number(item?.seq || 0),
+          file: uniqueCrashEntry(item).file || ''
+        })).filter(item => item.seq > 0 && item.file)
+      };
+      if (!payload.crashes.length) {
+        crashFixMessage.value = '选中的 unique crash 缺少 snapshot 或文件名。';
+        return;
+      }
+      crashDeleteBusy.value = true;
+      crashFixMessage.value = '正在删除 unique crash…';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/unique-crashes`, {
+          method: 'DELETE',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const result = await responseJSON(response, '删除 unique crash 失败');
+        selectedCrashDeleteKeys.value = new Set();
+        crashDeleteMode.value = false;
+        crashFixMessage.value = `已删除 ${result.deleted || payload.crashes.length} 个 unique crash。`;
+        if (deletingOpenReport) {
+          setCrashReport({visible: false, reports: [], focusFile: '', seq: 0, driverId: 0});
+        }
+        await refreshDetailData(id, ['uniqueCrashes', 'snapshots', 'crashQueue']);
+        await refreshTaskData(true);
+      } catch (error) {
+        if (detail.id === id) crashFixMessage.value = error.message || '删除 unique crash 失败';
+      } finally {
+        crashDeleteBusy.value = false;
       }
     }
 
@@ -2322,7 +2439,10 @@ export function useAutofuzzController() {
       }
     }
 
-    watch(uniqueCrashItems, pruneCrashFixSelection);
+    watch(uniqueCrashItems, () => {
+      pruneCrashFixSelection();
+      pruneCrashDeleteSelection();
+    });
     watch(() => route.fullPath, syncRoute, {immediate: true});
 
     onMounted(() => {
@@ -2429,6 +2549,9 @@ export function useAutofuzzController() {
       createModalOpen,
       crashBadge: issue => crashReportBadge(issue.report_status || 'pending', issue.classification || ''),
       crashBadgeForEntry: entry => crashReportBadge(entry.report_status || 'pending', entry.classification || ''),
+      crashDeleteBusy,
+      crashDeleteMode,
+      crashDeleteSelectionCount,
       crashFixBusy,
       crashFixDisabledReason,
       crashFixEligible,
@@ -2458,6 +2581,7 @@ export function useAutofuzzController() {
       driverGraphNote,
       driverRowClass,
       diffLines,
+      deleteSelectedUniqueCrashes,
       flowBackActive,
       flowForwardActive,
       flowRows,
@@ -2471,6 +2595,7 @@ export function useAutofuzzController() {
       isCrashQueueBusy,
       isCrashFixSelected,
       isTaskBusy,
+      isUniqueCrashSelected,
       linearStages,
       messages,
       navigate,
@@ -2542,11 +2667,17 @@ export function useAutofuzzController() {
       uniqueCrashTotalCount,
       closeCreateModal,
       closeUniqueCrashFilter,
+      cancelCrashDeleteSelection,
       setCrashFixSelected,
+      setUniqueCrashSelected,
       setUniqueCrashFilterAll,
       setUniqueCrashFilterValue,
       cancelCrashFixSelection,
       canSelectCrashFix,
+      canSelectUniqueCrash,
+      uniqueCrashSelectionDisabledReason,
+      uniqueCrashSelectionMode,
+      toggleCrashDeleteMode,
       toggleCrashFixMode,
       toggleUniqueCrashFilter,
       togglePathPicker

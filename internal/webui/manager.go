@@ -916,6 +916,20 @@ type CrashFixTaskRequest struct {
 	Crashes  []string `json:"crashes"`
 }
 
+type UniqueCrashDeleteRequest struct {
+	Crashes []UniqueCrashDeleteRef `json:"crashes"`
+}
+
+type UniqueCrashDeleteRef struct {
+	DriverID int    `json:"driver_id,omitempty"`
+	Seq      int    `json:"seq"`
+	File     string `json:"file"`
+}
+
+type UniqueCrashDeleteResponse struct {
+	Deleted int `json:"deleted"`
+}
+
 type CrashAnalysisQueueView struct {
 	ID          string `json:"id"`
 	Status      string `json:"status"`
@@ -1048,6 +1062,132 @@ func (m *Manager) UniqueCrashes(id string) (UniqueCrashesResponse, error) {
 		return a.Entry.File < b.Entry.File
 	})
 	return result, nil
+}
+
+func (m *Manager) DeleteUniqueCrashes(id string, input UniqueCrashDeleteRequest) (UniqueCrashDeleteResponse, error) {
+	targetDir := m.targetDirFor(id)
+	if targetDir == "" {
+		return UniqueCrashDeleteResponse{}, fmt.Errorf("task not found")
+	}
+	if len(input.Crashes) == 0 {
+		return UniqueCrashDeleteResponse{}, fmt.Errorf("no unique crash selected")
+	}
+	if len(input.Crashes) > 256 {
+		return UniqueCrashDeleteResponse{}, fmt.Errorf("at most 256 unique crashes can be deleted at once")
+	}
+	logRoot := filepath.Join(targetDir, "logs", "fuzzing")
+	bySnapshot := map[string][]string{}
+	for _, crash := range input.Crashes {
+		if crash.Seq <= 0 {
+			return UniqueCrashDeleteResponse{}, fmt.Errorf("invalid snapshot version")
+		}
+		file := cleanUniqueCrashFile(crash.File)
+		if file == "" {
+			return UniqueCrashDeleteResponse{}, fmt.Errorf("invalid crash file")
+		}
+		snapDir := crashReportSnapshotDir(targetDir, crash.DriverID, crash.Seq)
+		if !isPathUnderRoot(snapDir, logRoot) {
+			return UniqueCrashDeleteResponse{}, fmt.Errorf("snapshot path escapes task logs")
+		}
+		bySnapshot[snapDir] = append(bySnapshot[snapDir], file)
+	}
+
+	result := UniqueCrashDeleteResponse{}
+	for snapDir, files := range bySnapshot {
+		deleted, err := deleteUniqueCrashesFromSnapshot(snapDir, files)
+		if err != nil {
+			return result, err
+		}
+		result.Deleted += deleted
+	}
+	return result, nil
+}
+
+func cleanUniqueCrashFile(file string) string {
+	name := filepath.Base(strings.TrimSpace(file))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return ""
+	}
+	return name
+}
+
+func deleteUniqueCrashesFromSnapshot(snapDir string, files []string) (int, error) {
+	selected := map[string]bool{}
+	for _, file := range files {
+		name := cleanUniqueCrashFile(file)
+		if name != "" {
+			selected[name] = true
+		}
+	}
+	if len(selected) == 0 {
+		return 0, fmt.Errorf("no unique crash selected")
+	}
+	path := filepath.Join(snapDir, "crash-analysis.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, fmt.Errorf("snapshot has no crash analysis")
+		}
+		return 0, err
+	}
+	var analysis crashAnalysisJSON
+	if err := json.Unmarshal(data, &analysis); err != nil {
+		return 0, err
+	}
+	filtered := make([]fuzzing.CrashAnalysisEntry, 0, len(analysis.List))
+	deletedEntries := make([]fuzzing.CrashAnalysisEntry, 0, len(selected))
+	deletedFiles := make([]string, 0, len(selected))
+	for _, entry := range analysis.List {
+		file := cleanUniqueCrashFile(entry.File)
+		if file == "" || !selected[file] {
+			filtered = append(filtered, entry)
+			continue
+		}
+		if fuzzing.IsCrashAnalysisQueuedOrRunning(fuzzing.CrashAnalysisJobKey(snapDir, file)) {
+			return 0, fmt.Errorf("unique crash %s is queued or running crash analysis", file)
+		}
+		deletedEntries = append(deletedEntries, entry)
+		deletedFiles = append(deletedFiles, file)
+	}
+	if len(deletedEntries) == 0 {
+		return 0, fmt.Errorf("unique crash not found")
+	}
+	analysis.List = filtered
+	analysis.Unique = len(filtered)
+	if !fuzzing.DeleteLiveUniqueCrashes(snapDir, deletedFiles) {
+		if err := writeCrashAnalysisJSON(path, analysis); err != nil {
+			return 0, err
+		}
+	}
+	cleanupUniqueCrashArtifacts(snapDir, deletedEntries)
+	return len(deletedEntries), nil
+}
+
+func cleanupUniqueCrashArtifacts(snapDir string, entries []fuzzing.CrashAnalysisEntry) {
+	for _, entry := range entries {
+		file := cleanUniqueCrashFile(entry.File)
+		removeSnapshotSubdirFile(snapDir, "unique_crashes", entry.UniquePath)
+		if file != "" {
+			removeSnapshotSubdirFile(snapDir, "unique_crashes", filepath.Join("unique_crashes", file))
+			removeSnapshotSubdirFile(snapDir, "crash-reports", filepath.Join("crash-reports", safeWebCrashReportName(file)+".json"))
+		}
+		removeSnapshotSubdirFile(snapDir, "crash-reports", entry.ReportPath)
+	}
+}
+
+func removeSnapshotSubdirFile(snapDir, subdir, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	root := filepath.Join(snapDir, subdir)
+	path := value
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(snapDir, filepath.FromSlash(value))
+	}
+	if !isPathUnderRoot(path, root) {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 func (m *Manager) CrashReports(id string, driverID, seq int) (CrashReportsResponse, error) {
@@ -1595,16 +1735,20 @@ func updateCrashAnalysisEntry(snapDir, crashFile string, update func(*fuzzing.Cr
 		if err := update(&analysis.List[i]); err != nil {
 			return analysis, analysis.List[i], err
 		}
-		out, err := json.MarshalIndent(analysis, "", "  ")
-		if err != nil {
-			return analysis, analysis.List[i], err
-		}
-		if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		if err := writeCrashAnalysisJSON(path, analysis); err != nil {
 			return analysis, analysis.List[i], err
 		}
 		return analysis, analysis.List[i], nil
 	}
 	return analysis, fuzzing.CrashAnalysisEntry{}, fmt.Errorf("unique crash not found")
+}
+
+func writeCrashAnalysisJSON(path string, analysis crashAnalysisJSON) error {
+	out, err := json.MarshalIndent(analysis, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
 
 func safeWebCrashReportName(name string) string {

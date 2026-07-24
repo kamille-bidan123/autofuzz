@@ -46,6 +46,7 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage/function-sources", server.coverageFunctionSources)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
 	server.mux.HandleFunc("GET /api/runs/{id}/unique-crashes", server.uniqueCrashes)
+	server.mux.HandleFunc("DELETE /api/runs/{id}/unique-crashes", server.deleteUniqueCrashes)
 	server.mux.HandleFunc("GET /api/runs/{id}/crash-analysis-queue", server.crashAnalysisQueue)
 	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-analysis-queue", server.removeCrashAnalysisQueueItem)
 	server.mux.HandleFunc("GET /api/runs/{id}/crash-reports", server.crashReports)
@@ -306,6 +307,27 @@ func (s *Server) uniqueCrashes(response http.ResponseWriter, request *http.Reque
 	result, err := s.manager.UniqueCrashes(request.PathValue("id"))
 	if err != nil {
 		writeError(response, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) deleteUniqueCrashes(response http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	var input UniqueCrashDeleteRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	result, err := s.manager.DeleteUniqueCrashes(request.PathValue("id"), input)
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
 		return
 	}
 	writeJSON(response, http.StatusOK, result)
