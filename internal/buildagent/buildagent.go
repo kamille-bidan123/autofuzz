@@ -37,6 +37,7 @@ type Request struct {
 	TargetDir string
 	Jobs      int
 	LogDir    string
+	CrashFixContext string
 }
 
 type Client struct {
@@ -187,9 +188,20 @@ func resolveWithin(root, value string) (string, error) {
 }
 
 func buildPrompt(request Request) string {
+	crashFix := ""
+	if strings.TrimSpace(request.CrashFixContext) != "" {
+		crashFix = fmt.Sprintf(`
+
+本次构建是 crash 修复子任务。请先根据以下 crash 上下文修改目标库源码副本，修复根因后再完成构建。必须只修改当前工作区内的源码和构建文件，不要修改 fuzz driver。
+
+Crash 修复上下文：
+%s
+`, request.CrashFixContext)
+	}
 	return fmt.Sprintf(`你是 Autofuzz 的自主构建负责人。不可信的目标源码副本位于 %s（在你可写的工作区 %s 内）。
 
 全权负责分析并构建这个 C/C++ 库。查阅 README、CI、构建文件、源码、测试与示例。运行任何必要的本地构建命令，自行诊断失败、调整选项并重试，直到构建成功。你只能修改这个一次性目标工作区。绝不要访问网络、安装软件包，或触碰工作区之外的路径。
+%s
 
 结果要求：
 - 使用 clang/clang++；
@@ -202,7 +214,7 @@ func buildPrompt(request Request) string {
 
 不要只提出命令：自己执行构建、检查错误并验证产物。所有产物路径都须相对工作区根目录。只报告确实存在的产物。
 
-最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么）、build_system（字符串，如 cmake/make/meson/autotools）、language（字符串，"c" 或 "c++"）、build_dir（字符串，相对工作区根目录）、install_dir（字符串，相对工作区根目录）、compile_commands_path（字符串，相对工作区根目录）、static_libraries（字符串数组，至少一个相对工作区根目录的 .a 路径）、evidence（字符串数组，关键证据/校验结果）。`, request.SourceDir, request.TargetDir, request.Jobs)
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么）、build_system（字符串，如 cmake/make/meson/autotools）、language（字符串，"c" 或 "c++"）、build_dir（字符串，相对工作区根目录）、install_dir（字符串，相对工作区根目录）、compile_commands_path（字符串，相对工作区根目录）、static_libraries（字符串数组，至少一个相对工作区根目录的 .a 路径）、evidence（字符串数组，关键证据/校验结果）。`, request.SourceDir, request.TargetDir, crashFix, request.Jobs)
 }
 
 const responseSchema = `{

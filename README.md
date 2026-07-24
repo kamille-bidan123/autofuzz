@@ -22,6 +22,7 @@ Autofuzz 当前可以：
 ## 环境要求
 
 - Go 1.22 或更高版本
+- Node.js 和 npm；仅在重新构建 Web 静态资源时需要
 - Git
 - Clang/Clang++
 - CMake
@@ -37,24 +38,33 @@ PromeFuzz 的 `config.toml` 应提前配置好 LLM 和 embedding 模型。例如
 
 ```bash
 cd /home/tsj/fuzz_agent/autofuzz
-go build -buildvcs=false -o bin/autofuzz ./cmd/autofuzz
+make
 ```
 
-编译完成后可查看所有参数：
+`make` 会先通过 npm/Vite 构建 Vue Web 页面到 `internal/webui/static`，再编译完整的 Go 二进制。`make test` 会同时执行 Vitest 前端组件测试和 Go 测试：
+
+```text
+bin/autofuzz
+bin/autofuzz-web
+```
+
+也可以只执行单独目标：
+
+```bash
+make web
+make go
+make test
+```
+
+编译完成后可查看 CLI 参数：
 
 ```bash
 ./bin/autofuzz --help
 ```
 
-同时编译 Web 控制台：
-
-```bash
-go build -buildvcs=false -o bin/autofuzz-web ./cmd/autofuzz-web
-```
-
 ## Web 控制台
 
-Autofuzz 提供一个简单的 Web 界面，不需要 Node.js 或单独构建前端资源。启动服务：
+Autofuzz 提供一个 Web 控制台。静态资源在编译时嵌入 `autofuzz-web`，运行已构建好的服务不需要 Node.js。启动服务：
 
 ```bash
 cd /home/tsj/fuzz_agent/autofuzz
@@ -73,7 +83,9 @@ http://127.0.0.1:8080
 ./bin/autofuzz-web --listen 127.0.0.1:9090
 ```
 
-Web 表单覆盖当前 Autofuzz CLI 的业务配置项：目标仓库、Git ref、workspace、PromeFuzz 路径、配置文件、虚拟环境 Python、并发度、最大 API 数、Codex 命令/模型/profile、恢复运行和停止阶段。
+控制台使用 Vue Router 的 hash 路由保存 Dashboard、Tasks、Task Detail 和详情 Tab 状态；刷新页面或使用浏览器前进、后退时可以恢复当前视图。
+
+Web 表单覆盖当前 Autofuzz CLI 的业务配置项：目标仓库、Git ref、workspace、PromeFuzz 路径、配置文件、虚拟环境 Python、并发度、Codex 命令/模型/profile、恢复运行和停止阶段。
 
 启动任务后，页面会显示以下阶段：
 
@@ -83,7 +95,7 @@ Web 表单覆盖当前 Autofuzz CLI 的业务配置项：目标仓库、Git ref�
                                       持续 Fuzz ⇄ LLM 优化分析
 ```
 
-正在运行的阶段显示旋转图标，成功和失败阶段分别显示对应状态。持续 Fuzz 与 LLM 优化分析在页面中显示为循环卡组；每次定时或手动分析都会显示覆盖采集、Codex 分析、结果校验和 driver 重建状态，并在下方保留每轮摘要。流程快照写入 `logs/fuzzing/fuzz-flow.json`，刷新页面或重启 Web 服务后仍可恢复。页面使用 Server-Sent Events（SSE）持续接收事件，不需要轮询。
+正在运行的阶段显示旋转图标，成功和失败阶段分别显示对应状态。持续 Fuzz 与 LLM 优化分析在页面中显示为循环卡组；每次定时或手动分析都会显示覆盖采集、Codex 分析、结果校验和 driver 重建状态，并在下方保留每轮摘要。流程快照写入 `logs/fuzzing/fuzz-flow.json`，刷新页面或重启 Web 服务后仍可恢复。页面使用 Server-Sent Events（SSE）持续接收运行事件，并以低频轮询刷新 coverage、snapshot 和 crash 队列等派生数据。
 
 Autofuzz 直接启动的 Codex Agent 调用使用：
 

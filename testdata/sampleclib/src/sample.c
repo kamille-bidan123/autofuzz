@@ -117,7 +117,7 @@ int sample_context_parse(sample_context *context, const char *text)
         payload_end = crc_separator;
     }
 
-    while (cursor < payload_end && count < SAMPLE_CAPACITY) {
+    while (cursor < payload_end && count <= SAMPLE_CAPACITY) {
         char *end = NULL;
         long value;
 

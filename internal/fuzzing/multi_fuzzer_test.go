@@ -1,6 +1,7 @@
 package fuzzing
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -128,7 +129,7 @@ func TestBuildMultiCoverageSnapshotIncludesQueuedTargets(t *testing.T) {
 		coverage: CorpusCoverageStatus{Summary: CoverageSummary{ExecutedFunctions: 2, FullFunctions: 1, PartialFunctions: 1}},
 	}}
 	nextAnalysisAt := time.Now().Add(5 * time.Minute)
-	snapshot := buildMultiCoverageSnapshot(data, st, []FuzzTarget{{DriverID: 1}, {DriverID: 2}}, 1, 30*time.Minute, nextAnalysisAt)
+	snapshot := buildMultiCoverageSnapshot(data, st, 1, 30*time.Minute, nextAnalysisAt)
 	if snapshot.ActiveTargets != 1 || snapshot.MaxParallelTargets != 1 || len(snapshot.Targets) != 2 {
 		t.Fatalf("unexpected snapshot shape: %#v", snapshot)
 	}
@@ -137,11 +138,106 @@ func TestBuildMultiCoverageSnapshotIncludesQueuedTargets(t *testing.T) {
 		len(snapshot.NextTargets) != 1 || snapshot.NextTargets[0] != 2 {
 		t.Fatalf("scheduler fields missing from snapshot: %#v", snapshot)
 	}
+	if len(snapshot.RunningVersions) != 1 || snapshot.RunningVersions[0].DriverID != 1 || snapshot.RunningVersions[0].Seq != 1 ||
+		len(snapshot.QueuedVersions) != 1 || snapshot.QueuedVersions[0].DriverID != 2 || snapshot.QueuedVersions[0].Seq != 1 ||
+		len(snapshot.NextVersions) != 1 || snapshot.NextVersions[0].DriverID != 2 || snapshot.NextVersions[0].Seq != 1 {
+		t.Fatalf("version scheduler fields missing from snapshot: %#v", snapshot)
+	}
 	if snapshot.Targets[1].DriverID != 2 || snapshot.Targets[1].Status != "queued" || snapshot.Targets[1].Summary.ExecutedFunctions != 3 {
 		t.Fatalf("queued target not preserved in snapshot: %#v", snapshot.Targets)
 	}
 	if snapshot.NextAnalysisAt == nil || snapshot.FuzzIntervalSeconds != int64((30*time.Minute)/time.Second) || snapshot.AnalysisRemainingSeconds <= 0 {
 		t.Fatalf("analysis countdown fields missing from snapshot: %#v", snapshot)
+	}
+}
+
+func TestBuildMultiCoverageSnapshotKeepsMultipleVersionsPerDriver(t *testing.T) {
+	v1 := &TargetState{DriverID: 1, Seq: 1, Status: "running", CorpusDir: "/tmp/d1-v1"}
+	v2 := &TargetState{DriverID: 1, Seq: 2, Status: "queued", CorpusDir: "/tmp/d1-v2"}
+	st := &MultiFuzzState{
+		Iteration:       4,
+		NextTargetIndex: 1,
+		Targets:         map[int]*TargetState{1: v2},
+		Versions: map[string]*TargetState{
+			targetVersionKey(1, 1): v1,
+			targetVersionKey(1, 2): v2,
+		},
+	}
+	data := []targetCycleData{{
+		state: v1,
+		cache: CoverageSnapshot{Available: true, SeedCount: 1, Coverage: CoverageStatus{Summary: CoverageSummary{
+			ExecutedFunctions: 1,
+			FullFunctions:     1,
+		}}},
+		coverage: CorpusCoverageStatus{Summary: CoverageSummary{ExecutedFunctions: 1, FullFunctions: 1}},
+	}}
+
+	snapshot := buildMultiCoverageSnapshot(data, st, 1, 30*time.Minute, time.Now().Add(time.Minute))
+	if len(snapshot.Targets) != 2 || snapshot.Targets[0].Seq != 1 || snapshot.Targets[1].Seq != 2 {
+		t.Fatalf("snapshot should include both driver versions: %#v", snapshot.Targets)
+	}
+	if len(snapshot.RunningVersions) != 1 || snapshot.RunningVersions[0] != (TargetVersionRef{DriverID: 1, Seq: 1}) {
+		t.Fatalf("running versions = %#v, want d1/v1", snapshot.RunningVersions)
+	}
+	if len(snapshot.NextVersions) != 1 || snapshot.NextVersions[0] != (TargetVersionRef{DriverID: 1, Seq: 2}) {
+		t.Fatalf("next versions = %#v, want d1/v2", snapshot.NextVersions)
+	}
+}
+
+func TestEnsureInitialTargetSnapshotsKeepsVersionSnapshot(t *testing.T) {
+	root := t.TempDir()
+	driverDir := filepath.Join(root, "fuzz_driver")
+	logsDir := filepath.Join(root, "logs", "fuzzing")
+	if err := os.MkdirAll(driverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(driverDir, "fuzz_driver_1.c")
+	if err := os.WriteFile(source, []byte("int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long s) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buildScript := filepath.Join(driverDir, "build_fuzz_driver_1.sh")
+	if err := os.WriteFile(buildScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	snapDir := targetSnapshotDir(logsDir, 1, 2)
+	if err := os.MkdirAll(filepath.Join(snapDir, "driver"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(snapDir, "corpus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "driver", "fuzz_driver_1.c"), []byte("optimized\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "build_cov_driver.sh"), []byte("#!/bin/sh\nclang wrapper.c -o cov_driver\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath := filepath.Join(snapDir, "cov_driver")
+	if err := os.WriteFile(binaryPath, []byte("binary\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	state := &TargetState{DriverID: 1, Seq: 2, CurrentSnapshot: snapDir, BinaryPath: binaryPath, CorpusDir: filepath.Join(snapDir, "corpus"), Status: "running", LastLLMIteration: 7}
+	st := &MultiFuzzState{
+		Version: MultiFuzzStateVersion,
+		Targets: map[int]*TargetState{
+			1: state,
+		},
+		Versions: map[string]*TargetState{
+			targetVersionKey(1, 2): state,
+		},
+	}
+
+	err := ensureInitialTargetSnapshots(context.Background(), FuzzConfig{DriverDir: driverDir, BuildScript: filepath.Join(driverDir, "build_cov_synthesized_driver.sh"), LogsDir: logsDir}, st, []FuzzTarget{{DriverID: 1, Source: source, BuildScript: buildScript}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Targets[1].Seq != 2 || st.Targets[1].CurrentSnapshot != snapDir || st.Targets[1].Status != "ready" {
+		t.Fatalf("version snapshot was not preserved: %#v", st.Targets[1])
+	}
+	if _, err := os.Stat(targetSnapshotDir(logsDir, 1, 1)); !os.IsNotExist(err) {
+		t.Fatalf("initial snapshot v1 should not have been rebuilt, stat err = %v", err)
 	}
 }
 
@@ -156,7 +252,7 @@ func TestBuildMultiCoverageSnapshotClonesBranchCounts(t *testing.T) {
 		cache:    CoverageSnapshot{Available: true, SeedCount: 1, Coverage: coverage},
 		coverage: CoverageStatusToCorpusCoverage(coverage, 1, false, "/tmp/d1"),
 	}}
-	snapshot := buildMultiCoverageSnapshot(data, st, []FuzzTarget{{DriverID: 1}}, 1, 30*time.Minute, time.Now().Add(time.Minute))
+	snapshot := buildMultiCoverageSnapshot(data, st, 1, 30*time.Minute, time.Now().Add(time.Minute))
 	snapshot.Targets[0].Coverage.Partial[0].UncoveredBranches[0].Counts["false"] = 9
 	snapshot.Coverage.Partial[0].UncoveredBranches[0].Counts["false"] = 11
 	if coverage.Partial[0].UncoveredBranches[0].Counts["false"] != 1 {
@@ -176,8 +272,8 @@ func TestCollectMultiLiveDataPreservesLastSummary(t *testing.T) {
 			PartialFunctions:  5,
 		},
 	}
-	data := collectMultiLiveData(map[int]*runningTarget{
-		1: {state: state, tracker: NewFuzzStatusTracker()},
+	data := collectMultiLiveData(map[targetRuntimeKey]*runningTarget{
+		runtimeKey(state): {state: state, tracker: NewFuzzStatusTracker()},
 	}, 2)
 	if len(data) != 1 {
 		t.Fatalf("live data length = %d, want 1", len(data))

@@ -32,7 +32,7 @@ func TestDefaultsEndpoint(t *testing.T) {
 	}
 }
 
-func TestIndexShowsTaskListBeforeTaskDetails(t *testing.T) {
+func TestIndexUsesVueTaskConsole(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
@@ -40,17 +40,146 @@ func TestIndexShowsTaskListBeforeTaskDetails(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 	body := response.Body.String()
-	for _, marker := range []string{`id="taskListView"`, `id="createModal"`, `id="taskDetailView"`, `id="resumeButton"`, `id="max_fuzz_drivers"`, `id="covTotalCard"`, `id="covDriverCard"`, `id="driverCoverageList"`, `id="driverCoverageGraph"`, `driver-cov-row`, `driver-graph-node`, `/coverage/function-sources`, `id="fuzzFlowHistory"`, `id="crashQueuePanel"`, `id="crashQueueList"`, `/crash-analysis-queue`, `id="uniqueCrashPanel"`, `id="uniqueCrashList"`, `/unique-crashes`, `id="crashReportView"`, `/crash-reports`, `/crash-reports/analyze`, `crash-analyze-button`, `id="codexEventPanel" class="panel stream"`, `id="runtimeLogPanel" class="panel stream"`, `stage-cycle`, `event.kind === 'fuzz_flow'`, `snap-version-button`, `/start`} {
-		if !strings.Contains(body, marker) {
+	combined := body + embeddedStaticText(t, "static/assets")
+	for _, marker := range []string{
+		`id="app"`,
+		`/static/assets/`,
+		`运行看板`,
+		`创建 Task`,
+		`task-detail`,
+		`linearStages`,
+		`detailTabs`,
+		`canTriggerFuzz`,
+		`uniqueCrashItems`,
+		`removeCrashQueueItem`,
+		`snapshotRows`,
+		`openSnapshotDiff`,
+		`EventSource`,
+		`/events`,
+		`/fuzz-flow?limit=50`,
+		`driver-cov-row`,
+		`driver-graph-node`,
+		`/coverage/function-sources`,
+		`/crash-analysis-queue`,
+		`unique-crashes`,
+		`/crash-reports/analyze`,
+		`crash-analyze-button`,
+		`stage-cycle`,
+		`fuzz_flow`,
+		`snap-version-button`,
+		`/start`,
+	} {
+		if !strings.Contains(combined, marker) {
 			t.Fatalf("index is missing %s", marker)
 		}
 	}
-	if strings.Contains(body, `id="taskSelBtn"`) || strings.Contains(body, "localStorage") {
-		t.Fatal("index still contains the old task auto-selection UI")
+	for _, marker := range []string{
+		`autofuzz-app-template`,
+		`id="taskSelBtn"`,
+		`task-sel-btn`,
+		`window.Terminal`,
+		`xterm.min.js`,
+		`localStorage`,
+	} {
+		if strings.Contains(combined, marker) {
+			t.Fatalf("index still contains removed runtime UI %s", marker)
+		}
 	}
-	if strings.Contains(body, "waitingForAnalysis") || strings.Contains(body, "m.includes('plateau=')") {
+	if strings.Contains(combined, "waitingForAnalysis") || strings.Contains(combined, "m.includes('plateau=')") {
 		t.Fatal("index still infers LLM flow state from runtime log strings")
 	}
+	for _, marker := range []string{`__autofuzzLegacy`, `__autofuzzVueShell`, `mountLegacyApp`, `legacy-app.js`} {
+		if strings.Contains(combined, marker) {
+			t.Fatalf("index still contains legacy Vue bridge %s", marker)
+		}
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	entries, err := staticFiles.ReadDir("static/assets")
+	if err != nil {
+		t.Fatalf("read embedded assets: %v", err)
+	}
+	assetsByExt := make(map[string]string)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext == ".js" || ext == ".css" {
+			assetsByExt[ext] = entry.Name()
+		}
+	}
+
+	server := NewServer(NewManager(context.Background()))
+	for ext, expectedType := range map[string]string{".js": "javascript", ".css": "text/css"} {
+		name := assetsByExt[ext]
+		if name == "" {
+			t.Fatalf("missing embedded %s asset", ext)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/static/assets/"+name, nil)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", name, response.Code)
+		}
+		if !strings.Contains(response.Header().Get("Content-Type"), expectedType) {
+			t.Fatalf("%s content-type = %q", name, response.Header().Get("Content-Type"))
+		}
+		if response.Body.Len() == 0 {
+			t.Fatalf("%s returned empty body", name)
+		}
+	}
+}
+
+func TestFilterCoverageDataByDriverSelectsRequestedVersion(t *testing.T) {
+	multi := fuzzing.MultiCoverageSnapshot{Targets: []fuzzing.TargetCoverageSnapshot{
+		{
+			DriverID:  1,
+			Seq:       1,
+			Available: true,
+			Coverage: fuzzing.CoverageStatus{Summary: fuzzing.CoverageSummary{
+				ExecutedFunctions: 1,
+			}},
+		},
+		{
+			DriverID:  1,
+			Seq:       2,
+			Available: true,
+			Coverage: fuzzing.CoverageStatus{Summary: fuzzing.CoverageSummary{
+				ExecutedFunctions: 2,
+			}},
+		},
+	}}
+
+	exact, ok := filterCoverageDataByDriver(multi, 1, 1).(fuzzing.CoverageSnapshot)
+	if !ok || !exact.Available || exact.Coverage.Summary.ExecutedFunctions != 1 {
+		t.Fatalf("exact version filter = %#v, want d1/v1", exact)
+	}
+	latest, ok := filterCoverageDataByDriver(multi, 1, 0).(fuzzing.CoverageSnapshot)
+	if !ok || !latest.Available || latest.Coverage.Summary.ExecutedFunctions != 2 {
+		t.Fatalf("latest version filter = %#v, want d1/v2", latest)
+	}
+}
+
+func embeddedStaticText(t *testing.T, directory string) string {
+	t.Helper()
+	entries, err := staticFiles.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read embedded static dir %s: %v", directory, err)
+	}
+	var builder strings.Builder
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := staticFiles.ReadFile(directory + "/" + entry.Name())
+		if err != nil {
+			t.Fatalf("read embedded static file %s/%s: %v", directory, entry.Name(), err)
+		}
+		builder.Write(data)
+	}
+	return builder.String()
 }
 
 func TestOverviewEndpointAggregatesDashboardMetrics(t *testing.T) {
@@ -208,6 +337,17 @@ func TestUniqueCrashesEndpointAggregatesDriverSnapshots(t *testing.T) {
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	crashTime := time.Date(2026, 7, 24, 1, 2, 3, 0, time.UTC)
+	crashPath := filepath.Join(snapDir, "crashes", "leak-a")
+	if err := os.MkdirAll(filepath.Dir(crashPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crashPath, []byte("crash"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(crashPath, crashTime, crashTime); err != nil {
+		t.Fatal(err)
+	}
 	analysis := `{
   "total_crashes": 1,
   "unique_crashes": 1,
@@ -236,12 +376,28 @@ func TestUniqueCrashesEndpointAggregatesDriverSnapshots(t *testing.T) {
 	if len(got.Crashes) != 1 || got.Crashes[0].DriverID != 3 || got.Crashes[0].Seq != 2 || got.Crashes[0].Entry.Type != "leak" || got.Crashes[0].Entry.ReportStatus != "pending" {
 		t.Fatalf("unexpected unique crashes response: %#v", got)
 	}
+	requireSameRFC3339Instant(t, got.Crashes[0].CrashCreatedAt, crashTime)
+	if got.Crashes[0].LastAnalysisAt != "" {
+		t.Fatalf("unexpected unique crash timestamps: %#v", got.Crashes[0])
+	}
 }
 
 func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	targetDir := t.TempDir()
 	snapDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
 	if err := os.MkdirAll(filepath.Join(snapDir, "crash-reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	crashTime := time.Date(2026, 7, 24, 2, 3, 4, 0, time.UTC)
+	reportTime := time.Date(2026, 7, 24, 3, 4, 5, 0, time.UTC)
+	crashPath := filepath.Join(snapDir, "crashes", "crash-a")
+	if err := os.MkdirAll(filepath.Dir(crashPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crashPath, []byte("crash"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(crashPath, crashTime, crashTime); err != nil {
 		t.Fatal(err)
 	}
 	analysis := `{
@@ -259,7 +415,11 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := `{"report":{"classification":"library_bug","asan_report":"ERROR: AddressSanitizer: heap-buffer-overflow"}}`
-	if err := os.WriteFile(filepath.Join(snapDir, "crash-reports", "crash-a.json"), []byte(report), 0o644); err != nil {
+	reportPath := filepath.Join(snapDir, "crash-reports", "crash-a.json")
+	if err := os.WriteFile(reportPath, []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(reportPath, reportTime, reportTime); err != nil {
 		t.Fatal(err)
 	}
 
@@ -277,6 +437,19 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	}
 	if len(got.Crashes) != 1 || got.Crashes[0].Entry.ReportStatus != "completed" || got.Crashes[0].Entry.Classification != "library_bug" {
 		t.Fatalf("stale running report was not reconciled: %#v", got.Crashes)
+	}
+	requireSameRFC3339Instant(t, got.Crashes[0].CrashCreatedAt, crashTime)
+	requireSameRFC3339Instant(t, got.Crashes[0].LastAnalysisAt, reportTime)
+}
+
+func requireSameRFC3339Instant(t *testing.T, got string, want time.Time) {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, got)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", got, err)
+	}
+	if !parsed.Equal(want) {
+		t.Fatalf("time = %s, want same instant as %s", got, want.Format(time.RFC3339))
 	}
 }
 

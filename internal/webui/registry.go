@@ -13,6 +13,8 @@ type registryEntry struct {
 	Workspace     string     `json:"workspace"`
 	Name          string     `json:"name"`
 	RepositoryURL string     `json:"repository_url"`
+	TaskKind      string     `json:"task_kind,omitempty"`
+	ParentTaskID  string     `json:"parent_task_id,omitempty"`
 	CreatedAt     string     `json:"created_at"`
 	UpdatedAt     string     `json:"updated_at,omitempty"`
 	Status        string     `json:"status,omitempty"`

@@ -48,6 +48,9 @@ func New(options Options) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	if options.ProjectName != "" {
+		name = options.ProjectName
+	}
 	targetDir := filepath.Join(options.Workspace, name)
 	statePath := filepath.Join(targetDir, "agent-state.json")
 	var runState *state.RunState
@@ -68,6 +71,15 @@ func New(options Options) (*Agent, error) {
 		}
 		runState = state.New(options.RepositoryURL, options.Ref, name, filepath.Join(targetDir, "source"))
 		runState.SourceKind = sourceKind
+		runState.TaskKind = options.TaskKind
+		runState.ParentTaskID = options.ParentTaskID
+		runState.OriginDriverID = options.Origin.DriverID
+		runState.OriginDriverSeq = options.Origin.DriverSeq
+		runState.OriginCrashes = append([]string(nil), options.Origin.Crashes...)
+		runState.OriginSnapshotDir = options.Origin.SnapshotDir
+		runState.OriginSourceDir = options.Origin.SourceDir
+		runState.OriginBuildDir = options.Origin.BuildDir
+		runState.OriginInstallDir = options.Origin.InstallDir
 	}
 	agent := &Agent{
 		Options: options, State: runState,

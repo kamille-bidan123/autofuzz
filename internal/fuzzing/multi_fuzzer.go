@@ -35,6 +35,23 @@ type runningTarget struct {
 	startedIteration int
 }
 
+type targetRuntimeKey struct {
+	driverID int
+	seq      int
+}
+
+func runtimeKey(state *TargetState) targetRuntimeKey {
+	if state == nil {
+		return targetRuntimeKey{}
+	}
+	return targetRuntimeKey{driverID: state.DriverID, seq: state.Seq}
+}
+
+type TargetVersionRef struct {
+	DriverID int `json:"driver_id"`
+	Seq      int `json:"seq"`
+}
+
 type targetCycleData struct {
 	state    *TargetState
 	status   FuzzStatus
@@ -54,6 +71,9 @@ type MultiCoverageSnapshot struct {
 	RunningTargets           []int                    `json:"running_targets"`
 	QueuedTargets            []int                    `json:"queued_targets"`
 	NextTargets              []int                    `json:"next_targets,omitempty"`
+	RunningVersions          []TargetVersionRef       `json:"running_versions,omitempty"`
+	QueuedVersions           []TargetVersionRef       `json:"queued_versions,omitempty"`
+	NextVersions             []TargetVersionRef       `json:"next_versions,omitempty"`
 	FuzzIntervalSeconds      int64                    `json:"fuzz_interval_seconds,omitempty"`
 	NextAnalysisAt           *time.Time               `json:"next_analysis_at,omitempty"`
 	AnalysisRemainingSeconds int64                    `json:"analysis_remaining_seconds,omitempty"`
@@ -127,6 +147,7 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		}
 	}
 	st.TargetCount = len(targets)
+	st.ensureVersionIndex()
 	if st.NextTargetIndex < 0 {
 		st.NextTargetIndex = 0
 	}
@@ -139,11 +160,15 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	emitFlow := func(phase FuzzFlowPhase, status, trigger, message string, driverID int) {
 		flow.Iteration = st.Iteration
 		flow.DriverID = driverID
-		flow.TargetCount = len(targets)
+		flow.TargetCount = len(st.versionStates())
 		if driverID != 0 {
-			if targetState := st.Targets[driverID]; targetState != nil {
-				flow.DriverSeq = targetState.Seq
+			seq := st.CurrentDriverSeq
+			if seq <= 0 {
+				if targetState := st.Targets[driverID]; targetState != nil {
+					seq = targetState.Seq
+				}
 			}
+			flow.DriverSeq = seq
 		} else {
 			flow.DriverSeq = 0
 		}
@@ -168,7 +193,7 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		return err
 	}
 
-	running := map[int]*runningTarget{}
+	running := map[targetRuntimeKey]*runningTarget{}
 	stopAll := func() {
 		for _, rt := range running {
 			stopRunningTarget(rt)
@@ -183,28 +208,28 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	nextAnalysisAt := time.Now().Add(cfg.Interval)
 	emitCoverage := func(data []targetCycleData) {
 		if cfg.OnCoverageChanged != nil {
-			cfg.OnCoverageChanged(buildMultiCoverageSnapshot(data, st, targets, maxParallel, cfg.Interval, nextAnalysisAt))
+			cfg.OnCoverageChanged(buildMultiCoverageSnapshot(data, st, maxParallel, cfg.Interval, nextAnalysisAt))
 		}
 	}
 
-	fillRunningTargets(ctx, cfg, st, targets, running, maxParallel, st.Iteration)
+	fillRunningTargets(ctx, cfg, st, running, maxParallel, st.Iteration)
 	if len(running) == 0 {
 		return fmt.Errorf("no child fuzz driver could be started")
 	}
-	markQueuedTargets(st, targets, running)
+	markQueuedTargets(st, running)
 	if err := st.Save(statePath); err != nil {
 		return err
 	}
 	lastCycleData = collectMultiLiveData(running, st.Iteration)
 	emitCoverage(lastCycleData)
-	emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, "正在并行 fuzz"), 0)
+	emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, "正在并行 fuzz"), 0)
 
-	settleRunningSet := func(protectedDriverID int) error {
-		rotated := rotateExpiredTargets(cfg, running, st.Iteration, protectedDriverID)
-		started := fillRunningTargets(ctx, cfg, st, targets, running, maxParallel, st.Iteration)
-		markQueuedTargets(st, targets, running)
+	settleRunningSet := func(protected targetRuntimeKey) error {
+		rotated := rotateExpiredTargets(cfg, running, st.Iteration, protected)
+		started := fillRunningTargets(ctx, cfg, st, running, maxParallel, st.Iteration)
+		markQueuedTargets(st, running)
 		if rotated > 0 || started > 0 {
-			cfg.logf("[fuzzing] scheduler rotated %d driver(s), started %d driver(s); active=%d/%d\n", rotated, started, len(running), len(targets))
+			cfg.logf("[fuzzing] scheduler rotated %d version(s), started %d version(s); active=%d/%d\n", rotated, started, len(running), len(st.versionStates()))
 		}
 		if err := st.Save(statePath); err != nil {
 			cfg.logf("[fuzzing] multi state save failed: %v\n", err)
@@ -261,18 +286,20 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		selected := selectPlateauTarget(cycleData)
 		if selected == nil {
 			cfg.logf("[fuzzing] iteration %d: no plateau target selected\n", st.Iteration)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, "暂无平台期候选"), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, "暂无平台期候选"), 0)
 			continue
 		}
 
 		driverID := selected.state.DriverID
+		selectedKey := runtimeKey(selected.state)
 		target := targetByID[driverID]
 		st.CurrentDriverID = driverID
-		cfg.logf("[fuzzing] iteration %d: selected driver %d for LLM optimization\n", st.Iteration, driverID)
+		st.CurrentDriverSeq = selected.state.Seq
+		cfg.logf("[fuzzing] iteration %d: selected driver %d v%d for LLM optimization\n", st.Iteration, driverID, selected.state.Seq)
 
 		emitFlow(FuzzFlowPrechecking, "running", triggerSource, fmt.Sprintf("正在为 driver %d 创建临时优化目录并预检", driverID), driverID)
 		tmpDir, precheckCov, err := prepareLLMWorkDir(ctx, cfg, target, selected.state, st.Iteration)
@@ -283,11 +310,11 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			flow.LastResult = &FuzzFlowResult{Iteration: st.Iteration, DriverID: driverID, DriverSeq: selected.state.Seq, Trigger: triggerSource, StartedAt: cycleStarted, FinishedAt: finishedAt, PlateauReached: true, Error: err.Error()}
 			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: st.Iteration, DriverID: driverID, Seq: selected.state.Seq, Trigger: triggerSource, FuzzStatus: selected.status, Coverage: selected.coverage, Error: err.Error(), StartedAt: cycleStarted, FinishedAt: finishedAt})
 			emitFlow(FuzzFlowPrechecking, "failed", triggerSource, msg, driverID)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 预检失败", driverID)), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d 预检失败", driverID, selected.state.Seq)), 0)
 			continue
 		}
 		if len(precheckCov.Uncovered) > 0 {
@@ -320,11 +347,11 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			flow.LastResult = &FuzzFlowResult{Iteration: st.Iteration, DriverID: driverID, DriverSeq: selected.state.Seq, Trigger: triggerSource, StartedAt: cycleStarted, FinishedAt: finishedAt, PlateauReached: true, Error: analysisErr.Error()}
 			appendHistory(cfg.LogsDir, FuzzIteration{Iteration: st.Iteration, DriverID: driverID, Seq: selected.state.Seq, Trigger: triggerSource, FuzzStatus: selected.status, Coverage: selected.coverage, Analysis: AnalysisResponse{PlateauReached: true}, Error: analysisErr.Error(), StartedAt: cycleStarted, FinishedAt: finishedAt})
 			emitFlow(FuzzFlowAnalyzing, "failed", triggerSource, analysisErr.Error(), driverID)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 分析失败", driverID)), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d 分析失败", driverID, selected.state.Seq)), 0)
 			continue
 		}
 
@@ -356,65 +383,53 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			flow.LastResult.Error = validationErr.Error()
 			appendHistory(cfg.LogsDir, history)
 			emitFlow(FuzzFlowValidating, "failed", triggerSource, validationErr.Error(), driverID)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d proof seed 复核失败，未创建新快照", driverID)), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d proof seed 复核失败，未创建新快照", driverID, selected.state.Seq)), 0)
 			continue
 		}
 		if !response.NeedsUpdate {
 			appendHistory(cfg.LogsDir, history)
 			emitFlow(FuzzFlowApplying, "idle", triggerSource, fmt.Sprintf("driver %d 本轮无需修改", driverID), driverID)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 本轮无需修改", driverID)), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d 本轮无需修改", driverID, selected.state.Seq)), 0)
 			continue
 		}
 
 		emitFlow(FuzzFlowPromoting, "running", triggerSource, fmt.Sprintf("driver %d 验证通过，正在转正为新快照", driverID), driverID)
-		if err := promoteTargetSnapshot(cfg, st, target, running[driverID], tmpDir); err != nil {
+		newState, err := promoteTargetSnapshot(cfg, st, target, selected.state, tmpDir)
+		if err != nil {
 			history.Error = err.Error()
 			flow.LastResult.Error = err.Error()
 			appendHistory(cfg.LogsDir, history)
 			emitFlow(FuzzFlowPromoting, "failed", triggerSource, err.Error(), driverID)
-			if err := settleRunningSet(0); err != nil {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
 				return err
 			}
 			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 转正失败，旧版本继续运行", driverID)), 0)
+			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d 转正失败，旧版本继续运行", driverID, selected.state.Seq)), 0)
 			continue
 		}
 		history.Regenerated = true
 		flow.LastResult.Regenerated = true
 		appendHistory(cfg.LogsDir, history)
-		delete(running, driverID)
+		selected.state.LastLLMIteration = st.Iteration
+		selected.state.CoverageHistory = nil
 		if err := st.Save(statePath); err != nil {
 			cfg.logf("[fuzzing] multi state save failed: %v\n", err)
 		}
 
-		emitFlow(FuzzFlowRestarting, "running", triggerSource, fmt.Sprintf("正在重启 driver %d 的 fuzz 进程", driverID), driverID)
-		rt, err := startRunningTarget(ctx, cfg, st.Targets[driverID])
-		if err != nil {
-			st.Targets[driverID].Status = "start_failed"
-			st.Targets[driverID].LastError = err.Error()
-			emitFlow(FuzzFlowRestarting, "failed", triggerSource, err.Error(), driverID)
-			if err := settleRunningSet(0); err != nil {
-				return err
-			}
-			flow.CycleStarted = nil
-			emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 重启失败", driverID)), 0)
-			continue
-		}
-		rt.startedIteration = st.Iteration
-		running[driverID] = rt
-		if err := settleRunningSet(driverID); err != nil {
+		emitFlow(FuzzFlowRestarting, "running", triggerSource, fmt.Sprintf("driver %d v%d 已创建，旧版本 v%d 继续参与调度", driverID, newState.Seq, selected.state.Seq), driverID)
+		if err := settleRunningSet(selectedKey); err != nil {
 			return err
 		}
 		flow.CycleStarted = nil
-		emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(targets), maxParallel, fmt.Sprintf("driver %d 已升级到 v%d", driverID, st.Targets[driverID].Seq)), 0)
+		emitFlow(FuzzFlowFuzzing, "idle", "", multiFuzzingIdleMessage(len(running), len(st.versionStates()), maxParallel, fmt.Sprintf("driver %d v%d 已进入调度，v%d 保留", driverID, newState.Seq, selected.state.Seq)), 0)
 	}
 }
 
@@ -449,7 +464,7 @@ func DiscoverFuzzTargets(driverDir string) ([]FuzzTarget, error) {
 func ensureInitialTargetSnapshots(ctx context.Context, cfg FuzzConfig, st *MultiFuzzState, targets []FuzzTarget) error {
 	for _, target := range targets {
 		targetState := st.Targets[target.DriverID]
-		if targetState != nil && targetSnapshotUsesRootDriver(targetState.CurrentSnapshot, target) {
+		if targetState != nil && targetState.CurrentSnapshot != "" && (targetStateUsesVersionSnapshot(cfg.LogsDir, targetState) || targetSnapshotUsesRootDriver(targetState.CurrentSnapshot, target)) {
 			if targetState.BinaryPath == "" {
 				targetState.BinaryPath = filepath.Join(targetState.CurrentSnapshot, "cov_driver")
 			}
@@ -468,11 +483,13 @@ func ensureInitialTargetSnapshots(ctx context.Context, cfg FuzzConfig, st *Multi
 			updateTargetStateFromSnapshot(targetState, target, targetState.CurrentSnapshot, seq)
 			targetState.Status = "ready"
 			targetState.LastError = ""
+			st.addVersion(targetState)
 			continue
 		}
 
 		if targetState != nil && targetState.CurrentSnapshot != "" {
 			cfg.logf("[fuzzing] driver %d ignores legacy evolved snapshot %s; rebuilding v1 from %s\n", target.DriverID, targetState.CurrentSnapshot, target.Source)
+			delete(st.Versions, targetVersionKey(targetState.DriverID, targetState.Seq))
 		}
 
 		snapDir := targetSnapshotDir(cfg.LogsDir, target.DriverID, 1)
@@ -505,6 +522,7 @@ func ensureInitialTargetSnapshots(ctx context.Context, cfg FuzzConfig, st *Multi
 		updateTargetStateFromSnapshot(targetState, target, snapDir, 1)
 		targetState.Status = "ready"
 		targetState.LastError = ""
+		st.addVersion(targetState)
 	}
 	if err := splitUnifiedCorpusOnce(cfg, targets, st); err != nil {
 		cfg.logf("[fuzzing] corpus split failed: %v\n", err)
@@ -609,6 +627,13 @@ func updateTargetStateFromSnapshot(targetState *TargetState, target FuzzTarget, 
 	}
 }
 
+func targetStateUsesVersionSnapshot(logsDir string, state *TargetState) bool {
+	if state == nil || state.DriverID <= 0 || state.Seq <= 0 || state.CurrentSnapshot == "" {
+		return false
+	}
+	return filepath.Clean(state.CurrentSnapshot) == filepath.Clean(targetSnapshotDir(logsDir, state.DriverID, state.Seq))
+}
+
 func targetSnapshotUsesRootDriver(snapDir string, target FuzzTarget) bool {
 	if snapDir == "" || target.Source == "" {
 		return false
@@ -643,6 +668,24 @@ func splitUnifiedCorpusOnce(cfg FuzzConfig, targets []FuzzTarget, st *MultiFuzzS
 			return os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
 		}
 		return err
+	}
+	if cfg.DriverLocalCorpus {
+		sort.Slice(targets, func(i, j int) bool { return targets[i].DriverID < targets[j].DriverID })
+		for _, target := range targets {
+			targetState := st.Targets[target.DriverID]
+			if targetState == nil || targetState.CorpusDir == "" {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				if err := copyFile(filepath.Join(sourceCorpus, entry.Name()), filepath.Join(targetState.CorpusDir, entry.Name())); err != nil {
+					return err
+				}
+			}
+		}
+		return os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].DriverID < targets[j].DriverID })
 	for _, entry := range entries {
@@ -722,24 +765,25 @@ func resolveMultiFuzzParallelism(cfg FuzzConfig, totalTargets int) int {
 	return limit
 }
 
-func fillRunningTargets(ctx context.Context, cfg FuzzConfig, st *MultiFuzzState, targets []FuzzTarget, running map[int]*runningTarget, maxParallel, iteration int) int {
-	if maxParallel <= 0 || len(running) >= maxParallel || len(targets) == 0 {
+func fillRunningTargets(ctx context.Context, cfg FuzzConfig, st *MultiFuzzState, running map[targetRuntimeKey]*runningTarget, maxParallel, iteration int) int {
+	states := st.versionStates()
+	if maxParallel <= 0 || len(running) >= maxParallel || len(states) == 0 {
 		return 0
 	}
 	started := 0
 	attempts := 0
-	for len(running) < maxParallel && attempts < len(targets) {
+	for len(running) < maxParallel && attempts < len(states) {
 		if err := ctx.Err(); err != nil {
 			return started
 		}
-		idx := st.NextTargetIndex % len(targets)
-		st.NextTargetIndex = (idx + 1) % len(targets)
+		idx := st.NextTargetIndex % len(states)
+		st.NextTargetIndex = (idx + 1) % len(states)
 		attempts++
-		target := targets[idx]
-		if _, ok := running[target.DriverID]; ok {
+		targetState := states[idx]
+		key := runtimeKey(targetState)
+		if _, ok := running[key]; ok {
 			continue
 		}
-		targetState := st.Targets[target.DriverID]
 		if targetState == nil || targetState.Status == "build_failed" || targetState.Status == "start_failed" {
 			continue
 		}
@@ -747,20 +791,20 @@ func fillRunningTargets(ctx context.Context, cfg FuzzConfig, st *MultiFuzzState,
 		if err != nil {
 			targetState.Status = "start_failed"
 			targetState.LastError = err.Error()
-			cfg.logf("[fuzzing] driver %d start failed: %v\n", target.DriverID, err)
+			cfg.logf("[fuzzing] driver %d v%d start failed: %v\n", targetState.DriverID, targetState.Seq, err)
 			continue
 		}
 		rt.startedIteration = iteration
-		running[target.DriverID] = rt
+		running[key] = rt
 		started++
 	}
 	return started
 }
 
-func rotateExpiredTargets(cfg FuzzConfig, running map[int]*runningTarget, iteration, protectedDriverID int) int {
+func rotateExpiredTargets(cfg FuzzConfig, running map[targetRuntimeKey]*runningTarget, iteration int, protected targetRuntimeKey) int {
 	rotated := 0
-	for driverID, rt := range running {
-		if driverID == protectedDriverID {
+	for key, rt := range running {
+		if key == protected {
 			continue
 		}
 		if iteration-rt.startedIteration < defaultMultiFuzzWindowCycles {
@@ -768,20 +812,16 @@ func rotateExpiredTargets(cfg FuzzConfig, running map[int]*runningTarget, iterat
 		}
 		stopRunningTarget(rt)
 		rt.state.Status = "queued"
-		delete(running, driverID)
+		delete(running, key)
 		rotated++
-		cfg.logf("[fuzzing] driver %d yielded fuzz slot after %d cycle(s)\n", driverID, iteration-rt.startedIteration)
+		cfg.logf("[fuzzing] driver %d v%d yielded fuzz slot after %d cycle(s)\n", key.driverID, key.seq, iteration-rt.startedIteration)
 	}
 	return rotated
 }
 
-func markQueuedTargets(st *MultiFuzzState, targets []FuzzTarget, running map[int]*runningTarget) {
-	for _, target := range targets {
-		targetState := st.Targets[target.DriverID]
-		if targetState == nil {
-			continue
-		}
-		if _, ok := running[target.DriverID]; ok {
+func markQueuedTargets(st *MultiFuzzState, running map[targetRuntimeKey]*runningTarget) {
+	for _, targetState := range st.versionStates() {
+		if _, ok := running[runtimeKey(targetState)]; ok {
 			continue
 		}
 		switch targetState.Status {
@@ -799,22 +839,27 @@ func multiFuzzingIdleMessage(active, total, maxParallel int, suffix string) stri
 	return base + "，" + suffix
 }
 
-func collectMultiCycleData(cfg FuzzConfig, running map[int]*runningTarget, iteration int) []targetCycleData {
+func collectMultiCycleData(cfg FuzzConfig, running map[targetRuntimeKey]*runningTarget, iteration int) []targetCycleData {
 	var out []targetCycleData
-	ids := make([]int, 0, len(running))
-	for id := range running {
-		ids = append(ids, id)
+	keys := make([]targetRuntimeKey, 0, len(running))
+	for key := range running {
+		keys = append(keys, key)
 	}
-	sort.Ints(ids)
-	for _, id := range ids {
-		rt := running[id]
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].driverID != keys[j].driverID {
+			return keys[i].driverID < keys[j].driverID
+		}
+		return keys[i].seq < keys[j].seq
+	})
+	for _, key := range keys {
+		rt := running[key]
 		status := rt.tracker.Snapshot()
 		var cov CorpusCoverageStatus
 		if rt.monitor != nil {
 			if snapshot, err := rt.monitor.Snapshot(cfg.SourceDir, cfg.BuildDir, cfg.logf); err == nil {
 				cov = snapshot
 			} else {
-				cfg.logf("[fuzzing] driver %d coverage snapshot failed: %v\n", id, err)
+				cfg.logf("[fuzzing] driver %d v%d coverage snapshot failed: %v\n", key.driverID, key.seq, err)
 			}
 		}
 		cache := CoverageSnapshot{}
@@ -836,15 +881,20 @@ func collectMultiCycleData(cfg FuzzConfig, running map[int]*runningTarget, itera
 	return out
 }
 
-func collectMultiLiveData(running map[int]*runningTarget, iteration int) []targetCycleData {
+func collectMultiLiveData(running map[targetRuntimeKey]*runningTarget, iteration int) []targetCycleData {
 	var out []targetCycleData
-	ids := make([]int, 0, len(running))
-	for id := range running {
-		ids = append(ids, id)
+	keys := make([]targetRuntimeKey, 0, len(running))
+	for key := range running {
+		keys = append(keys, key)
 	}
-	sort.Ints(ids)
-	for _, id := range ids {
-		rt := running[id]
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].driverID != keys[j].driverID {
+			return keys[i].driverID < keys[j].driverID
+		}
+		return keys[i].seq < keys[j].seq
+	})
+	for _, key := range keys {
+		rt := running[key]
 		status := rt.tracker.Snapshot()
 		cache := CoverageSnapshot{}
 		if rt.monitor != nil {
@@ -914,14 +964,16 @@ func selectPlateauTarget(data []targetCycleData) *targetCycleData {
 			continue
 		}
 		if selected == nil || len(item.coverage.Uncovered) > len(selected.coverage.Uncovered) ||
-			(len(item.coverage.Uncovered) == len(selected.coverage.Uncovered) && item.state.DriverID < selected.state.DriverID) {
+			(len(item.coverage.Uncovered) == len(selected.coverage.Uncovered) &&
+				(item.state.DriverID < selected.state.DriverID ||
+					(item.state.DriverID == selected.state.DriverID && item.state.Seq > selected.state.Seq))) {
 			selected = item
 		}
 	}
 	return selected
 }
 
-func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, targets []FuzzTarget, maxParallel int, fuzzInterval time.Duration, nextAnalysisAt time.Time) MultiCoverageSnapshot {
+func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, maxParallel int, fuzzInterval time.Duration, nextAnalysisAt time.Time) MultiCoverageSnapshot {
 	snapshot := MultiCoverageSnapshot{
 		Timestamp:                time.Now(),
 		Mode:                     "multi",
@@ -930,6 +982,9 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, targ
 		RunningTargets:           []int{},
 		QueuedTargets:            []int{},
 		NextTargets:              []int{},
+		RunningVersions:          []TargetVersionRef{},
+		QueuedVersions:           []TargetVersionRef{},
+		NextVersions:             []TargetVersionRef{},
 		FuzzIntervalSeconds:      int64(fuzzInterval / time.Second),
 		AnalysisRemainingSeconds: remainingSeconds(nextAnalysisAt),
 		Targets:                  []TargetCoverageSnapshot{},
@@ -938,21 +993,24 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, targ
 		next := nextAnalysisAt
 		snapshot.NextAnalysisAt = &next
 	}
-	runningTargets, queuedTargets := schedulerTargetQueues(st, targets)
-	snapshot.RunningTargets = runningTargets
-	snapshot.QueuedTargets = queuedTargets
-	snapshot.ActiveTargets = len(runningTargets)
+	runningVersions, queuedVersions := schedulerVersionQueues(st)
+	snapshot.RunningVersions = runningVersions
+	snapshot.QueuedVersions = queuedVersions
+	snapshot.RunningTargets = versionDriverIDs(runningVersions)
+	snapshot.QueuedTargets = versionDriverIDs(queuedVersions)
+	snapshot.ActiveTargets = len(runningVersions)
 	if maxParallel > 0 {
 		nextLimit := maxParallel
-		if nextLimit > len(queuedTargets) {
-			nextLimit = len(queuedTargets)
+		if nextLimit > len(queuedVersions) {
+			nextLimit = len(queuedVersions)
 		}
-		snapshot.NextTargets = append(snapshot.NextTargets, queuedTargets[:nextLimit]...)
+		snapshot.NextVersions = append(snapshot.NextVersions, queuedVersions[:nextLimit]...)
+		snapshot.NextTargets = versionDriverIDs(snapshot.NextVersions)
 	}
 	var coverages []CoverageStatus
-	seen := map[int]bool{}
+	seen := map[targetRuntimeKey]bool{}
 	for _, item := range data {
-		seen[item.state.DriverID] = true
+		seen[runtimeKey(item.state)] = true
 		if item.cache.Available {
 			coverages = append(coverages, CloneCoverageStatus(item.cache.Coverage))
 			snapshot.Available = true
@@ -966,12 +1024,8 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, targ
 			Plateau:        item.plateau, FuzzStatus: item.status,
 		})
 	}
-	for _, target := range targets {
-		if seen[target.DriverID] {
-			continue
-		}
-		targetState := st.Targets[target.DriverID]
-		if targetState == nil {
+	for _, targetState := range st.versionStates() {
+		if seen[runtimeKey(targetState)] {
 			continue
 		}
 		summary := CoverageSummary{}
@@ -991,7 +1045,12 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, targ
 			Plateau:        targetReachedPlateau(targetState.CoverageHistory),
 		})
 	}
-	sort.Slice(snapshot.Targets, func(i, j int) bool { return snapshot.Targets[i].DriverID < snapshot.Targets[j].DriverID })
+	sort.Slice(snapshot.Targets, func(i, j int) bool {
+		if snapshot.Targets[i].DriverID != snapshot.Targets[j].DriverID {
+			return snapshot.Targets[i].DriverID < snapshot.Targets[j].DriverID
+		}
+		return snapshot.Targets[i].Seq < snapshot.Targets[j].Seq
+	})
 	snapshot.Coverage = unionCoverageStatuses(coverages)
 	return snapshot
 }
@@ -1007,38 +1066,41 @@ func remainingSeconds(deadline time.Time) int64 {
 	return int64((remaining + time.Second - 1) / time.Second)
 }
 
-func schedulerTargetQueues(st *MultiFuzzState, targets []FuzzTarget) ([]int, []int) {
-	if len(targets) == 0 {
+func schedulerVersionQueues(st *MultiFuzzState) ([]TargetVersionRef, []TargetVersionRef) {
+	states := st.versionStates()
+	if len(states) == 0 {
 		return nil, nil
 	}
-	var running []int
-	for _, target := range targets {
-		targetState := st.Targets[target.DriverID]
-		if targetState != nil && targetState.Status == "running" {
-			running = append(running, target.DriverID)
+	var running []TargetVersionRef
+	for _, targetState := range states {
+		if targetState.Status == "running" {
+			running = append(running, TargetVersionRef{DriverID: targetState.DriverID, Seq: targetState.Seq})
 		}
 	}
-	sort.Ints(running)
 
-	var queued []int
-	start := st.NextTargetIndex % len(targets)
+	var queued []TargetVersionRef
+	start := st.NextTargetIndex % len(states)
 	if start < 0 {
 		start = 0
 	}
-	for offset := 0; offset < len(targets); offset++ {
-		target := targets[(start+offset)%len(targets)]
-		targetState := st.Targets[target.DriverID]
-		if targetState == nil {
-			continue
-		}
+	for offset := 0; offset < len(states); offset++ {
+		targetState := states[(start+offset)%len(states)]
 		switch targetState.Status {
 		case "build_failed", "start_failed", "running":
 			continue
 		default:
-			queued = append(queued, target.DriverID)
+			queued = append(queued, TargetVersionRef{DriverID: targetState.DriverID, Seq: targetState.Seq})
 		}
 	}
 	return running, queued
+}
+
+func versionDriverIDs(versions []TargetVersionRef) []int {
+	ids := make([]int, 0, len(versions))
+	for _, version := range versions {
+		ids = append(ids, version.DriverID)
+	}
+	return ids
 }
 
 func unionCoverageStatuses(statuses []CoverageStatus) CoverageStatus {
@@ -1327,32 +1389,35 @@ func branchMatches(uncovered UncoveredBranch, branch TargetBranch) bool {
 	return branch.Column <= 0 || uncovered.Location[1] == branch.Column
 }
 
-func promoteTargetSnapshot(cfg FuzzConfig, st *MultiFuzzState, target FuzzTarget, current *runningTarget, tmpDir string) error {
-	targetState := st.Targets[target.DriverID]
-	if targetState == nil {
-		return fmt.Errorf("driver %d state not found", target.DriverID)
+func promoteTargetSnapshot(cfg FuzzConfig, st *MultiFuzzState, target FuzzTarget, sourceState *TargetState, tmpDir string) (*TargetState, error) {
+	if sourceState == nil {
+		return nil, fmt.Errorf("driver %d source state not found", target.DriverID)
 	}
-	oldCorpus := targetState.CorpusDir
-	nextSeq := targetState.Seq + 1
+	latest := st.Targets[target.DriverID]
+	nextSeq := sourceState.Seq + 1
+	if latest != nil && latest.Seq >= nextSeq {
+		nextSeq = latest.Seq + 1
+	}
 	finalDir := targetSnapshotDir(cfg.LogsDir, target.DriverID, nextSeq)
 	if _, err := os.Stat(finalDir); err == nil {
-		return fmt.Errorf("target snapshot already exists: %s", finalDir)
+		return nil, fmt.Errorf("target snapshot already exists: %s", finalDir)
 	}
-	if err := copyDirFiles(oldCorpus, filepath.Join(tmpDir, "corpus"), false); err != nil {
-		return err
+	if err := copyDirFiles(sourceState.CorpusDir, filepath.Join(tmpDir, "corpus"), false); err != nil {
+		return nil, err
 	}
 	if err := rewriteSnapshotPaths(tmpDir, tmpDir, finalDir); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
-		return err
+		return nil, err
 	}
-	stopRunningTarget(current)
-	updateTargetStateFromSnapshot(targetState, target, finalDir, nextSeq)
-	targetState.Status = "ready"
-	targetState.LastLLMIteration = st.Iteration
-	targetState.LastError = ""
-	return nil
+	newState := &TargetState{DriverID: target.DriverID, Seq: nextSeq}
+	updateTargetStateFromSnapshot(newState, target, finalDir, nextSeq)
+	newState.Status = "queued"
+	newState.LastLLMIteration = st.Iteration
+	newState.LastError = ""
+	st.addVersion(newState)
+	return newState, nil
 }
 
 func copySnapshotForLLM(src, dst string) error {

@@ -19,6 +19,9 @@ import (
 )
 
 func (a *Agent) runRemaining(ctx context.Context) error {
+	if a.Options.TaskKind == "crash_fix_child" {
+		return a.runCrashFixChild(ctx)
+	}
 	if !a.State.Stage.AtLeast(state.StageBuilt) || !validBuildArtifacts(a.State) {
 		a.stageStarted(state.StageBuilt, "Codex 正在自主分析并构建目标库")
 		started := time.Now()
@@ -154,6 +157,297 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 	return nil
 }
 
+func (a *Agent) runCrashFixChild(ctx context.Context) error {
+	if !a.State.Stage.AtLeast(state.StageBuilt) || !validBuildArtifacts(a.State) {
+		a.stageStarted(state.StageBuilt, "Codex 正在修复 crash 并编译目标库")
+		started := time.Now()
+		logDir := filepath.Join(a.LogsDir, "crash-fix-build-agent")
+		result, err := a.buildAgent().Build(ctx, buildagent.Request{
+			SourceDir: a.State.SourceDir, TargetDir: a.TargetDir,
+			Jobs: a.Options.Jobs, LogDir: logDir,
+			CrashFixContext: a.Options.Origin.Context,
+		})
+		attempt := state.BuildAttempt{Name: "codex-crash-fix-build", Builder: "codex", StartedAt: started, FinishedAt: time.Now(), Success: err == nil, LogDir: logDir}
+		if err != nil {
+			attempt.Error = err.Error()
+			a.State.BuildAttempts = append(a.State.BuildAttempts, attempt)
+			return a.block(state.StageBuilt, err)
+		}
+		a.State.BuildAttempts = append(a.State.BuildAttempts, attempt)
+		reportPath := filepath.Join(a.TargetDir, "build-report.json")
+		if err := buildagent.SaveReport(reportPath, result.Report); err != nil {
+			return a.fail(state.StageBuilt, err)
+		}
+		a.State.BuildReportPath = reportPath
+		a.State.BuildMethod = "codex-crash-fix"
+		a.State.BuildSystem = result.Report.BuildSystem
+		a.State.Language = result.Report.Language
+		a.State.BuildDir = result.BuildDir
+		a.State.InstallDir = result.InstallDir
+		a.State.CompileCommandsPath = result.CompileCommands
+		a.State.StaticLibraries = result.StaticLibraries
+		a.State.Stage = state.StageBuilt
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StageBuilt, "修复版库已编译完成")
+	}
+	if a.Options.StopAfter == state.StageBuilt {
+		return nil
+	}
+	if !a.State.Stage.AtLeast(state.StageGenerated) || len(findDrivers(a.State.OutputPath)) == 0 {
+		a.stageStarted(state.StageGenerated, "正在复用父 task 子 driver 并链接修复版库")
+		if err := a.prepareCrashFixChildDriver(ctx); err != nil {
+			return a.fail(state.StageGenerated, err)
+		}
+		a.State.GenerationTask = "crash_fix_child"
+		a.State.GeneratedDrivers = findDrivers(a.State.OutputPath)
+		if len(a.State.GeneratedDrivers) == 0 {
+			return a.fail(state.StageGenerated, fmt.Errorf("crash fix child task produced no fuzz driver"))
+		}
+		a.State.Stage = state.StageGenerated
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StageGenerated, fmt.Sprintf("已生成修复版子 driver，共 %d 个", len(a.State.GeneratedDrivers)))
+	}
+	if a.Options.StopAfter == state.StageGenerated {
+		return nil
+	}
+	if !a.State.Stage.AtLeast(state.StageFuzzing) {
+		a.stageStarted(state.StageFuzzing, "正在执行修复版子 task fuzz 测试与覆盖分析")
+		if err := a.runFuzzing(ctx); err != nil {
+			return a.fail(state.StageFuzzing, err)
+		}
+		a.State.Stage = state.StageFuzzing
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StageFuzzing, "修复版子 task fuzz 测试完成")
+	}
+	return nil
+}
+
+func (a *Agent) prepareCrashFixChildDriver(ctx context.Context) error {
+	origin := a.Options.Origin
+	if origin.DriverID <= 0 {
+		return fmt.Errorf("origin driver id is required")
+	}
+	if origin.SnapshotDir == "" {
+		return fmt.Errorf("origin snapshot dir is required")
+	}
+	if len(a.State.StaticLibraries) == 0 {
+		return fmt.Errorf("crash fix child task has no rebuilt static libraries")
+	}
+	outputPath := filepath.Join(a.TargetDir, "crash-fix-output")
+	driverDir := filepath.Join(outputPath, "fuzz_driver")
+	if err := os.MkdirAll(driverDir, 0o755); err != nil {
+		return err
+	}
+	originSource, err := findOriginDriverSource(filepath.Join(origin.SnapshotDir, "driver"), origin.DriverID)
+	if err != nil {
+		return err
+	}
+	targetSource := filepath.Join(driverDir, filepath.Base(originSource))
+	if err := copyFileContents(originSource, targetSource); err != nil {
+		return err
+	}
+	scriptData, err := os.ReadFile(filepath.Join(origin.SnapshotDir, "build_cov_driver.sh"))
+	if err != nil {
+		return err
+	}
+	script := string(scriptData)
+	script = replacePathSpellings(script, origin.SourceDir, a.State.SourceDir)
+	script = replacePathSpellings(script, origin.BuildDir, a.State.BuildDir)
+	script = replacePathSpellings(script, origin.InstallDir, a.State.InstallDir)
+	script = replacePathSpellings(script, originSource, targetSource)
+	script = replacePathSpellings(script, filepath.Join(origin.SnapshotDir, "cov_driver"), filepath.Join(driverDir, fmt.Sprintf("cov_fuzz_driver_%d", origin.DriverID)))
+	script = rewriteStaticLibraries(script, origin.StaticLibraries, a.State.StaticLibraries)
+	buildScript := filepath.Join(driverDir, fmt.Sprintf("build_fuzz_driver_%d.sh", origin.DriverID))
+	if err := os.WriteFile(buildScript, []byte(script), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(driverDir, "build_cov_synthesized_driver.sh"), []byte(script), 0o755); err != nil {
+		return err
+	}
+	if err := copyCrashFixCorpus(origin.SnapshotDir, driverDir, origin.Crashes); err != nil {
+		return err
+	}
+	a.State.OutputPath = outputPath
+	binaryPath := filepath.Join(driverDir, fmt.Sprintf("cov_fuzz_driver_%d", origin.DriverID))
+	return a.validateCrashFixChildDriver(ctx, driverDir, buildScript, binaryPath, origin.Crashes)
+}
+
+func findOriginDriverSource(driverSourceDir string, driverID int) (string, error) {
+	for _, ext := range []string{".c", ".cc", ".cpp", ".cxx"} {
+		path := filepath.Join(driverSourceDir, fmt.Sprintf("fuzz_driver_%d%s", driverID, ext))
+		if fileExists(path) {
+			return path, nil
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(driverSourceDir, "fuzz_driver_*"))
+	sort.Strings(matches)
+	for _, path := range matches {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("origin driver source not found in %s", driverSourceDir)
+}
+
+func replacePathSpellings(content, oldPath, newPath string) string {
+	if strings.TrimSpace(oldPath) == "" || strings.TrimSpace(newPath) == "" || oldPath == newPath {
+		return content
+	}
+	for _, old := range []string{oldPath, shellQuote(oldPath), doubleQuote(oldPath)} {
+		for _, replacement := range []string{newPath, shellQuote(newPath), doubleQuote(newPath)} {
+			if strings.HasPrefix(old, "'") && !strings.HasPrefix(replacement, "'") {
+				continue
+			}
+			if strings.HasPrefix(old, "\"") && !strings.HasPrefix(replacement, "\"") {
+				continue
+			}
+			if !strings.HasPrefix(old, "'") && !strings.HasPrefix(old, "\"") && (strings.HasPrefix(replacement, "'") || strings.HasPrefix(replacement, "\"")) {
+				continue
+			}
+			content = strings.ReplaceAll(content, old, replacement)
+		}
+	}
+	return content
+}
+
+func rewriteStaticLibraries(content string, oldLibraries, newLibraries []string) string {
+	if len(newLibraries) == 0 {
+		return content
+	}
+	if len(oldLibraries) == 0 {
+		return content
+	}
+	for _, oldLibrary := range oldLibraries {
+		replacement := newLibraries[0]
+		for _, candidate := range newLibraries {
+			if filepath.Base(candidate) == filepath.Base(oldLibrary) {
+				replacement = candidate
+				break
+			}
+		}
+		content = replacePathSpellings(content, oldLibrary, replacement)
+	}
+	return content
+}
+
+func copyCrashFixCorpus(originSnapshotDir, driverDir string, crashes []string) error {
+	corpusDir := filepath.Join(driverDir, "corpus")
+	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
+		return err
+	}
+	if entries, err := os.ReadDir(filepath.Join(originSnapshotDir, "corpus")); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			_ = copyFileContents(filepath.Join(originSnapshotDir, "corpus", entry.Name()), filepath.Join(corpusDir, entry.Name()))
+		}
+	}
+	for _, crash := range crashes {
+		name := filepath.Base(crash)
+		if name == "." || name == string(filepath.Separator) || strings.TrimSpace(name) == "" {
+			continue
+		}
+		copied := false
+		for _, dir := range []string{"unique_crashes", "crashes"} {
+			src := filepath.Join(originSnapshotDir, dir, name)
+			if pathExists(src) {
+				if err := copyFileContents(src, filepath.Join(corpusDir, "regression-"+name)); err != nil {
+					return err
+				}
+				copied = true
+				break
+			}
+		}
+		if !copied {
+			return fmt.Errorf("selected crash artifact not found: %s", name)
+		}
+	}
+	return nil
+}
+
+func (a *Agent) validateCrashFixChildDriver(ctx context.Context, driverDir, buildScript, binaryPath string, crashes []string) error {
+	logDir := filepath.Join(a.LogsDir, "crash-fix-driver-validation")
+	buildCtx, cancelBuild := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancelBuild()
+	if _, err := a.Runner.Run(buildCtx, logDir, "build-driver", driverDir, nil, buildScript); err != nil {
+		return fmt.Errorf("build crash-fix fuzz driver: %w", err)
+	}
+	if !fileExists(binaryPath) {
+		return fmt.Errorf("build script did not produce %s", binaryPath)
+	}
+	for _, crash := range crashes {
+		name := filepath.Base(crash)
+		if name == "." || name == string(filepath.Separator) || strings.TrimSpace(name) == "" {
+			continue
+		}
+		crashPath := filepath.Join(driverDir, "corpus", "regression-"+name)
+		if !pathExists(crashPath) {
+			return fmt.Errorf("selected crash artifact not prepared: %s", name)
+		}
+		replayCtx, cancelReplay := context.WithTimeout(ctx, 30*time.Second)
+		_, err := a.Runner.Run(replayCtx, logDir, "replay-"+safeLogName(name), driverDir, nil, binaryPath, "-runs=1", crashPath)
+		cancelReplay()
+		if err != nil {
+			return fmt.Errorf("selected crash still reproduces after fix (%s): %w", name, err)
+		}
+	}
+	return nil
+}
+
+func copyFileContents(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, info.Mode().Perm())
+}
+
+func shellQuote(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+}
+
+func doubleQuote(path string) string {
+	return `"` + strings.ReplaceAll(path, `"`, `\"`) + `"`
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func safeLogName(name string) string {
+	var b strings.Builder
+	for _, ch := range name {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' {
+			b.WriteRune(ch)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if out == "" {
+		return "crash"
+	}
+	if len(out) > 80 {
+		out = out[:80]
+	}
+	return out
+}
+
 func (a *Agent) buildAgent() buildagent.Client {
 	return buildagent.Client{
 		Command: a.Options.CodexCommand, Model: a.Options.CodexModel,
@@ -286,6 +580,7 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 		Runner:             a.Runner,
 		LogsDir:            fuzzLogsDir,
 		MaxParallelDrivers: a.Options.MaxFuzzDrivers,
+		DriverLocalCorpus:  a.Options.TaskKind == "crash_fix_child",
 		EventSink:          a.codexEventSinkFuzzing(),
 		FlowSink: func(snapshot fuzzing.FuzzFlowSnapshot) {
 			data, err := json.Marshal(snapshot)

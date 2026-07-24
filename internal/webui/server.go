@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,7 +19,7 @@ import (
 	"autofuzz/internal/runevent"
 )
 
-//go:embed static/*
+//go:embed static
 var staticFiles embed.FS
 
 type Server struct {
@@ -48,9 +50,10 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-analysis-queue", server.removeCrashAnalysisQueueItem)
 	server.mux.HandleFunc("GET /api/runs/{id}/crash-reports", server.crashReports)
 	server.mux.HandleFunc("POST /api/runs/{id}/crash-reports/analyze", server.analyzeCrashReport)
+	server.mux.HandleFunc("POST /api/runs/{id}/crash-fix-tasks", server.createCrashFixTask)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots/{seq}/diff", server.snapshotDiff)
 	server.mux.HandleFunc("DELETE /api/runs/{id}", server.deleteRun)
-	server.mux.HandleFunc("GET /static/vendor/", server.serveVendor)
+	server.mux.HandleFunc("GET /static/", server.serveStatic)
 	return server
 }
 
@@ -75,21 +78,24 @@ func (s *Server) index(response http.ResponseWriter, request *http.Request) {
 	_, _ = response.Write(data)
 }
 
-func (s *Server) serveVendor(response http.ResponseWriter, request *http.Request) {
-	path := "static/" + strings.TrimPrefix(request.URL.Path, "/static/")
-	data, err := staticFiles.ReadFile(path)
+func (s *Server) serveStatic(response http.ResponseWriter, request *http.Request) {
+	rel := strings.TrimPrefix(request.URL.Path, "/static/")
+	rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+	if rel == "" || rel == "." {
+		http.NotFound(response, request)
+		return
+	}
+	filePath := "static/" + rel
+	data, err := staticFiles.ReadFile(filePath)
 	if err != nil {
 		http.NotFound(response, request)
 		return
 	}
-	switch filepath.Ext(path) {
-	case ".js":
-		response.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	case ".css":
-		response.Header().Set("Content-Type", "text/css; charset=utf-8")
-	default:
-		response.Header().Set("Content-Type", "application/octet-stream")
+	contentType := mime.TypeByExtension(filepath.Ext(filePath))
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
 	}
+	response.Header().Set("Content-Type", contentType)
 	_, _ = response.Write(data)
 }
 
@@ -264,7 +270,8 @@ func (s *Server) coverage(response http.ResponseWriter, request *http.Request) {
 	if driverID == 0 {
 		driverID, _ = strconv.Atoi(request.URL.Query().Get("driver_id"))
 	}
-	data := s.manager.CoverageData(request.PathValue("id"), driverID)
+	seq, _ := strconv.Atoi(request.URL.Query().Get("seq"))
+	data := s.manager.CoverageData(request.PathValue("id"), driverID, seq)
 	if data == nil {
 		writeJSON(response, http.StatusOK, map[string]any{"available": false})
 		return
@@ -277,7 +284,8 @@ func (s *Server) coverageFunctionSources(response http.ResponseWriter, request *
 	if driverID == 0 {
 		driverID, _ = strconv.Atoi(request.URL.Query().Get("driver_id"))
 	}
-	data, err := s.manager.CoverageFunctionSources(request.PathValue("id"), driverID)
+	seq, _ := strconv.Atoi(request.URL.Query().Get("seq"))
+	data, err := s.manager.CoverageFunctionSources(request.PathValue("id"), driverID, seq)
 	if err != nil {
 		writeError(response, http.StatusNotFound, err.Error())
 		return
@@ -357,6 +365,23 @@ func (s *Server) analyzeCrashReport(response http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{"status": "started"})
+}
+
+func (s *Server) createCrashFixTask(response http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	var input CrashFixTaskRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	snapshot, err := s.manager.CreateCrashFixTask(request.PathValue("id"), input)
+	if err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusCreated, snapshot)
 }
 
 func (s *Server) snapshotDiff(response http.ResponseWriter, request *http.Request) {

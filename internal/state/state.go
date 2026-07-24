@@ -60,6 +60,15 @@ type RunState struct {
 	RepositoryURL       string         `json:"repository_url"`
 	SourceKind          string         `json:"source_kind,omitempty"`
 	Ref                 string         `json:"ref,omitempty"`
+	TaskKind            string         `json:"task_kind,omitempty"`
+	ParentTaskID        string         `json:"parent_task_id,omitempty"`
+	OriginDriverID      int            `json:"origin_driver_id,omitempty"`
+	OriginDriverSeq     int            `json:"origin_driver_seq,omitempty"`
+	OriginCrashes       []string       `json:"origin_crashes,omitempty"`
+	OriginSnapshotDir   string         `json:"origin_snapshot_dir,omitempty"`
+	OriginSourceDir     string         `json:"origin_source_dir,omitempty"`
+	OriginBuildDir      string         `json:"origin_build_dir,omitempty"`
+	OriginInstallDir    string         `json:"origin_install_dir,omitempty"`
 	Commit              string         `json:"commit,omitempty"`
 	ProjectName         string         `json:"project_name"`
 	SourceDir           string         `json:"source_dir"`

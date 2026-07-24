@@ -22,22 +22,34 @@ import (
 )
 
 type RunRequest struct {
-	RepositoryURL  string `json:"repository_url"`
-	Ref            string `json:"ref"`
-	Workspace      string `json:"workspace"`
-	PromeFuzzRoot  string `json:"promefuzz"`
-	ConfigPath     string `json:"promefuzz_config"`
-	PythonPath     string `json:"python"`
-	PoolSize       int    `json:"pool_size"`
-	Jobs           int    `json:"jobs"`
-	MaxFuzzDrivers int    `json:"max_fuzz_drivers"`
-	CodexCommand   string `json:"codex_command"`
-	CodexModel     string `json:"codex_model"`
-	CodexProfile   string `json:"codex_profile"`
-	Resume         bool   `json:"resume"`
-	Verbose        bool   `json:"verbose"`
-	StopAfter      string `json:"stop_after"`
-	FuzzInterval   string `json:"fuzz_interval"`
+	RepositoryURL         string   `json:"repository_url"`
+	Ref                   string   `json:"ref"`
+	Name                  string   `json:"name,omitempty"`
+	Workspace             string   `json:"workspace"`
+	PromeFuzzRoot         string   `json:"promefuzz"`
+	ConfigPath            string   `json:"promefuzz_config"`
+	PythonPath            string   `json:"python"`
+	PoolSize              int      `json:"pool_size"`
+	Jobs                  int      `json:"jobs"`
+	MaxFuzzDrivers        int      `json:"max_fuzz_drivers"`
+	CodexCommand          string   `json:"codex_command"`
+	CodexModel            string   `json:"codex_model"`
+	CodexProfile          string   `json:"codex_profile"`
+	Resume                bool     `json:"resume"`
+	Verbose               bool     `json:"verbose"`
+	StopAfter             string   `json:"stop_after"`
+	FuzzInterval          string   `json:"fuzz_interval"`
+	TaskKind              string   `json:"task_kind,omitempty"`
+	ParentTaskID          string   `json:"parent_task_id,omitempty"`
+	OriginDriverID        int      `json:"origin_driver_id,omitempty"`
+	OriginDriverSeq       int      `json:"origin_driver_seq,omitempty"`
+	OriginCrashes         []string `json:"origin_crashes,omitempty"`
+	OriginSnapshotDir     string   `json:"origin_snapshot_dir,omitempty"`
+	OriginSourceDir       string   `json:"origin_source_dir,omitempty"`
+	OriginBuildDir        string   `json:"origin_build_dir,omitempty"`
+	OriginInstallDir      string   `json:"origin_install_dir,omitempty"`
+	OriginStaticLibraries []string `json:"origin_static_libraries,omitempty"`
+	CrashFixContext       string   `json:"crash_fix_context,omitempty"`
 }
 
 func DefaultRunRequest() RunRequest {
@@ -54,11 +66,18 @@ func DefaultRunRequest() RunRequest {
 
 func (r RunRequest) options() agent.Options {
 	opts := agent.Options{
-		RepositoryURL: r.RepositoryURL, Ref: r.Ref, Workspace: r.Workspace,
+		RepositoryURL: r.RepositoryURL, Ref: r.Ref, ProjectName: r.Name, Workspace: r.Workspace,
 		PromeFuzzRoot: r.PromeFuzzRoot, ConfigPath: r.ConfigPath, PythonPath: r.PythonPath,
 		PoolSize: r.PoolSize, Jobs: r.Jobs, MaxFuzzDrivers: r.MaxFuzzDrivers,
 		CodexCommand: r.CodexCommand, CodexModel: r.CodexModel, CodexProfile: r.CodexProfile,
 		Resume: r.Resume, Verbose: r.Verbose, StopAfter: state.Stage(r.StopAfter),
+		TaskKind: r.TaskKind, ParentTaskID: r.ParentTaskID,
+		Origin: agent.CrashFixOrigin{
+			DriverID: r.OriginDriverID, DriverSeq: r.OriginDriverSeq,
+			Crashes: append([]string(nil), r.OriginCrashes...), SnapshotDir: r.OriginSnapshotDir,
+			SourceDir: r.OriginSourceDir, BuildDir: r.OriginBuildDir, InstallDir: r.OriginInstallDir,
+			StaticLibraries: append([]string(nil), r.OriginStaticLibraries...), Context: r.CrashFixContext,
+		},
 	}
 	if r.FuzzInterval != "" {
 		if d, err := time.ParseDuration(r.FuzzInterval); err == nil {
@@ -71,6 +90,7 @@ func (r RunRequest) options() agent.Options {
 func normalizedRunRequest(original RunRequest, options agent.Options) RunRequest {
 	original.RepositoryURL = options.RepositoryURL
 	original.Ref = options.Ref
+	original.Name = options.ProjectName
 	original.Workspace = options.Workspace
 	original.PromeFuzzRoot = options.PromeFuzzRoot
 	original.ConfigPath = options.ConfigPath
@@ -85,6 +105,17 @@ func normalizedRunRequest(original RunRequest, options agent.Options) RunRequest
 	original.Verbose = options.Verbose
 	original.StopAfter = string(options.StopAfter)
 	original.FuzzInterval = options.FuzzInterval.String()
+	original.TaskKind = options.TaskKind
+	original.ParentTaskID = options.ParentTaskID
+	original.OriginDriverID = options.Origin.DriverID
+	original.OriginDriverSeq = options.Origin.DriverSeq
+	original.OriginCrashes = append([]string(nil), options.Origin.Crashes...)
+	original.OriginSnapshotDir = options.Origin.SnapshotDir
+	original.OriginSourceDir = options.Origin.SourceDir
+	original.OriginBuildDir = options.Origin.BuildDir
+	original.OriginInstallDir = options.Origin.InstallDir
+	original.OriginStaticLibraries = append([]string(nil), options.Origin.StaticLibraries...)
+	original.CrashFixContext = options.Origin.Context
 	return original
 }
 
@@ -96,15 +127,21 @@ type StageSnapshot struct {
 }
 
 type TaskSnapshot struct {
-	ID         string          `json:"id"`
-	Status     string          `json:"status"`
-	Error      string          `json:"error,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	FinishedAt *time.Time      `json:"finished_at,omitempty"`
-	TargetDir  string          `json:"target_dir"`
-	StatePath  string          `json:"state_path"`
-	Request    RunRequest      `json:"request"`
-	Stages     []StageSnapshot `json:"stages"`
+	ID              string          `json:"id"`
+	Status          string          `json:"status"`
+	Error           string          `json:"error,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	FinishedAt      *time.Time      `json:"finished_at,omitempty"`
+	TargetDir       string          `json:"target_dir"`
+	StatePath       string          `json:"state_path"`
+	TaskKind        string          `json:"task_kind,omitempty"`
+	ParentTaskID    string          `json:"parent_task_id,omitempty"`
+	OriginDriverID  int             `json:"origin_driver_id,omitempty"`
+	OriginDriverSeq int             `json:"origin_driver_seq,omitempty"`
+	OriginCrashes   []string        `json:"origin_crashes,omitempty"`
+	OriginSourceDir string          `json:"origin_source_dir,omitempty"`
+	Request         RunRequest      `json:"request"`
+	Stages          []StageSnapshot `json:"stages"`
 }
 
 type stageDefinition struct {
@@ -121,6 +158,17 @@ var stageDefinitions = []stageDefinition{
 	{string(state.StageComprehended), "API 理解", "PromeFuzz + Codex"},
 	{string(state.StageGenerated), "All-cover 全量生成", "PromeFuzz + Codex"},
 	{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
+}
+
+func stageDefinitionsFor(taskKind string) []stageDefinition {
+	if taskKind == "crash_fix_child" {
+		return []stageDefinition{
+			{string(state.StageBuilt), "修复并编译库", "Codex CLI"},
+			{string(state.StageGenerated), "编译 fuzz_driver", "Go"},
+			{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
+		}
+	}
+	return stageDefinitions
 }
 
 var stageRanks = map[string]int{
@@ -163,7 +211,7 @@ func newTask(id string, createdAt time.Time, request RunRequest, autoAgent *agen
 
 func (t *Task) resetStages(autoAgent *agent.Agent) {
 	completedRank := stageRanks[string(autoAgent.State.Stage)]
-	for _, definition := range stageDefinitions {
+	for _, definition := range stageDefinitionsFor(t.request.TaskKind) {
 		status := "pending"
 		if stageRanks[definition.id] <= completedRank {
 			status = "completed"
@@ -234,8 +282,9 @@ func (t *Task) finish(status, message string, err error) {
 func (t *Task) Snapshot() TaskSnapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	stages := make([]StageSnapshot, 0, len(stageDefinitions))
-	for _, definition := range stageDefinitions {
+	definitions := stageDefinitionsFor(t.request.TaskKind)
+	stages := make([]StageSnapshot, 0, len(definitions))
+	for _, definition := range definitions {
 		stages = append(stages, StageSnapshot{
 			ID: definition.id, Name: definition.name, Owner: definition.owner,
 			Status: t.stages[definition.id],
@@ -244,7 +293,11 @@ func (t *Task) Snapshot() TaskSnapshot {
 	return TaskSnapshot{
 		ID: t.id, Status: t.status, Error: t.err, CreatedAt: t.createdAt,
 		FinishedAt: t.finishedAt, TargetDir: t.targetDir, StatePath: t.statePath,
-		Request: t.request, Stages: stages,
+		TaskKind: t.request.TaskKind, ParentTaskID: t.request.ParentTaskID,
+		OriginDriverID: t.request.OriginDriverID, OriginDriverSeq: t.request.OriginDriverSeq,
+		OriginCrashes:   append([]string(nil), t.request.OriginCrashes...),
+		OriginSourceDir: t.request.OriginSourceDir,
+		Request:         t.request, Stages: stages,
 	}
 }
 
@@ -326,6 +379,8 @@ func (m *Manager) Create(request RunRequest) (*TaskSnapshot, error) {
 		Workspace:     request.Workspace,
 		Name:          autoAgent.State.ProjectName,
 		RepositoryURL: request.RepositoryURL,
+		TaskKind:      request.TaskKind,
+		ParentTaskID:  request.ParentTaskID,
 		CreatedAt:     createdAt.Format(time.RFC3339),
 		UpdatedAt:     createdAt.Format(time.RFC3339),
 		Status:        "pending",
@@ -393,6 +448,8 @@ func (m *Manager) StartTask(id string) (*Task, error) {
 	entry.Request = request
 	entry.Workspace = request.Workspace
 	entry.RepositoryURL = request.RepositoryURL
+	entry.TaskKind = request.TaskKind
+	entry.ParentTaskID = request.ParentTaskID
 	if err := upsertTaskRegistry(entry); err != nil {
 		cancel()
 		m.mu.Lock()
@@ -488,10 +545,10 @@ func (m *Manager) TriggerFuzzAnalysis(id string) error {
 
 // CoverageData returns the cached coverage snapshot from the task's corpus
 // monitor (in-memory), or reads from disk for historical tasks.
-func (m *Manager) CoverageData(id string, driverID int) any {
+func (m *Manager) CoverageData(id string, driverID, seq int) any {
 	task, exists := m.Get(id)
 	if !exists {
-		return historicalCoverageData(id, driverID)
+		return historicalCoverageData(id, driverID, seq)
 	}
 	task.mu.RLock()
 	agent := task.agent
@@ -501,12 +558,12 @@ func (m *Manager) CoverageData(id string, driverID int) any {
 	}
 	data := agent.CoverageData()
 	if driverID > 0 {
-		return filterCoverageDataByDriver(data, driverID)
+		return filterCoverageDataByDriver(data, driverID, seq)
 	}
 	return data
 }
 
-func filterCoverageDataByDriver(data any, driverID int) any {
+func filterCoverageDataByDriver(data any, driverID, seq int) any {
 	multi, ok := data.(fuzzing.MultiCoverageSnapshot)
 	if !ok {
 		if ptr, ok := data.(*fuzzing.MultiCoverageSnapshot); ok && ptr != nil {
@@ -515,14 +572,22 @@ func filterCoverageDataByDriver(data any, driverID int) any {
 			return data
 		}
 	}
-	for _, target := range multi.Targets {
-		if target.DriverID == driverID {
-			return fuzzing.CoverageSnapshot{
-				Timestamp: multi.Timestamp,
-				Available: target.Available,
-				SeedCount: target.SeedCount,
-				Coverage:  fuzzing.CloneCoverageStatus(target.Coverage),
-			}
+	var selected *fuzzing.TargetCoverageSnapshot
+	for index := range multi.Targets {
+		target := &multi.Targets[index]
+		if target.DriverID != driverID || (seq > 0 && target.Seq != seq) {
+			continue
+		}
+		if selected == nil || target.Seq > selected.Seq {
+			selected = target
+		}
+	}
+	if selected != nil {
+		return fuzzing.CoverageSnapshot{
+			Timestamp: multi.Timestamp,
+			Available: selected.Available,
+			SeedCount: selected.SeedCount,
+			Coverage:  fuzzing.CloneCoverageStatus(selected.Coverage),
 		}
 	}
 	return map[string]any{"available": false}
@@ -532,6 +597,7 @@ const maxFunctionGraphSourceLines = 80
 
 type FunctionSourceResponse struct {
 	DriverID  int                     `json:"driver_id,omitempty"`
+	Seq       int                     `json:"seq,omitempty"`
 	Available bool                    `json:"available"`
 	Functions []FunctionSourceSnippet `json:"functions"`
 }
@@ -554,18 +620,18 @@ type FunctionLineCoverage struct {
 	Status string `json:"status"`
 }
 
-func (m *Manager) CoverageFunctionSources(id string, driverID int) (FunctionSourceResponse, error) {
+func (m *Manager) CoverageFunctionSources(id string, driverID, seq int) (FunctionSourceResponse, error) {
 	targetDir := m.targetDirFor(id)
 	if targetDir == "" {
 		return FunctionSourceResponse{}, fmt.Errorf("task not found")
 	}
-	data := m.CoverageData(id, driverID)
+	data := m.CoverageData(id, driverID, seq)
 	status, available := coverageStatusFromData(data, driverID)
 	if !available {
-		return FunctionSourceResponse{DriverID: driverID, Available: false, Functions: []FunctionSourceSnippet{}}, nil
+		return FunctionSourceResponse{DriverID: driverID, Seq: seq, Available: false, Functions: []FunctionSourceSnippet{}}, nil
 	}
 	roots := coverageSourceRoots(targetDir, driverID)
-	out := FunctionSourceResponse{DriverID: driverID, Available: true, Functions: []FunctionSourceSnippet{}}
+	out := FunctionSourceResponse{DriverID: driverID, Seq: seq, Available: true, Functions: []FunctionSourceSnippet{}}
 	fileCache := map[string][]string{}
 	for _, fn := range status.Full {
 		snippet := FunctionSourceSnippet{
@@ -844,6 +910,12 @@ type CrashAnalysisQueueResponse struct {
 	Items []CrashAnalysisQueueView `json:"items"`
 }
 
+type CrashFixTaskRequest struct {
+	DriverID int      `json:"driver_id"`
+	Seq      int      `json:"seq"`
+	Crashes  []string `json:"crashes"`
+}
+
 type CrashAnalysisQueueView struct {
 	ID          string `json:"id"`
 	Status      string `json:"status"`
@@ -859,10 +931,12 @@ type CrashAnalysisQueueView struct {
 }
 
 type UniqueCrashView struct {
-	DriverID    int                        `json:"driver_id,omitempty"`
-	Seq         int                        `json:"seq"`
-	SnapshotDir string                     `json:"snapshot_dir"`
-	Entry       fuzzing.CrashAnalysisEntry `json:"entry"`
+	DriverID       int                        `json:"driver_id,omitempty"`
+	Seq            int                        `json:"seq"`
+	SnapshotDir    string                     `json:"snapshot_dir"`
+	CrashCreatedAt string                     `json:"crash_created_at,omitempty"`
+	LastAnalysisAt string                     `json:"last_analysis_at,omitempty"`
+	Entry          fuzzing.CrashAnalysisEntry `json:"entry"`
 }
 
 type CrashReportView struct {
@@ -954,10 +1028,12 @@ func (m *Manager) UniqueCrashes(id string) (UniqueCrashesResponse, error) {
 		for _, entry := range entries {
 			normalizeCrashReportEntryForDisplayInSnapshot(snap.dir, &entry)
 			result.Crashes = append(result.Crashes, UniqueCrashView{
-				DriverID:    snap.driverID,
-				Seq:         snap.seq,
-				SnapshotDir: snap.dir,
-				Entry:       entry,
+				DriverID:       snap.driverID,
+				Seq:            snap.seq,
+				SnapshotDir:    snap.dir,
+				CrashCreatedAt: crashArtifactTime(snap.dir, entry),
+				LastAnalysisAt: crashLastAnalysisTime(snap.dir, entry),
+				Entry:          entry,
 			})
 		}
 	}
@@ -1092,6 +1168,59 @@ func crashReportPathForEntry(snapDir string, entry fuzzing.CrashAnalysisEntry) s
 		return ""
 	}
 	return reportPath
+}
+
+func crashArtifactTime(snapDir string, entry fuzzing.CrashAnalysisEntry) string {
+	for _, path := range crashArtifactCandidates(snapDir, entry) {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return info.ModTime().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+func crashArtifactCandidates(snapDir string, entry fuzzing.CrashAnalysisEntry) []string {
+	var candidates []string
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(snapDir, filepath.FromSlash(path))
+		}
+		if !isPathUnderRoot(path, snapDir) {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == path {
+				return
+			}
+		}
+		candidates = append(candidates, path)
+	}
+	file := filepath.Base(strings.TrimSpace(entry.File))
+	if file != "" && file != "." && file != string(filepath.Separator) {
+		add(filepath.Join("crashes", file))
+		add(filepath.Join("unique_crashes", file))
+	}
+	add(entry.UniquePath)
+	return candidates
+}
+
+func crashLastAnalysisTime(snapDir string, entry fuzzing.CrashAnalysisEntry) string {
+	switch entry.ReportStatus {
+	case "completed":
+		if reportPath := crashReportPathForEntry(snapDir, entry); reportPath != "" {
+			if info, err := os.Stat(reportPath); err == nil && !info.IsDir() {
+				return info.ModTime().Format(time.RFC3339)
+			}
+		}
+		return entry.ReportUpdatedAt
+	case "queued", "running", "failed":
+		return entry.ReportUpdatedAt
+	default:
+		return ""
+	}
 }
 
 func fillCrashEntryFromReport(reportPath string, entry *fuzzing.CrashAnalysisEntry) {
@@ -1270,6 +1399,76 @@ func (m *Manager) TriggerCrashReportAnalysis(id string, driverID, seq int, crash
 	return nil
 }
 
+func (m *Manager) CreateCrashFixTask(id string, input CrashFixTaskRequest) (*TaskSnapshot, error) {
+	if input.DriverID <= 0 || input.Seq <= 0 {
+		return nil, fmt.Errorf("driver_id and seq are required")
+	}
+	if len(input.Crashes) == 0 {
+		return nil, fmt.Errorf("at least one crash file is required")
+	}
+	if len(input.Crashes) > 8 {
+		return nil, fmt.Errorf("at most 8 crashes can be fixed in one child task")
+	}
+	parentEntry, exists := registryEntryByID(id)
+	if !exists {
+		return nil, fmt.Errorf("parent task not found")
+	}
+	parentTargetDir := filepath.Join(parentEntry.Workspace, parentEntry.Name)
+	parentState, err := state.Load(filepath.Join(parentTargetDir, "agent-state.json"))
+	if err != nil {
+		return nil, fmt.Errorf("load parent task state: %w", err)
+	}
+	if strings.TrimSpace(parentState.SourceDir) == "" {
+		return nil, fmt.Errorf("parent task source directory is empty")
+	}
+	snapDir := crashReportSnapshotDir(parentTargetDir, input.DriverID, input.Seq)
+	logRoot := filepath.Join(parentTargetDir, "logs", "fuzzing")
+	if !isPathUnderRoot(snapDir, logRoot) {
+		return nil, fmt.Errorf("snapshot path escapes task logs")
+	}
+	if info, err := os.Stat(snapDir); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("snapshot not found")
+	}
+	crashes, contextText, err := crashFixContextForSelection(parentEntry, parentState, snapDir, input)
+	if err != nil {
+		return nil, err
+	}
+
+	childName := safeTaskName(fmt.Sprintf("%s-fix-d%d-v%d-%d", parentEntry.Name, input.DriverID, input.Seq, time.Now().UnixNano()))
+	request := parentEntry.Request
+	if request.Workspace == "" {
+		request.Workspace = parentEntry.Workspace
+	}
+	request.RepositoryURL = parentState.SourceDir
+	request.Ref = ""
+	request.Name = childName
+	request.Resume = false
+	request.StopAfter = string(state.StageFuzzing)
+	request.MaxFuzzDrivers = 1
+	request.TaskKind = "crash_fix_child"
+	request.ParentTaskID = id
+	request.OriginDriverID = input.DriverID
+	request.OriginDriverSeq = input.Seq
+	request.OriginCrashes = crashes
+	request.OriginSnapshotDir = snapDir
+	request.OriginSourceDir = parentState.SourceDir
+	request.OriginBuildDir = parentState.BuildDir
+	request.OriginInstallDir = parentState.InstallDir
+	request.OriginStaticLibraries = append([]string(nil), parentState.StaticLibraries...)
+	request.CrashFixContext = contextText
+
+	snapshot, err := m.Create(request)
+	if err != nil {
+		return nil, err
+	}
+	task, err := m.StartTask(snapshot.ID)
+	if err != nil {
+		return snapshot, err
+	}
+	out := task.Snapshot()
+	return &out, nil
+}
+
 func (m *Manager) requestFor(id string) RunRequest {
 	if task, exists := m.Get(id); exists {
 		task.mu.RLock()
@@ -1423,6 +1622,155 @@ func safeWebCrashReportName(name string) string {
 		return "crash"
 	}
 	return out
+}
+
+func safeTaskName(name string) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, ch := range name {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			b.WriteRune(ch)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if len(out) > 96 {
+		out = strings.Trim(out[:96], "-_")
+	}
+	if out == "" {
+		return fmt.Sprintf("crash-fix-%d", time.Now().Unix())
+	}
+	return out
+}
+
+func crashFixContextForSelection(parent registryEntry, runState *state.RunState, snapDir string, input CrashFixTaskRequest) ([]string, string, error) {
+	entries := readCrashAnalysisEntries(filepath.Join(snapDir, "crash-analysis.json"))
+	if len(entries) == 0 {
+		return nil, "", fmt.Errorf("snapshot has no unique crash analysis entries")
+	}
+	byFile := map[string]fuzzing.CrashAnalysisEntry{}
+	for _, entry := range entries {
+		normalizeCrashReportEntryForDisplayInSnapshot(snapDir, &entry)
+		if entry.File == "" {
+			continue
+		}
+		byFile[entry.File] = entry
+		byFile[filepath.Base(entry.File)] = entry
+	}
+
+	seen := map[string]bool{}
+	crashes := make([]string, 0, len(input.Crashes))
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "父 task ID: %s\n", parent.ID)
+	fmt.Fprintf(&builder, "父 task 名称: %s\n", parent.Name)
+	fmt.Fprintf(&builder, "父源码目录: %s\n", runState.SourceDir)
+	fmt.Fprintf(&builder, "发现 crash 的子 driver: d%d/v%d\n", input.DriverID, input.Seq)
+	fmt.Fprintf(&builder, "父 snapshot: %s\n\n", snapDir)
+
+	if driverSource, err := findSnapshotDriverSource(snapDir, input.DriverID); err == nil {
+		if data, readErr := os.ReadFile(driverSource); readErr == nil {
+			fmt.Fprintf(&builder, "## 发现该 crash 的 fuzz driver\n路径: %s\n\n```c\n%s\n```\n\n", driverSource, trimForPrompt(string(data), 12000))
+		}
+	}
+
+	for _, raw := range input.Crashes {
+		file := filepath.Base(strings.TrimSpace(raw))
+		if file == "" || file == "." || file == string(filepath.Separator) {
+			return nil, "", fmt.Errorf("invalid crash file")
+		}
+		if seen[file] {
+			continue
+		}
+		entry, exists := byFile[file]
+		if !exists {
+			return nil, "", fmt.Errorf("unique crash %s not found in selected snapshot", file)
+		}
+		if !isOOBCrashType(entry.Type) {
+			return nil, "", fmt.Errorf("unique crash %s is not an OOB crash: %s", file, entry.Type)
+		}
+		if entry.ReportStatus != "completed" {
+			return nil, "", fmt.Errorf("unique crash %s has not completed LLM analysis", file)
+		}
+		if entry.Classification != "library_bug" {
+			return nil, "", fmt.Errorf("unique crash %s is classified as %s, not library_bug", file, entry.Classification)
+		}
+		seen[file] = true
+		crashes = append(crashes, file)
+		entryJSON, _ := json.MarshalIndent(entry, "", "  ")
+		fmt.Fprintf(&builder, "## 选中的 unique crash: %s\n", file)
+		if len(entryJSON) > 0 {
+			fmt.Fprintf(&builder, "crash-analysis 条目:\n```json\n%s\n```\n", trimForPrompt(string(entryJSON), 8000))
+		}
+		if entry.ASanReport != "" {
+			fmt.Fprintf(&builder, "\nASan/UBSan 报告摘要:\n```text\n%s\n```\n", trimForPrompt(entry.ASanReport, 16000))
+		}
+		if reportPath := crashReportPathForEntry(snapDir, entry); reportPath != "" {
+			if reportData, err := os.ReadFile(reportPath); err == nil && len(reportData) > 0 {
+				fmt.Fprintf(&builder, "\nLLM crash 分析报告 (%s):\n```json\n%s\n```\n", reportPath, trimForPrompt(string(reportData), 20000))
+			}
+		}
+		builder.WriteString("\n")
+	}
+	if len(crashes) == 0 {
+		return nil, "", fmt.Errorf("no valid unique crash selected")
+	}
+	return crashes, builder.String(), nil
+}
+
+func findSnapshotDriverSource(snapDir string, driverID int) (string, error) {
+	if driverID <= 0 {
+		return "", fmt.Errorf("driver id is required")
+	}
+	for _, ext := range []string{".c", ".cc", ".cpp", ".cxx"} {
+		path := filepath.Join(snapDir, "driver", fmt.Sprintf("fuzz_driver_%d%s", driverID, ext))
+		if fileExists(path) {
+			return path, nil
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(snapDir, "driver", "fuzz_driver_*"))
+	sort.Strings(matches)
+	for _, path := range matches {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("driver source not found")
+}
+
+func isOOBCrashType(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"heap-buffer-overflow",
+		"stack-buffer-overflow",
+		"global-buffer-overflow",
+		"dynamic-stack-buffer-overflow",
+		"container-overflow",
+		"out-of-bounds",
+		"index-out-of-bounds",
+		"oob",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func trimForPrompt(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	suffix := "\n\n[truncated]\n"
+	keep := limit - len(suffix)
+	if keep < 0 {
+		keep = limit
+		suffix = ""
+	}
+	return value[:keep] + suffix
 }
 
 type crashAnalysisSnapshot struct {
@@ -1611,14 +1959,14 @@ func historicalEntry(id string) (workspace, name string) {
 
 // historicalCoverageData reads the latest snapshot's aggregate.profdata for a
 // historical task and exports it. Returns nil if data is unavailable.
-func historicalCoverageData(id string, driverID int) any {
+func historicalCoverageData(id string, driverID, seq int) any {
 	ws, name := historicalEntry(id)
 	if ws == "" {
 		return nil
 	}
 	targetDir := filepath.Join(ws, name)
 	if driverID > 0 {
-		return historicalTargetCoverageData(targetDir, driverID)
+		return historicalTargetCoverageData(targetDir, driverID, seq)
 	}
 	if multi := historicalMultiCoverageData(targetDir); multi != nil {
 		return multi
@@ -1662,14 +2010,22 @@ func historicalCoverageData(id string, driverID int) any {
 	}
 }
 
-func historicalTargetCoverageData(targetDir string, driverID int) any {
+func historicalTargetCoverageData(targetDir string, driverID, seq int) any {
 	targetRoot := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", fmt.Sprintf("driver-%04d", driverID))
-	latestDir := latestTargetSnapshotDir(targetRoot)
-	if latestDir == "" {
+	versionDir := ""
+	if seq > 0 {
+		versionDir = filepath.Join(targetRoot, fmt.Sprintf("v%03d", seq))
+		if info, err := os.Stat(versionDir); err != nil || !info.IsDir() {
+			versionDir = ""
+		}
+	} else {
+		versionDir = latestTargetSnapshotDir(targetRoot)
+	}
+	if versionDir == "" {
 		return map[string]any{"available": false}
 	}
-	profdata := filepath.Join(latestDir, "monitor", "aggregate.profdata")
-	binary := filepath.Join(latestDir, "cov_driver")
+	profdata := filepath.Join(versionDir, "monitor", "aggregate.profdata")
+	binary := filepath.Join(versionDir, "cov_driver")
 	if !fileExists(profdata) || !fileExists(binary) {
 		return map[string]any{"available": false}
 	}
@@ -1681,7 +2037,7 @@ func historicalTargetCoverageData(targetDir string, driverID int) any {
 	return fuzzing.CoverageSnapshot{
 		Timestamp: time.Now(),
 		Available: true,
-		SeedCount: countRegularFiles(filepath.Join(latestDir, "corpus")),
+		SeedCount: countRegularFiles(filepath.Join(versionDir, "corpus")),
 		Coverage:  cs,
 	}
 }
@@ -1704,31 +2060,33 @@ func historicalMultiCoverageData(targetDir string) any {
 		if err != nil || driverID <= 0 {
 			continue
 		}
-		latestDir := latestTargetSnapshotDir(filepath.Join(targetsRoot, entry.Name()))
-		if latestDir == "" {
+		versionDirs := targetSnapshotDirs(filepath.Join(targetsRoot, entry.Name()))
+		if len(versionDirs) == 0 {
 			continue
 		}
-		profdata := filepath.Join(latestDir, "monitor", "aggregate.profdata")
-		binary := filepath.Join(latestDir, "cov_driver")
-		seedCount := countRegularFiles(filepath.Join(latestDir, "corpus"))
-		totalSeeds += seedCount
-		target := fuzzing.TargetCoverageSnapshot{
-			DriverID:  driverID,
-			Seq:       parseTargetVersion(filepath.Base(latestDir)),
-			Status:    "historical",
-			SeedCount: seedCount,
-			CorpusDir: filepath.Join(latestDir, "corpus"),
-		}
-		if fileExists(profdata) && fileExists(binary) {
-			if cs, err := fuzzing.CollectCoverageStatus(profdata, binary, srcDir, buildDir); err == nil {
-				target.Available = true
-				target.Coverage = cs
-				target.Summary = cs.Summary
-				target.UncoveredCount = historicalUncoveredCount(cs)
-				coverages = append(coverages, cs)
+		for _, versionDir := range versionDirs {
+			profdata := filepath.Join(versionDir, "monitor", "aggregate.profdata")
+			binary := filepath.Join(versionDir, "cov_driver")
+			seedCount := countRegularFiles(filepath.Join(versionDir, "corpus"))
+			totalSeeds += seedCount
+			target := fuzzing.TargetCoverageSnapshot{
+				DriverID:  driverID,
+				Seq:       parseTargetVersion(filepath.Base(versionDir)),
+				Status:    "historical",
+				SeedCount: seedCount,
+				CorpusDir: filepath.Join(versionDir, "corpus"),
 			}
+			if fileExists(profdata) && fileExists(binary) {
+				if cs, err := fuzzing.CollectCoverageStatus(profdata, binary, srcDir, buildDir); err == nil {
+					target.Available = true
+					target.Coverage = cs
+					target.Summary = cs.Summary
+					target.UncoveredCount = historicalUncoveredCount(cs)
+					coverages = append(coverages, cs)
+				}
+			}
+			targets = append(targets, target)
 		}
-		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
 		return nil
@@ -1741,6 +2099,36 @@ func historicalMultiCoverageData(targetDir string) any {
 		Coverage:  historicalUnionCoverageStatuses(coverages),
 		Targets:   targets,
 	}
+}
+
+func targetSnapshotDirs(targetRoot string) []string {
+	entries, err := os.ReadDir(targetRoot)
+	if err != nil {
+		return nil
+	}
+	type versionDir struct {
+		seq  int
+		path string
+	}
+	var dirs []versionDir
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		seq := parseTargetVersion(entry.Name())
+		if seq <= 0 {
+			continue
+		}
+		dirs = append(dirs, versionDir{seq: seq, path: filepath.Join(targetRoot, entry.Name())})
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].seq < dirs[j].seq
+	})
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, dir.path)
+	}
+	return out
 }
 
 func latestTargetSnapshotDir(targetRoot string) string {
@@ -1862,7 +2250,7 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 	targetDir := filepath.Join(entry.Workspace, entry.Name)
 	statePath := filepath.Join(targetDir, "agent-state.json")
 	createdAt, _ := time.Parse(time.RFC3339, entry.CreatedAt)
-	stages := pendingStageSnapshots()
+	stages := pendingStageSnapshots(entry.Request.TaskKind)
 	data, err := os.ReadFile(statePath)
 	if err == nil {
 		var runState state.RunState
@@ -1875,19 +2263,30 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 		status = "missing"
 	}
 	return TaskSnapshot{
-		ID:        entry.ID,
-		Status:    status,
-		CreatedAt: createdAt,
-		TargetDir: targetDir,
-		StatePath: statePath,
-		Stages:    stages,
-		Request:   entry.Request,
+		ID:              entry.ID,
+		Status:          status,
+		CreatedAt:       createdAt,
+		TargetDir:       targetDir,
+		StatePath:       statePath,
+		TaskKind:        entry.Request.TaskKind,
+		ParentTaskID:    entry.Request.ParentTaskID,
+		OriginDriverID:  entry.Request.OriginDriverID,
+		OriginDriverSeq: entry.Request.OriginDriverSeq,
+		OriginCrashes:   append([]string(nil), entry.Request.OriginCrashes...),
+		OriginSourceDir: entry.Request.OriginSourceDir,
+		Stages:          stages,
+		Request:         entry.Request,
 	}
 }
 
-func pendingStageSnapshots() []StageSnapshot {
-	stages := make([]StageSnapshot, 0, len(stageDefinitions))
-	for _, definition := range stageDefinitions {
+func pendingStageSnapshots(taskKind ...string) []StageSnapshot {
+	kind := ""
+	if len(taskKind) > 0 {
+		kind = taskKind[0]
+	}
+	definitions := stageDefinitionsFor(kind)
+	stages := make([]StageSnapshot, 0, len(definitions))
+	for _, definition := range definitions {
 		stages = append(stages, StageSnapshot{ID: definition.id, Name: definition.name, Owner: definition.owner, Status: "pending"})
 	}
 	return stages
@@ -1900,7 +2299,7 @@ func stageSnapshotsFromState(runState *state.RunState) []StageSnapshot {
 		failedStage = string(runState.Errors[len(runState.Errors)-1].Stage)
 		completedRank = stageRanks[failedStage] - 1
 	}
-	stages := pendingStageSnapshots()
+	stages := pendingStageSnapshots(runState.TaskKind)
 	for index := range stages {
 		if stageRanks[stages[index].ID] <= completedRank {
 			stages[index].Status = "completed"
@@ -1933,13 +2332,17 @@ func countRegularFiles(dir string) int {
 
 // TaskSummary is the per-task metadata returned by GET /api/runs.
 type TaskSummary struct {
-	ID            string `json:"id"`
-	Status        string `json:"status"`
-	Workspace     string `json:"workspace"`
-	Name          string `json:"name"`
-	RepositoryURL string `json:"repository_url"`
-	CreatedAt     string `json:"created_at"`
-	CurrentStage  string `json:"current_stage,omitempty"`
+	ID              string `json:"id"`
+	Status          string `json:"status"`
+	Workspace       string `json:"workspace"`
+	Name            string `json:"name"`
+	RepositoryURL   string `json:"repository_url"`
+	TaskKind        string `json:"task_kind,omitempty"`
+	ParentTaskID    string `json:"parent_task_id,omitempty"`
+	OriginDriverID  int    `json:"origin_driver_id,omitempty"`
+	OriginDriverSeq int    `json:"origin_driver_seq,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	CurrentStage    string `json:"current_stage,omitempty"`
 }
 
 type OverviewResponse struct {
@@ -2125,6 +2528,8 @@ func (m *Manager) List() []TaskSummary {
 			result = append(result, TaskSummary{
 				ID: entry.ID, Status: status, Workspace: entry.Workspace,
 				Name: entry.Name, RepositoryURL: entry.RepositoryURL,
+				TaskKind: entry.TaskKind, ParentTaskID: entry.ParentTaskID,
+				OriginDriverID: entry.Request.OriginDriverID, OriginDriverSeq: entry.Request.OriginDriverSeq,
 				CreatedAt: entry.CreatedAt, CurrentStage: stage,
 			})
 			continue
@@ -2143,6 +2548,8 @@ func (m *Manager) List() []TaskSummary {
 		result = append(result, TaskSummary{
 			ID: entry.ID, Status: status, Workspace: entry.Workspace,
 			Name: entry.Name, RepositoryURL: entry.RepositoryURL,
+			TaskKind: entry.TaskKind, ParentTaskID: entry.ParentTaskID,
+			OriginDriverID: entry.Request.OriginDriverID, OriginDriverSeq: entry.Request.OriginDriverSeq,
 			CreatedAt: entry.CreatedAt, CurrentStage: stage,
 		})
 	}

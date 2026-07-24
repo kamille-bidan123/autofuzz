@@ -13,6 +13,7 @@ import (
 type Options struct {
 	RepositoryURL  string
 	Ref            string
+	ProjectName    string
 	Workspace      string
 	PromeFuzzRoot  string
 	ConfigPath     string
@@ -27,6 +28,21 @@ type Options struct {
 	Verbose        bool
 	StopAfter      state.Stage
 	FuzzInterval   time.Duration
+	TaskKind       string
+	ParentTaskID   string
+	Origin         CrashFixOrigin
+}
+
+type CrashFixOrigin struct {
+	DriverID        int
+	DriverSeq       int
+	Crashes         []string
+	SnapshotDir     string
+	SourceDir       string
+	BuildDir        string
+	InstallDir      string
+	StaticLibraries []string
+	Context         string
 }
 
 func (o *Options) Normalize() error {

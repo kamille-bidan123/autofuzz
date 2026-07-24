@@ -39,6 +39,10 @@ type FuzzConfig struct {
 	// running at the same time in multi-driver mode. <=0 means a conservative
 	// default is used.
 	MaxParallelDrivers int
+	// DriverLocalCorpus means DriverDir/corpus already belongs to the discovered
+	// child driver(s), so multi-driver startup should copy it without stripping
+	// a PromeFuzz dispatcher selector byte. Used by crash-fix child tasks.
+	DriverLocalCorpus bool
 
 	// TriggerCh is an optional channel that, when signaled, causes the
 	// fuzz loop to immediately skip the remaining wait and proceed to

@@ -311,6 +311,99 @@ func TestDriverDiffComparesPreviousVersion(t *testing.T) {
 	}
 }
 
+func TestCreateCrashFixTaskRejectsIneligibleCrash(t *testing.T) {
+	request := lifecycleTestRequest(t)
+	manager := NewManager(context.Background())
+	pending, err := manager.Create(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupCrashFixParent(t, pending, fuzzing.CrashAnalysisEntry{
+		File:           "leak-abc",
+		Type:           "leak",
+		ASanReport:     "SUMMARY: LeakSanitizer: detected memory leaks",
+		ReportStatus:   "completed",
+		Classification: "library_bug",
+		ReportPath:     "crash-reports/leak-abc.json",
+	})
+
+	_, err = manager.CreateCrashFixTask(pending.ID, CrashFixTaskRequest{
+		DriverID: 9,
+		Seq:      1,
+		Crashes:  []string{"leak-abc"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not an OOB crash") {
+		t.Fatalf("CreateCrashFixTask error = %v, want not OOB rejection", err)
+	}
+}
+
+func TestCreateCrashFixTaskCreatesAndStartsChildTask(t *testing.T) {
+	request := lifecycleTestRequest(t)
+	manager := NewManager(context.Background())
+	pending, err := manager.Create(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := setupCrashFixParent(t, pending, fuzzing.CrashAnalysisEntry{
+		File:           "crash-oob",
+		Type:           "heap-buffer-overflow",
+		ASanReport:     "SUMMARY: AddressSanitizer: heap-buffer-overflow",
+		ReportStatus:   "completed",
+		Classification: "library_bug",
+		ReportPath:     "crash-reports/crash-oob.json",
+	})
+
+	started := make(chan *agent.Agent, 1)
+	manager.runAgent = func(_ context.Context, autoAgent *agent.Agent) error {
+		if err := os.MkdirAll(autoAgent.TargetDir, 0o755); err != nil {
+			return err
+		}
+		autoAgent.State.Stage = state.StageFuzzing
+		if err := autoAgent.State.Save(autoAgent.StatePath); err != nil {
+			return err
+		}
+		started <- autoAgent
+		return nil
+	}
+
+	child, err := manager.CreateCrashFixTask(pending.ID, CrashFixTaskRequest{
+		DriverID: 9,
+		Seq:      1,
+		Crashes:  []string{"crash-oob"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.TaskKind != "crash_fix_child" || child.ParentTaskID != pending.ID {
+		t.Fatalf("unexpected child metadata: %#v", child)
+	}
+	if child.OriginDriverID != 9 || child.OriginDriverSeq != 1 || len(child.OriginCrashes) != 1 || child.OriginCrashes[0] != "crash-oob" {
+		t.Fatalf("unexpected child origin: %#v", child)
+	}
+
+	var autoAgent *agent.Agent
+	select {
+	case autoAgent = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child task did not start")
+	}
+	if autoAgent.Options.RepositoryURL != fixture.SourceDir {
+		t.Fatalf("child repository = %q, want %q", autoAgent.Options.RepositoryURL, fixture.SourceDir)
+	}
+	if autoAgent.Options.Origin.SnapshotDir != fixture.SnapshotDir ||
+		autoAgent.Options.Origin.SourceDir != fixture.SourceDir ||
+		autoAgent.Options.Origin.BuildDir != fixture.BuildDir ||
+		autoAgent.Options.Origin.InstallDir != fixture.InstallDir ||
+		len(autoAgent.Options.Origin.StaticLibraries) != 1 ||
+		autoAgent.Options.Origin.StaticLibraries[0] != fixture.StaticLibrary {
+		t.Fatalf("unexpected origin options: %#v", autoAgent.Options.Origin)
+	}
+	if !strings.Contains(autoAgent.Options.Origin.Context, "heap-buffer-overflow") ||
+		!strings.Contains(autoAgent.Options.Origin.Context, "fuzz_driver_9.c") {
+		t.Fatalf("origin context is missing crash details:\n%s", autoAgent.Options.Origin.Context)
+	}
+}
+
 func waitForTaskStatus(t *testing.T, task *Task, wanted string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -335,6 +428,103 @@ func waitForRegistryStatus(t *testing.T, id, wanted string) {
 	}
 	entry, _ := registryEntryByID(id)
 	t.Fatalf("registry status = %q, want %q", entry.Status, wanted)
+}
+
+type crashFixFixture struct {
+	SnapshotDir   string
+	SourceDir     string
+	BuildDir      string
+	InstallDir    string
+	StaticLibrary string
+}
+
+func setupCrashFixParent(t *testing.T, snapshot *TaskSnapshot, entry fuzzing.CrashAnalysisEntry) crashFixFixture {
+	t.Helper()
+	sourceDir := filepath.Join(snapshot.TargetDir, "source")
+	buildDir := filepath.Join(snapshot.TargetDir, "build")
+	installDir := filepath.Join(snapshot.TargetDir, "install")
+	staticLibrary := filepath.Join(buildDir, "libsample.a")
+	for _, dir := range []string{sourceDir, buildDir, installDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "sample.c"), []byte("int sample(void) { return 1; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staticLibrary, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runState := state.New(snapshot.Request.RepositoryURL, "", snapshot.Request.Name, sourceDir)
+	runState.Stage = state.StageFuzzing
+	runState.SourceKind = "local"
+	runState.BuildDir = buildDir
+	runState.InstallDir = installDir
+	runState.CompileCommandsPath = filepath.Join(buildDir, "compile_commands.json")
+	runState.StaticLibraries = []string{staticLibrary}
+	runState.OutputPath = filepath.Join(snapshot.TargetDir, "output")
+	if err := runState.Save(snapshot.StatePath); err != nil {
+		t.Fatal(err)
+	}
+
+	snapDir := crashReportSnapshotDir(snapshot.TargetDir, 9, 1)
+	for _, dir := range []string{
+		filepath.Join(snapDir, "driver"),
+		filepath.Join(snapDir, "unique_crashes"),
+		filepath.Join(snapDir, "crashes"),
+		filepath.Join(snapDir, "crash-reports"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	driverSource := filepath.Join(snapDir, "driver", "fuzz_driver_9.c")
+	if err := os.WriteFile(driverSource, []byte("int LLVMFuzzerTestOneInput(const unsigned char *Data, unsigned long Size) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buildScript := filepath.Join(snapDir, "build_cov_driver.sh")
+	if err := os.WriteFile(buildScript, []byte("#!/bin/sh\ncc "+driverSource+" "+staticLibrary+" -o "+filepath.Join(snapDir, "cov_driver")+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	crashFile := filepath.Base(entry.File)
+	if err := os.WriteFile(filepath.Join(snapDir, "unique_crashes", crashFile), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "crashes", crashFile), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(snapDir, filepath.FromSlash(entry.ReportPath))
+	report := map[string]any{
+		"report": map[string]any{
+			"crash_file":     crashFile,
+			"classification": entry.Classification,
+			"crash_type":     entry.Type,
+			"asan_report":    entry.ASanReport,
+			"root_cause":     "test root cause",
+		},
+	}
+	reportData, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reportPath, reportData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	analysis := crashAnalysisJSON{Total: 1, Unique: 1, List: []fuzzing.CrashAnalysisEntry{entry}}
+	analysisData, err := json.Marshal(analysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), analysisData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return crashFixFixture{
+		SnapshotDir:   snapDir,
+		SourceDir:     sourceDir,
+		BuildDir:      buildDir,
+		InstallDir:    installDir,
+		StaticLibrary: staticLibrary,
+	}
 }
 
 func lifecycleTestRequest(t *testing.T) RunRequest {

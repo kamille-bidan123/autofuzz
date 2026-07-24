@@ -74,6 +74,9 @@ func CloneMultiCoverageSnapshot(snapshot MultiCoverageSnapshot) MultiCoverageSna
 	snapshot.RunningTargets = append([]int(nil), snapshot.RunningTargets...)
 	snapshot.QueuedTargets = append([]int(nil), snapshot.QueuedTargets...)
 	snapshot.NextTargets = append([]int(nil), snapshot.NextTargets...)
+	snapshot.RunningVersions = append([]TargetVersionRef(nil), snapshot.RunningVersions...)
+	snapshot.QueuedVersions = append([]TargetVersionRef(nil), snapshot.QueuedVersions...)
+	snapshot.NextVersions = append([]TargetVersionRef(nil), snapshot.NextVersions...)
 	if snapshot.NextAnalysisAt != nil {
 		next := *snapshot.NextAnalysisAt
 		snapshot.NextAnalysisAt = &next
