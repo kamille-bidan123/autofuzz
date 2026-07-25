@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCrashReportCards } from './useAutofuzz';
+import { buildCrashReportCards, uniqueCrashAnalysisSummary } from './useAutofuzz';
 
 const reports = [
   {
@@ -27,5 +27,14 @@ describe('buildCrashReportCards', () => {
 
   it('does not fall back to unrelated reports when the selected crash is missing', () => {
     expect(buildCrashReportCards(reports, 'crash-missing')).toEqual([]);
+  });
+
+  it('summarizes completed crash analysis for compact crash rows', () => {
+    expect(uniqueCrashAnalysisSummary({entry: {analysis: '这是一个库越界读写问题，需要修复边界检查。'}}))
+      .toBe('这是一个库越界读写问题，需要修复边界检查。');
+  });
+
+  it('falls back to report status when compact crash rows have no analysis yet', () => {
+    expect(uniqueCrashAnalysisSummary({entry: {report_status: 'running'}})).toBe('LLM 正在分析');
   });
 });

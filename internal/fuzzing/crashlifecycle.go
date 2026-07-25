@@ -143,6 +143,7 @@ type CrashAnalysisEntry struct {
 	ReportError     string `json:"report_error,omitempty"`
 	ReportUpdatedAt string `json:"report_updated_at,omitempty"`
 	Classification  string `json:"classification,omitempty"`
+	Analysis        string `json:"analysis,omitempty"`
 }
 
 // parseASanType extracts the ASan error type (e.g. "heap-use-after-free",

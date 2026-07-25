@@ -71,6 +71,26 @@ func (r Runner) RunInputStreaming(
 	command.Dir = dir
 	command.Env = append(os.Environ(), env...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// On ctx cancel/timeout, kill the WHOLE process group. Setpgid makes the
+	// child a group leader so -pid targets the group; exec.CommandContext's
+	// default only SIGKILLs the direct child, so grandchildren that inherited
+	// the stdout/stderr pipe would survive, keep the pipe open and block
+	// Wait() forever (the Codex CLI's streaming worker is one such grandchild).
+	// WaitDelay then forces Wait() to return even if a surviving grandchild
+	// still holds the pipe past the grace period.
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	command.WaitDelay = 5 * time.Second
 	if input != "" {
 		command.Stdin = strings.NewReader(input)
 	}
@@ -101,13 +121,6 @@ func (r Runner) RunInputStreaming(
 	result.Duration = time.Since(started)
 	if command.ProcessState != nil {
 		result.ExitCode = command.ProcessState.ExitCode()
-	}
-	// On any context error (timeout OR cancel), kill the entire process group
-	// (Setpgid puts the command in its own group). exec.CommandContext only
-	// kills the direct child, leaving fork workers / merge subprocesses as
-	// orphaned CPU hogs. Killing the group prevents that.
-	if ctx.Err() != nil && command.Process != nil {
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true

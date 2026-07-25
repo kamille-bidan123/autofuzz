@@ -160,8 +160,8 @@ const ui = useAutofuzz();
                 </div>
               </div>
               <div>栈签名</div>
+              <div>分析结论</div>
               <div>上次分析</div>
-              <div>操作</div>
             </div>
             <div v-if="!ui.uniqueCrashItems.length" class="cov-empty">当前筛选没有匹配的 unique crash</div>
             <div
@@ -190,11 +190,8 @@ const ui = useAutofuzz();
               <div><span class="crash-class" :class="ui.crashBadgeForEntry(ui.uniqueCrashEntry(item)).className">{{ ui.crashBadgeForEntry(ui.uniqueCrashEntry(item)).label }}</span></div>
               <div>{{ ui.uniqueCrashEntry(item).type || '-' }}</div>
               <div class="unique-crash-stack">{{ ui.uniqueCrashEntry(item).stack || ui.uniqueCrashEntry(item).asan_report || '暂无栈签名' }}</div>
+              <div class="unique-crash-analysis">{{ ui.uniqueCrashAnalysisSummary(item) }}</div>
               <div class="unique-crash-time">{{ ui.uniqueCrashLastAnalysisAt(item) }}</div>
-              <div class="unique-crash-actions" @click.stop>
-                <button type="button" class="driver-detail-button" @click="ui.openUniqueCrash(item)">报告</button>
-                <button type="button" class="driver-detail-button" :disabled="!ui.canAnalyzeUniqueCrash(item)" @click="ui.analyzeUniqueCrash(item)">{{ ui.uniqueCrashAnalyzeLabel(item) }}</button>
-              </div>
             </div>
           </template>
         </div>
@@ -215,6 +212,10 @@ const ui = useAutofuzz();
               <div><span>发现时间</span><strong>{{ ui.uniqueCrashTriagePreview.createdAt }}</strong></div>
               <div><span>上次分析</span><strong>{{ ui.uniqueCrashTriagePreview.lastAnalysisAt }}</strong></div>
             </div>
+            <section class="crash-preview-section">
+              <h4>分析结论</h4>
+              <pre>{{ ui.uniqueCrashTriagePreview.analysis }}</pre>
+            </section>
             <section class="crash-preview-section">
               <h4>栈签名</h4>
               <pre>{{ ui.uniqueCrashTriagePreview.stack }}</pre>

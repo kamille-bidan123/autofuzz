@@ -1,5 +1,5 @@
 <script setup>
-import { ArrowLeft, Play, Square, WandSparkles } from '@lucide/vue';
+import { ArrowLeft, FileCode, Play, Square, WandSparkles } from '@lucide/vue';
 import { useAutofuzz } from '../appContext';
 import OverviewTab from './task-tabs/OverviewTab.vue';
 import CoverageTab from './task-tabs/CoverageTab.vue';
@@ -10,6 +10,7 @@ import LogsTab from './task-tabs/LogsTab.vue';
 import SnapshotDiffView from './task-tabs/SnapshotDiffView.vue';
 import CrashReportView from './task-tabs/CrashReportView.vue';
 import DriverCoverageView from './task-tabs/DriverCoverageView.vue';
+import LibraryConfigView from './task-tabs/LibraryConfigView.vue';
 
 const ui = useAutofuzz();
 </script>
@@ -38,6 +39,9 @@ const ui = useAutofuzz();
         <button class="debug icon-text-button" type="button" :disabled="!ui.canTriggerFuzz" title="手动触发 LLM 分析优化" @click="ui.triggerFuzz">
           <WandSparkles :size="15" /><span>触发分析</span>
         </button>
+        <button class="driver-detail-button icon-text-button" type="button" :disabled="!ui.canOpenLibraryConfig" title="查看或修改 library.toml" @click="ui.openLibraryConfig">
+          <FileCode :size="15" /><span>library.toml</span>
+        </button>
       </div>
     </div>
 
@@ -59,6 +63,7 @@ const ui = useAutofuzz();
     <DriverCoverageView v-if="ui.detail.coverageDetail.visible" />
     <SnapshotDiffView v-else-if="ui.detail.snapshotDiff.visible" />
     <CrashReportView v-else-if="ui.detail.crashReport.visible" />
+    <LibraryConfigView v-else-if="ui.detail.libraryConfig.visible" />
     <OverviewTab v-else-if="ui.detail.activeTab === 'overview'" />
     <CoverageTab v-else-if="ui.detail.activeTab === 'coverage'" />
     <CrashesTab v-else-if="ui.detail.activeTab === 'crashes'" />

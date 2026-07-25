@@ -158,6 +158,11 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	if flow == nil {
 		flow = &FuzzFlowSnapshot{}
 	}
+	// A non-nil CycleStarted persisted from a previous run means the last
+	// analysis cycle started but never finished (the run was stopped or
+	// crashed mid-analysis). On resume, re-arm the analysis to fire right
+	// away instead of waiting the full interval.
+	resumingInterruptedCycle := flow.CycleStarted != nil
 	emitFlow := func(phase FuzzFlowPhase, status, trigger, message string, driverID int) {
 		flow.Iteration = st.Iteration
 		flow.DriverID = driverID
@@ -207,6 +212,10 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 
 	var lastCycleData []targetCycleData
 	nextAnalysisAt := time.Now().Add(cfg.Interval)
+	if resumingInterruptedCycle {
+		nextAnalysisAt = time.Now()
+		cfg.logf("[fuzzing] resuming interrupted analysis cycle; re-triggering analysis immediately\n")
+	}
 	emitCoverage := func(data []targetCycleData) {
 		if cfg.OnCoverageChanged != nil {
 			cfg.OnCoverageChanged(buildMultiCoverageSnapshot(data, st, maxParallel, cfg.Interval, nextAnalysisAt))

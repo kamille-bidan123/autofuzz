@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"autofuzz/internal/agent"
 	"autofuzz/internal/fuzzing"
 	"autofuzz/internal/runevent"
+	"autofuzz/internal/state"
 )
 
 func TestDefaultsEndpoint(t *testing.T) {
@@ -64,6 +67,7 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 		`/crash-analysis-queue`,
 		`unique-crashes`,
 		`/crash-reports/analyze`,
+		`/library-config`,
 		`crash-analyze-button`,
 		`stage-cycle`,
 		`fuzz_flow`,
@@ -183,6 +187,122 @@ func embeddedStaticText(t *testing.T, directory string) string {
 	return builder.String()
 }
 
+type libraryConfigTaskFixture struct {
+	targetDir       string
+	configPath      string
+	compileCommands string
+	outputPath      string
+	headerDir       string
+	staticLibrary   string
+}
+
+func setupLibraryConfigTask(t *testing.T, id string) libraryConfigTaskFixture {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	workspace := t.TempDir()
+	targetDir := filepath.Join(workspace, "sample")
+	sourceDir := filepath.Join(targetDir, "source")
+	buildDir := filepath.Join(targetDir, "build")
+	installDir := filepath.Join(targetDir, "install")
+	promeFuzzRoot := filepath.Join(targetDir, "promefuzz")
+	headerDir := filepath.Join(sourceDir, "include")
+	outputPath := filepath.Join(targetDir, "promefuzz-output")
+	compileCommands := filepath.Join(buildDir, "compile_commands.json")
+	staticLibrary := filepath.Join(installDir, "lib", "libsample.a")
+	promeFuzzConfig := filepath.Join(promeFuzzRoot, "config.toml")
+	pythonPath := filepath.Join(promeFuzzRoot, ".venv", "bin", "python")
+	for _, dir := range []string{
+		headerDir,
+		filepath.Dir(compileCommands),
+		filepath.Dir(staticLibrary),
+		filepath.Dir(pythonPath),
+		filepath.Join(outputPath, "preprocessor"),
+		filepath.Join(outputPath, "comprehender"),
+		filepath.Join(outputPath, "fuzz_driver"),
+		filepath.Join(targetDir, "logs", "fuzzing"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{
+		compileCommands: "[]\n",
+		staticLibrary:   "",
+		filepath.Join(promeFuzzRoot, "PromeFuzz.py"): "",
+		promeFuzzConfig: "",
+		pythonPath:      "",
+		filepath.Join(outputPath, "preprocessor", "api.json"):           "{}\n",
+		filepath.Join(outputPath, "comprehender", "semantic_relev.pkl"): "data",
+		filepath.Join(outputPath, "fuzz_driver", "fuzz_driver_1.c"):     "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return 0; }\n",
+		filepath.Join(targetDir, "logs", "fuzzing", "live.log"):         "old fuzzing data\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(targetDir, "library.toml")
+	if err := os.WriteFile(configPath, []byte(libraryConfigContent("sample", compileCommands, outputPath, headerDir, staticLibrary)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runState := state.New(sourceDir, "", "sample", sourceDir)
+	runState.Stage = state.StageFuzzing
+	runState.BuildDir = buildDir
+	runState.InstallDir = installDir
+	runState.CompileCommandsPath = compileCommands
+	runState.StaticLibraries = []string{staticLibrary}
+	runState.Language = "c"
+	runState.HeaderPaths = []string{headerDir}
+	runState.LibraryConfigPath = configPath
+	runState.OutputPath = outputPath
+	runState.GenerationTask = "allcover"
+	runState.GeneratedDrivers = []string{filepath.Join(outputPath, "fuzz_driver", "fuzz_driver_1.c")}
+	if err := runState.Save(filepath.Join(targetDir, "agent-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	request := DefaultRunRequest()
+	request.RepositoryURL = sourceDir
+	request.Workspace = workspace
+	request.Name = "sample"
+	request.PromeFuzzRoot = promeFuzzRoot
+	request.ConfigPath = promeFuzzConfig
+	request.PythonPath = pythonPath
+	if err := upsertTaskRegistry(registryEntry{
+		ID:            id,
+		Workspace:     workspace,
+		Name:          "sample",
+		RepositoryURL: sourceDir,
+		CreatedAt:     time.Now().Format(time.RFC3339),
+		Status:        "completed",
+		Request:       request,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return libraryConfigTaskFixture{
+		targetDir:       targetDir,
+		configPath:      configPath,
+		compileCommands: compileCommands,
+		outputPath:      outputPath,
+		headerDir:       headerDir,
+		staticLibrary:   staticLibrary,
+	}
+}
+
+func libraryConfigContent(project, compileCommands, outputPath, headerDir, staticLibrary string) string {
+	return fmt.Sprintf(`[%s]
+language = "c"
+compile_commands_path = "%s"
+document_paths = []
+document_has_api_usage = false
+output_path = "%s"
+header_paths = ["%s"]
+driver_build_args = ["%s"]
+consumer_case_paths = []
+exclude_paths = []
+api_ban_list_path = ""
+api_hints_path = ""
+`, project, compileCommands, outputPath, headerDir, staticLibrary)
+}
+
 func TestOverviewEndpointAggregatesDashboardMetrics(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workspace := t.TempDir()
@@ -282,6 +402,100 @@ func TestFuzzFlowEndpointRestoresCurrentAndLimitsHistory(t *testing.T) {
 	}
 	if got.Current == nil || got.Current.Phase != fuzzing.FuzzFlowAnalyzing || len(got.History) != 1 || got.History[0].Iteration != 2 || got.History[0].Trigger != "manual" {
 		t.Fatalf("unexpected fuzz flow response: %#v", got)
+	}
+}
+
+func TestLibraryConfigEndpointReadsGeneratedConfig(t *testing.T) {
+	task := setupLibraryConfigTask(t, "library-view")
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/library-view/library-config", nil)
+	response := httptest.NewRecorder()
+	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got LibraryConfigResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Available || !got.Editable || got.Path != task.configPath || !strings.Contains(got.Content, "header_paths") {
+		t.Fatalf("unexpected library config response: %#v", got)
+	}
+}
+
+func TestLibraryConfigReprocessValidatesBeforeReplace(t *testing.T) {
+	task := setupLibraryConfigTask(t, "library-invalid")
+	original, err := os.ReadFile(task.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"content":"[sample]\nlanguage = \"c\"\n"}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/runs/library-invalid/library-config/reprocess", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	after, err := os.ReadFile(task.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, after) {
+		t.Fatal("invalid library.toml replaced the existing config")
+	}
+}
+
+func TestLibraryConfigReprocessResetsDownstreamAndRestarts(t *testing.T) {
+	task := setupLibraryConfigTask(t, "library-reprocess")
+	manager := NewManager(context.Background())
+	runStarted := make(chan state.Stage, 1)
+	manager.runAgent = func(_ context.Context, autoAgent *agent.Agent) error {
+		runStarted <- autoAgent.State.Stage
+		return nil
+	}
+	nextContent := libraryConfigContent("sample", task.compileCommands, task.outputPath, task.headerDir, task.staticLibrary) +
+		"\n# manual edit\n"
+	body, err := json.Marshal(LibraryConfigReprocessRequest{Content: nextContent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/runs/library-reprocess/library-config/reprocess", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	select {
+	case stage := <-runStarted:
+		if stage != state.StageConfigured {
+			t.Fatalf("agent resumed from %s, want configured", stage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("agent restart was not triggered")
+	}
+	updated, err := state.Load(filepath.Join(task.targetDir, "agent-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Stage != state.StageConfigured || updated.GenerationTask != "" || len(updated.GeneratedDrivers) != 0 {
+		t.Fatalf("state was not reset to configured: %#v", updated)
+	}
+	if data, err := os.ReadFile(task.configPath); err != nil || !strings.Contains(string(data), "# manual edit") {
+		t.Fatalf("library.toml was not replaced: %v %s", err, data)
+	}
+	for _, path := range []string{
+		filepath.Join(task.outputPath, "preprocessor"),
+		filepath.Join(task.outputPath, "comprehender"),
+		filepath.Join(task.outputPath, "fuzz_driver"),
+		filepath.Join(task.targetDir, "logs", "fuzzing"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists after reprocess", path)
+		}
+	}
+	backups, _ := filepath.Glob(filepath.Join(task.targetDir, "logs", "manual-library-config", "library-*.toml"))
+	archives, _ := filepath.Glob(filepath.Join(task.targetDir, "logs", "manual-library-config", "fuzzing-*"))
+	if len(backups) != 1 || len(archives) != 1 {
+		t.Fatalf("backup/archive not created, backups=%v archives=%v", backups, archives)
 	}
 }
 
@@ -415,7 +629,7 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snapDir, "crash-analysis.json"), []byte(analysis), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report := `{"report":{"classification":"library_bug","asan_report":"ERROR: AddressSanitizer: heap-buffer-overflow"}}`
+	report := `{"report":{"classification":"library_bug","analysis":"这是库侧越界写入。","asan_report":"ERROR: AddressSanitizer: heap-buffer-overflow"}}`
 	reportPath := filepath.Join(snapDir, "crash-reports", "crash-a.json")
 	if err := os.WriteFile(reportPath, []byte(report), 0o644); err != nil {
 		t.Fatal(err)
@@ -436,7 +650,7 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Crashes) != 1 || got.Crashes[0].Entry.ReportStatus != "completed" || got.Crashes[0].Entry.Classification != "library_bug" {
+	if len(got.Crashes) != 1 || got.Crashes[0].Entry.ReportStatus != "completed" || got.Crashes[0].Entry.Classification != "library_bug" || got.Crashes[0].Entry.Analysis != "这是库侧越界写入。" {
 		t.Fatalf("stale running report was not reconciled: %#v", got.Crashes)
 	}
 	requireSameRFC3339Instant(t, got.Crashes[0].CrashCreatedAt, crashTime)

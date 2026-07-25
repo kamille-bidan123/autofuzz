@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"autofuzz/internal/agent"
+	"autofuzz/internal/configagent"
 	"autofuzz/internal/fuzzing"
 	"autofuzz/internal/runevent"
 	"autofuzz/internal/runner"
@@ -142,6 +143,19 @@ type TaskSnapshot struct {
 	OriginSourceDir string          `json:"origin_source_dir,omitempty"`
 	Request         RunRequest      `json:"request"`
 	Stages          []StageSnapshot `json:"stages"`
+}
+
+type LibraryConfigResponse struct {
+	Available bool   `json:"available"`
+	Path      string `json:"path,omitempty"`
+	Content   string `json:"content,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Editable  bool   `json:"editable"`
+	Message   string `json:"message,omitempty"`
+}
+
+type LibraryConfigReprocessRequest struct {
+	Content string `json:"content"`
 }
 
 type stageDefinition struct {
@@ -541,6 +555,113 @@ func (m *Manager) TriggerFuzzAnalysis(id string) error {
 		return fmt.Errorf("fuzz analysis is not ready or a trigger is already queued")
 	}
 	return nil
+}
+
+func (m *Manager) LibraryConfig(id string) (LibraryConfigResponse, error) {
+	entry, exists := registryEntryByID(id)
+	if !exists {
+		return LibraryConfigResponse{}, fmt.Errorf("task not found")
+	}
+	result := LibraryConfigResponse{Editable: false}
+	if entry.Request.TaskKind == "crash_fix_child" {
+		result.Message = "修复子任务不支持重新配置 library.toml"
+		return result, nil
+	}
+	targetDir := filepath.Join(entry.Workspace, entry.Name)
+	runState, err := state.Load(filepath.Join(targetDir, "agent-state.json"))
+	if err != nil {
+		result.Message = "任务尚未生成 agent-state.json"
+		return result, nil
+	}
+	if !runStateCompletedStage(runState, state.StageConfigured) {
+		result.Message = "library.toml 尚未生成"
+		return result, nil
+	}
+	configPath, err := taskLibraryConfigPath(targetDir, runState)
+	if err != nil {
+		return LibraryConfigResponse{}, err
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		result.Message = "无法读取 library.toml: " + err.Error()
+		return result, nil
+	}
+	info, _ := os.Stat(configPath)
+	result.Available = true
+	result.Path = configPath
+	result.Content = string(data)
+	result.Editable = libraryConfigEditableStatus(m.currentTaskStatus(id, entry))
+	if info != nil {
+		result.UpdatedAt = info.ModTime().Format(time.RFC3339)
+	}
+	if !result.Editable {
+		result.Message = "任务运行中，请先停止任务后再修改 library.toml"
+	}
+	return result, nil
+}
+
+func (m *Manager) ReprocessLibraryConfig(id, content string) (*TaskSnapshot, error) {
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("library.toml cannot be empty")
+	}
+	entry, exists := registryEntryByID(id)
+	if !exists {
+		return nil, fmt.Errorf("task not found")
+	}
+	if entry.Request.TaskKind == "crash_fix_child" {
+		return nil, fmt.Errorf("crash fix task cannot reprocess library.toml")
+	}
+	status := m.currentTaskStatus(id, entry)
+	if !libraryConfigEditableStatus(status) {
+		return nil, fmt.Errorf("task cannot reprocess library.toml from status %s", status)
+	}
+	targetDir := filepath.Join(entry.Workspace, entry.Name)
+	statePath := filepath.Join(targetDir, "agent-state.json")
+	runState, err := state.Load(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("load state: %w", err)
+	}
+	if !runStateCompletedStage(runState, state.StageConfigured) {
+		return nil, fmt.Errorf("library.toml has not been generated")
+	}
+	configPath, err := taskLibraryConfigPath(targetDir, runState)
+	if err != nil {
+		return nil, err
+	}
+	validated, err := validateManualLibraryConfig(targetDir, runState, configPath, content)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := backupAndReplaceLibraryConfig(targetDir, configPath, content); err != nil {
+		return nil, err
+	}
+
+	oldOutputPath := runState.OutputPath
+	runState.Stage = state.StageConfigured
+	runState.Language = validated.Language
+	runState.HeaderPaths = append([]string(nil), validated.HeaderPaths...)
+	runState.ConsumerPaths = append([]string(nil), validated.ConsumerPaths...)
+	runState.LibraryConfigPath = configPath
+	runState.OutputPath = validated.OutputPath
+	runState.GenerationTask = ""
+	runState.GeneratedDrivers = nil
+	runState.Errors = nil
+	if err := runState.Save(statePath); err != nil {
+		return nil, fmt.Errorf("save state: %w", err)
+	}
+	if err := removePromeFuzzDownstream(targetDir, oldOutputPath, validated.OutputPath); err != nil {
+		return nil, err
+	}
+	if err := archiveFuzzingLogDir(targetDir); err != nil {
+		return nil, err
+	}
+	updateTaskRegistryStatus(id, "interrupted")
+	task, err := m.StartTask(id)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := task.Snapshot()
+	return &snapshot, nil
 }
 
 // CoverageData returns the cached coverage snapshot from the task's corpus
@@ -1416,6 +1537,7 @@ func fillCrashEntryFromReport(reportPath string, entry *fuzzing.CrashAnalysisEnt
 	var envelope struct {
 		Report struct {
 			Classification string `json:"classification"`
+			Analysis       string `json:"analysis"`
 			ASanReport     string `json:"asan_report"`
 		} `json:"report"`
 		Entry fuzzing.CrashAnalysisEntry `json:"entry"`
@@ -1435,6 +1557,13 @@ func fillCrashEntryFromReport(reportPath string, entry *fuzzing.CrashAnalysisEnt
 			entry.ASanReport = envelope.Report.ASanReport
 		} else if envelope.Entry.ASanReport != "" {
 			entry.ASanReport = envelope.Entry.ASanReport
+		}
+	}
+	if entry.Analysis == "" {
+		if envelope.Report.Analysis != "" {
+			entry.Analysis = envelope.Report.Analysis
+		} else if envelope.Entry.Analysis != "" {
+			entry.Analysis = envelope.Entry.Analysis
 		}
 	}
 }
@@ -1546,6 +1675,7 @@ func (m *Manager) TriggerCrashReportAnalysis(id string, driverID, seq int, crash
 				entry.ReportError = ""
 				entry.ReportUpdatedAt = time.Now().Format(time.RFC3339)
 				entry.Classification = report.Classification
+				entry.Analysis = report.Analysis
 				return nil
 			})
 			m.taskLogSink(id)("crash analysis completed: " + crashFile)
@@ -2495,6 +2625,151 @@ func stageSnapshotsFromState(runState *state.RunState) []StageSnapshot {
 		}
 	}
 	return stages
+}
+
+func runStateCompletedStage(runState *state.RunState, stage state.Stage) bool {
+	return runStateCompletedRank(runState) >= stageRanks[string(stage)]
+}
+
+func runStateCompletedRank(runState *state.RunState) int {
+	if runState == nil {
+		return 0
+	}
+	if (runState.Stage == state.StageFailed || runState.Stage == state.StageBlocked) && len(runState.Errors) > 0 {
+		return stageRanks[string(runState.Errors[len(runState.Errors)-1].Stage)] - 1
+	}
+	return stageRanks[string(runState.Stage)]
+}
+
+func (m *Manager) currentTaskStatus(id string, entry registryEntry) string {
+	if task, exists := m.Get(id); exists {
+		task.mu.RLock()
+		status := task.status
+		task.mu.RUnlock()
+		return status
+	}
+	return effectiveRegistryStatus(entry)
+}
+
+func libraryConfigEditableStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "interrupted", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+func taskLibraryConfigPath(targetDir string, runState *state.RunState) (string, error) {
+	if strings.TrimSpace(runState.LibraryConfigPath) == "" {
+		return "", fmt.Errorf("library.toml path is empty")
+	}
+	configPath := runState.LibraryConfigPath
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(targetDir, filepath.Clean(configPath))
+	}
+	if !isPathUnderRoot(configPath, targetDir) {
+		return "", fmt.Errorf("library.toml path escapes task workspace")
+	}
+	return configPath, nil
+}
+
+func validateManualLibraryConfig(targetDir string, runState *state.RunState, configPath, content string) (configagent.Result, error) {
+	tempPath := filepath.Join(filepath.Dir(configPath), ".library.toml.manual.tmp")
+	if err := os.WriteFile(tempPath, []byte(content), 0o644); err != nil {
+		return configagent.Result{}, fmt.Errorf("write temporary library.toml: %w", err)
+	}
+	defer os.Remove(tempPath)
+	result, err := configagent.ValidateConfig(configagent.Report{LibraryConfigPath: tempPath}, configagent.Request{
+		Name:            runState.ProjectName,
+		SourceDir:       runState.SourceDir,
+		BuildDir:        runState.BuildDir,
+		InstallDir:      runState.InstallDir,
+		TargetDir:       targetDir,
+		CompileCommands: runState.CompileCommandsPath,
+		StaticLibraries: append([]string(nil), runState.StaticLibraries...),
+	})
+	if err != nil {
+		return configagent.Result{}, fmt.Errorf("validate library.toml: %w", err)
+	}
+	return result, nil
+}
+
+func backupAndReplaceLibraryConfig(targetDir, configPath, content string) (string, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read existing library.toml: %w", err)
+	}
+	backupDir := filepath.Join(targetDir, "logs", "manual-library-config")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return "", fmt.Errorf("create library.toml backup directory: %w", err)
+	}
+	stamp := time.Now().Format("20060102-150405")
+	backupPath := filepath.Join(backupDir, "library-"+stamp+".toml")
+	for suffix := 1; fileExists(backupPath); suffix++ {
+		backupPath = filepath.Join(backupDir, fmt.Sprintf("library-%s-%d.toml", stamp, suffix))
+	}
+	if err := os.WriteFile(backupPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("backup library.toml: %w", err)
+	}
+	tempPath := configPath + ".manual.tmp"
+	if err := os.WriteFile(tempPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write library.toml: %w", err)
+	}
+	if err := os.Rename(tempPath, configPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("replace library.toml: %w", err)
+	}
+	return backupPath, nil
+}
+
+func removePromeFuzzDownstream(targetDir string, paths ...string) error {
+	seen := map[string]struct{}{}
+	for _, outputPath := range paths {
+		if strings.TrimSpace(outputPath) == "" {
+			continue
+		}
+		if !filepath.IsAbs(outputPath) {
+			outputPath = filepath.Join(targetDir, filepath.Clean(outputPath))
+		}
+		if !isPathUnderRoot(outputPath, targetDir) {
+			return fmt.Errorf("output path escapes task workspace")
+		}
+		cleaned := filepath.Clean(outputPath)
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		for _, subdir := range []string{"preprocessor", "comprehender", "fuzz_driver"} {
+			if err := os.RemoveAll(filepath.Join(cleaned, subdir)); err != nil {
+				return fmt.Errorf("remove %s output: %w", subdir, err)
+			}
+		}
+	}
+	return nil
+}
+
+func archiveFuzzingLogDir(targetDir string) error {
+	fuzzingDir := filepath.Join(targetDir, "logs", "fuzzing")
+	if _, err := os.Stat(fuzzingDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat fuzzing logs: %w", err)
+	}
+	archiveRoot := filepath.Join(targetDir, "logs", "manual-library-config")
+	if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
+		return fmt.Errorf("create fuzzing log archive: %w", err)
+	}
+	stamp := time.Now().Format("20060102-150405")
+	archivePath := filepath.Join(archiveRoot, "fuzzing-"+stamp)
+	for suffix := 1; fileExists(archivePath); suffix++ {
+		archivePath = filepath.Join(archiveRoot, fmt.Sprintf("fuzzing-%s-%d", stamp, suffix))
+	}
+	if err := os.Rename(fuzzingDir, archivePath); err != nil {
+		return fmt.Errorf("archive fuzzing logs: %w", err)
+	}
+	return nil
 }
 
 func fileExists(path string) bool {

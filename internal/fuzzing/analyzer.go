@@ -424,7 +424,7 @@ func buildCrashAnalysisPrompt(req CrashAnalysisRequest) string {
 - 快照内 driver 源码通常在 driver/ 或 synthesized/ 下
 - 构建脚本通常在当前快照目录下
 
-Go 侧已经做过一次快速复现和栈去重，信息如下：
+Go 侧已经做过一次快速复现、栈去重，并把 ASan report 组装如下；默认以这些材料为准：
 - crash_file: %s
 - crash_type: %s
 - stack_signature: %s
@@ -432,16 +432,17 @@ Go 侧已经做过一次快速复现和栈去重，信息如下：
 %s
 
 	你的任务：
-	1. 自己在当前快照目录复现 crash，例如运行二进制加 -runs=1 和 unique crash 输入；必要时设置 LLVM_PROFILE_FILE=/dev/null。注意 ASan/LSan 符号化会显著拖慢运行，ASAN_OPTIONS=symbolize=1 是开启符号化，ASAN_OPTIONS=symbolize=0 是关闭符号化。复现策略：先用 ASAN_OPTIONS=symbolize=0 快速确认 crash/leak/timeout 是否能复现；如果能复现或需要栈信息，再切到 ASAN_OPTIONS=symbolize=1，并给 timeout 留出更长等待时间以获取符号化 top stack frames 和 SUMMARY。
+	1. 直接根据上方已提供的 asan_report、crash_type、stack_signature，以及目标库源码目录和快照内 driver 源码进行根因判断；不要把重新复现作为默认步骤。
 	2. 阅读快照内 fuzz driver 源码和目标库源码，确认 crash 是 fuzz_driver 使用 API/构造对象不当导致，还是库在合理输入/API 调用下的真实缺陷。
-3. 分类只能是：
+	3. 只有当 ASan report 和源码证据不足、必须补充验证时，才在当前快照目录复现 crash。复现时运行二进制加 -runs=1 和 unique crash 输入，设置 LLVM_PROFILE_FILE=/dev/null，并像 Go 侧 replay 一样先 unset DEBUGINFOD_URLS，避免 llvm-symbolizer 访问 debuginfod/debugd 导致卡顿。注意 ASan/LSan 符号化会显著拖慢运行：快速确认可用 ASAN_OPTIONS=symbolize=0；若需要符号化 top stack frames 和 SUMMARY，再切到 ASAN_OPTIONS=symbolize=1，并给 timeout 留出更长等待时间。
+4. 分类只能是：
    - fuzz_driver_bug：driver 违反 API 前置条件、构造了不可能由真实调用方产生的非法对象、生命周期/回调/内存归属明显错误，或 crash 发生在 driver 自身逻辑。
    - library_bug：输入通过目标库公开/预期 API 到达库代码，driver 没有明显违反前置条件，crash 根因在库代码。
    - unknown：证据不足，无法可靠判断。
-4. analysis 必须写成一段完整的简体中文分析，包含复现结果、关键证据、根因判断，以及为什么分类为 fuzz_driver_bug / library_bug / unknown。
-5. 如果 classification 为 fuzz_driver_bug，analysis 必须写清楚 fuzz driver 的错误位置、错误原因、为什么不是库漏洞，以及具体修改建议。
-6. 如果 classification 为 library_bug，analysis 必须写成库漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现方式和建议修复。
-7. 如果 classification 为 unknown，analysis 必须明确缺失哪些证据以及下一步需要什么验证。
+5. analysis 必须写成一段完整的简体中文分析，包含 Go 侧 ASan report 的复现信息、关键证据、根因判断，以及为什么分类为 fuzz_driver_bug / library_bug / unknown。
+6. 如果 classification 为 fuzz_driver_bug，analysis 必须写清楚 fuzz driver 的错误位置、错误原因、为什么不是库漏洞，以及具体修改建议。
+7. 如果 classification 为 library_bug，analysis 必须写成库漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现方式和建议修复。
+8. 如果 classification 为 unknown，analysis 必须明确缺失哪些证据以及下一步需要什么验证。
 
 	最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。字段只能为：
 	classification、analysis。
@@ -469,8 +470,10 @@ func buildTargetAnalysisPrompt(req TargetAnalysisRequest) string {
 3. 如果需要修改，选择一个明确的未覆盖分支作为目标，必须填写 target_branch：file、function、line、column、missing。column 直接使用 coverage 中该分支的 column。
 4. 修改 driver/ 下的当前子 driver 源码，使输入构造/API 调用顺序有机会覆盖该分支；不要新建合一 dispatcher，不要引用已经演进过的旧 synthesized driver。
 5. 运行构建脚本验证编译通过。
-6. 自己创建一个 proof seed 文件，并用编译后的 fuzz driver 运行它；然后用 llvm-profdata/llvm-cov 或等价命令确认 target_branch 的 missing direction 已覆盖。
-7. 只有在编译通过且 proof seed 覆盖目标分支时，才能返回 needs_update=true、compile_passed=true、branch_covered=true，并填写 proof_seed 路径。
+6. 自己创建一个 proof seed 文件。proof seed 必须放在当前工作目录 %s 内，可以放在当前目录或其子目录；不要放到 /tmp、源码目录、库构建目录或其他目录。
+7. 用编译后的 fuzz driver 运行 proof seed；然后用 llvm-profdata/llvm-cov 或等价命令确认 target_branch 的 missing direction 已覆盖。
+8. 只有在编译通过且 proof seed 覆盖目标分支时，才能返回 needs_update=true、compile_passed=true、branch_covered=true，并填写 proof_seed 路径。proof_seed 字段必须填写当前工作目录内实际存在的 seed 文件路径，建议使用相对路径，如 proof_seed.bin 或 proofs/proof_seed.bin。
+9. changed_files 字段只能列出本轮真正要推广的目标文件：driver/ 下的当前子 driver 源码文件，以及只有在确实修改过时才列出 build_cov_driver.sh。不要把 proof seed、profraw、profdata、日志、coverage 输出、临时文件或任何验证产物写入 changed_files。
 
 如果编译失败、无法构造 proof seed、无法证明目标分支覆盖，必须回滚自己的修改并返回 needs_update=false。
 
@@ -481,7 +484,7 @@ func buildTargetAnalysisPrompt(req TargetAnalysisRequest) string {
 %s
 
 最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。analysis 必须使用简体中文。`,
-		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath,
+		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath, req.WorkDir,
 		string(fuzzJSON), string(coverageJSON))
 }
 

@@ -588,29 +588,29 @@ func (m *CorpusMonitor) enqueueCrashReport(ctx context.Context, file string) {
 		SnapshotDir: m.snapshotDir,
 		Entry:       entry,
 		OnQueued: func() {
-			m.updateCrashReportState(file, "queued", "", "")
+			m.updateCrashReportState(file, "queued", "", "", "")
 			m.cfg.logf("[crash-analysis] queued unique crash %s in %s\n", file, m.snapshotDir)
 		},
 		OnStart: func() {
-			m.updateCrashReportState(file, "running", "", "")
+			m.updateCrashReportState(file, "running", "", "", "")
 			m.cfg.logf("[crash-analysis] analyzing unique crash %s in %s\n", file, m.snapshotDir)
 		},
 		OnComplete: func(report CrashLLMReport) {
 			m.cfg.logf("[crash-analysis] unique crash %s classified as %s\n", file, report.Classification)
-			m.updateCrashReportState(file, "completed", report.Classification, "")
+			m.updateCrashReportState(file, "completed", report.Classification, report.Analysis, "")
 		},
 		OnError: func(err error) {
 			m.cfg.logf("[crash-analysis] unique crash %s analysis failed: %v\n", file, err)
-			m.updateCrashReportState(file, "failed", "", err.Error())
+			m.updateCrashReportState(file, "failed", "", "", err.Error())
 		},
 		OnCancel: func() {
 			m.cfg.logf("[crash-analysis] unique crash %s removed from analysis queue\n", file)
-			m.updateCrashReportState(file, "pending", "", "")
+			m.updateCrashReportState(file, "pending", "", "", "")
 		},
 	})
 	if err != nil {
 		m.cfg.logf("[crash-analysis] unique crash %s queue failed: %v\n", file, err)
-		m.updateCrashReportState(file, "failed", "", err.Error())
+		m.updateCrashReportState(file, "failed", "", "", err.Error())
 		return
 	}
 	if !queued {
@@ -666,6 +666,7 @@ func AnalyzeUniqueCrashWithLLM(ctx context.Context, cfg FuzzConfig, snapshotDir 
 	entry.ReportError = ""
 	entry.ReportUpdatedAt = time.Now().Format(time.RFC3339)
 	entry.Classification = report.Classification
+	entry.Analysis = report.Analysis
 	out, _ := json.MarshalIndent(struct {
 		GeneratedAt     string             `json:"generated_at"`
 		SnapshotDir     string             `json:"snapshot_dir"`
@@ -710,7 +711,7 @@ func (m *CorpusMonitor) crashEntry(file string) (CrashAnalysisEntry, bool) {
 	return CrashAnalysisEntry{}, false
 }
 
-func (m *CorpusMonitor) updateCrashReportState(file, status, classification, errText string) {
+func (m *CorpusMonitor) updateCrashReportState(file, status, classification, analysis, errText string) {
 	m.crashMu.Lock()
 	defer m.crashMu.Unlock()
 	for i := range m.uniqueCrashList {
@@ -723,6 +724,9 @@ func (m *CorpusMonitor) updateCrashReportState(file, status, classification, err
 		m.uniqueCrashList[i].ReportError = errText
 		if classification != "" {
 			m.uniqueCrashList[i].Classification = classification
+		}
+		if analysis != "" {
+			m.uniqueCrashList[i].Analysis = analysis
 		}
 		break
 	}

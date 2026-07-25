@@ -280,6 +280,32 @@ function shortCrashText(value, limit = 180) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
+function crashAnalysisText(item = {}) {
+  const entry = crashEntryForFilter(item);
+  const envelope = item?.report || {};
+  const report = envelope?.report || envelope || {};
+  return String(
+    report.analysis ||
+    envelope.analysis ||
+    entry.analysis ||
+    entry.report_error ||
+    item?.error ||
+    ''
+  ).trim();
+}
+
+export function uniqueCrashAnalysisSummary(item, limit = 180) {
+  const text = crashAnalysisText(item);
+  if (text) return shortCrashText(text, limit);
+  const entry = crashEntryForFilter(item);
+  const status = entry.report_status || 'pending';
+  if (status === 'queued') return '已加入分析队列';
+  if (status === 'running') return 'LLM 正在分析';
+  if (status === 'failed') return entry.report_error || item?.error || '分析失败';
+  if (status === 'skipped') return entry.report_error || '该 crash 已跳过 LLM 分析';
+  return '等待 LLM 分析输出';
+}
+
 function uniqueCrashSearchText(item) {
   const entry = crashEntryForFilter(item);
   const badge = crashReportBadge(entry.report_status || 'pending', entry.classification || '');
@@ -297,7 +323,7 @@ function uniqueCrashSearchText(item) {
     entry.stack,
     entry.asan_report,
     entry.report_error,
-    entry.analysis,
+    crashAnalysisText(item),
     item?.error
   ].filter(Boolean).join('\n').toLowerCase();
 }
@@ -870,7 +896,7 @@ export function useAutofuzzController() {
     let coverageSourceRequest = 0;
     const driverSourceCache = new Map();
     const messages = reactive({ dashboard: '', list: '' });
-    const detailActionBusy = reactive({resume: false, cancel: false, trigger: false});
+    const detailActionBusy = reactive({resume: false, cancel: false, trigger: false, library: false});
     const crashQueueBusy = reactive(new Set());
     const crashFixMode = ref(false);
     const crashFixBusy = ref(false);
@@ -971,6 +997,17 @@ export function useAutofuzzController() {
         sourceData: null,
         sourceStatus: 'idle',
         sourceMessage: ''
+      },
+      libraryConfig: {
+        visible: false,
+        status: 'idle',
+        message: '',
+        path: '',
+        content: '',
+        originalContent: '',
+        available: false,
+        editable: false,
+        updatedAt: ''
       },
       codexEvents: [],
       codexEmpty: 'built / configured / fuzzing 阶段的 Codex JSONL 事件将在这里出现',
@@ -1114,6 +1151,14 @@ export function useAutofuzzController() {
       const analysisBusy = phase && phase !== 'fuzzing';
       return detail.status === 'running' && detail.fuzzStageStatus === 'running' && !analysisBusy && !detailActionBusy.trigger;
     });
+    const canOpenLibraryConfig = computed(() => Boolean(detail.id) && detail.taskKind !== 'crash_fix_child' && !detailActionBusy.library);
+    const canReprocessLibraryConfig = computed(() =>
+      Boolean(detail.id) &&
+      detail.libraryConfig.available &&
+      detail.libraryConfig.editable &&
+      detail.libraryConfig.status !== 'loading' &&
+      !detailActionBusy.library
+    );
     const sortedCrashQueue = computed(() =>
       [...(detail.crashQueue || [])].sort((a, b) => {
         if (a.status === 'running' && b.status !== 'running') return -1;
@@ -1210,6 +1255,7 @@ export function useAutofuzzController() {
         badge,
         stack: crashStackPreview(entry),
         asan: shortCrashText(entry.asan_report, 360),
+        analysis: uniqueCrashAnalysisSummary(item, 700),
         createdAt: uniqueCrashCreatedAt(item),
         lastAnalysisAt: uniqueCrashLastAnalysisAt(item),
         fixable: crashFixEligible(item)
@@ -1722,7 +1768,8 @@ export function useAutofuzzController() {
 
     function handleEscape(event) {
       if (event.key !== 'Escape') return;
-      if (detail.coverageDetail.visible) closeDriverCoverage();
+      if (detail.libraryConfig.visible) closeLibraryConfig();
+      else if (detail.coverageDetail.visible) closeDriverCoverage();
       else if (createModalOpen.value) closeCreateModal();
     }
 
@@ -1763,6 +1810,18 @@ export function useAutofuzzController() {
         setCoverage(coveragePatch && typeof coveragePatch === 'object' && Object.prototype.hasOwnProperty.call(coveragePatch, 'data') ? coveragePatch.data : coveragePatch);
       }
       if (Object.prototype.hasOwnProperty.call(patch, 'coverageDetail')) setCoverageDetail(patch.coverageDetail);
+      if (Object.prototype.hasOwnProperty.call(patch, 'libraryConfig')) {
+        const config = patch.libraryConfig || {};
+        detail.libraryConfig.visible = Boolean(config.visible);
+        detail.libraryConfig.status = config.status || 'idle';
+        detail.libraryConfig.message = config.message || '';
+        detail.libraryConfig.path = config.path || '';
+        detail.libraryConfig.content = config.content || '';
+        detail.libraryConfig.originalContent = config.originalContent || '';
+        detail.libraryConfig.available = Boolean(config.available);
+        detail.libraryConfig.editable = Boolean(config.editable);
+        detail.libraryConfig.updatedAt = config.updatedAt || '';
+      }
       if (Object.prototype.hasOwnProperty.call(patch, 'codexEvents')) detail.codexEvents = Array.isArray(patch.codexEvents) ? patch.codexEvents : [];
       if (Object.prototype.hasOwnProperty.call(patch, 'logs')) detail.logs = Array.isArray(patch.logs) ? patch.logs : [];
     }
@@ -1777,6 +1836,7 @@ export function useAutofuzzController() {
       detail.activeTab = tab || 'overview';
       detail.snapshotDiff.visible = false;
       detail.crashReport.visible = false;
+      detail.libraryConfig.visible = false;
       if (detail.coverageDetail.visible) {
         coverageSourceRequest++;
         detail.coverageDetail.visible = false;
@@ -1855,6 +1915,89 @@ export function useAutofuzzController() {
         if (detail.id === id) detail.message = `触发失败: ${error.message || '未知错误'}`;
       } finally {
         if (!submitted) detailActionBusy.trigger = false;
+      }
+    }
+
+    function resetLibraryConfig() {
+      detail.libraryConfig.visible = false;
+      detail.libraryConfig.status = 'idle';
+      detail.libraryConfig.message = '';
+      detail.libraryConfig.path = '';
+      detail.libraryConfig.content = '';
+      detail.libraryConfig.originalContent = '';
+      detail.libraryConfig.available = false;
+      detail.libraryConfig.editable = false;
+      detail.libraryConfig.updatedAt = '';
+    }
+
+    function setLibraryConfig(data = {}) {
+      detail.libraryConfig.available = Boolean(data.available);
+      detail.libraryConfig.path = data.path || '';
+      detail.libraryConfig.content = data.content || '';
+      detail.libraryConfig.originalContent = data.content || '';
+      detail.libraryConfig.editable = Boolean(data.editable);
+      detail.libraryConfig.updatedAt = data.updated_at || '';
+      detail.libraryConfig.message = data.message || '';
+      detail.libraryConfig.status = data.available ? 'ready' : 'empty';
+    }
+
+    function closeLibraryConfig() {
+      detail.libraryConfig.visible = false;
+    }
+
+    async function openLibraryConfig() {
+      const id = detail.id;
+      if (!id || !canOpenLibraryConfig.value) return;
+      detail.snapshotDiff.visible = false;
+      detail.crashReport.visible = false;
+      if (detail.coverageDetail.visible) {
+        coverageSourceRequest++;
+        detail.coverageDetail.visible = false;
+      }
+      detail.libraryConfig.visible = true;
+      detail.libraryConfig.status = 'loading';
+      detail.libraryConfig.message = '正在读取 library.toml...';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/library-config`);
+        const result = await responseJSON(response, 'library.toml 读取失败');
+        if (detail.id !== id) return;
+        setLibraryConfig(result);
+        await nextTick();
+        document.querySelector('.library-config-editor')?.focus();
+      } catch (error) {
+        if (detail.id !== id) return;
+        detail.libraryConfig.status = 'error';
+        detail.libraryConfig.message = error.message || 'library.toml 读取失败';
+      }
+    }
+
+    async function submitLibraryConfigReprocess() {
+      const id = detail.id;
+      if (!id || !canReprocessLibraryConfig.value) return;
+      const confirmed = window.confirm('保存 library.toml 并从 API 预处理重新运行后续流程？');
+      if (!confirmed) return;
+      detailActionBusy.library = true;
+      detail.libraryConfig.status = 'saving';
+      detail.libraryConfig.message = '正在保存并重新处理...';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/library-config/reprocess`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content: detail.libraryConfig.content})
+        });
+        await responseJSON(response, '重新处理失败');
+        if (detail.id !== id) return;
+        detail.libraryConfig.originalContent = detail.libraryConfig.content;
+        detail.libraryConfig.visible = false;
+        await loadTaskDetail(id);
+        if (detail.id === id) detail.message = '已保存 library.toml，正在重新运行 API 预处理及后续阶段。';
+        await refreshTaskData(false);
+      } catch (error) {
+        if (detail.id !== id) return;
+        detail.libraryConfig.status = 'error';
+        detail.libraryConfig.message = error.message || '重新处理失败';
+      } finally {
+        detailActionBusy.library = false;
       }
     }
 
@@ -2368,6 +2511,8 @@ export function useAutofuzzController() {
       coverageSourceRequest++;
       driverSourceCache.clear();
       detailActionBusy.trigger = false;
+      detailActionBusy.library = false;
+      resetLibraryConfig();
       cancelCrashFixSelection();
     }
 
@@ -2429,8 +2574,10 @@ export function useAutofuzzController() {
       detailActionBusy.resume = false;
       detailActionBusy.cancel = false;
       detailActionBusy.trigger = false;
+      detailActionBusy.library = false;
       crashQueueBusy.clear();
       driverSourceCache.clear();
+      resetLibraryConfig();
       setDetail({
         id,
         name: '任务详情',
@@ -2478,6 +2625,17 @@ export function useAutofuzzController() {
           sourceData: null,
           sourceStatus: 'idle',
           sourceMessage: ''
+        },
+        libraryConfig: {
+          visible: false,
+          status: 'idle',
+          message: '',
+          path: '',
+          content: '',
+          originalContent: '',
+          available: false,
+          editable: false,
+          updatedAt: ''
         },
         codexEvents: [],
         logs: []
@@ -3277,9 +3435,11 @@ export function useAutofuzzController() {
       uniqueCrashItems,
       uniqueCrashKey,
       uniqueCrashLastAnalysisAt,
+      uniqueCrashAnalysisSummary,
       uniqueCrashTriagePreview,
       uniqueCrashTotalCount,
       closeCreateModal,
+      closeLibraryConfig,
       closeUniqueCrashFilter,
       cancelCrashDeleteSelection,
       setCrashFixSelected,
@@ -3289,8 +3449,12 @@ export function useAutofuzzController() {
       cancelCrashFixSelection,
       canSelectCrashFix,
       canSelectUniqueCrash,
+      canOpenLibraryConfig,
+      canReprocessLibraryConfig,
       uniqueCrashSelectionDisabledReason,
       uniqueCrashSelectionMode,
+      openLibraryConfig,
+      submitLibraryConfigReprocess,
       toggleCrashDeleteMode,
       toggleCrashFixMode,
       toggleUniqueCrashFilter,

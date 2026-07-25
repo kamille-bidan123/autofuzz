@@ -354,8 +354,9 @@ func buildPrompt(request Request) string {
   document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL；不要包含空文件或只有空白字符的本地文档（如空的 *.txt/README），PromeFuzz RAG 无法为这类文档生成 embedding。
 - compile_commands_path 必须严格等于下方已校验的路径；
 - output_path 必须在目标工作区内；
-- header_paths 必须是编译器观察到的源码/构建头文件位置，而非 AST 不一致的已安装副本；
-- driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；
+- header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。只填写声明公开、外部可用、值得 fuzz 的 API 的头文件或最小公开头目录。优先列出具体 public header 文件；只有当目录下几乎全是公开 API 头时才填写目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径放入 header_paths。若源码头和 install/include 头内容一致，优先使用与 compile_commands/AST 对应的源码或构建树头；不要使用 AST 路径不一致的安装副本；
+- driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
+- driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围；可填聚合头或必要公共依赖头，优先使用绝对路径，不要放私有/internal 头；
 - consumer_case_paths 必须是包含真实 API 用法的目录；
 - api_ban_list_path 和 api_hints_path：不用时必须设为空字符串 ""（PromeFuzz 的约定，会跳过加载）；使用时必须指向一个已存在、内容为合法 JSON 的文件。绝不要创建空占位文件——空文件不是合法 JSON，会让 PromeFuzz 在 json.load 时崩溃。api_ban_list_path 必须是字符串数组（形如 ["source/header.h:42:6"]，表示被禁函数定位）；api_hints_path 必须是对象（函数名→提示字符串）。
 - 其余字段由你根据证据自行决定。

@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { reactive } from 'vue';
 import { autofuzzKey } from '../../appContext';
 import OverviewTab from './OverviewTab.vue';
@@ -8,7 +8,7 @@ describe('OverviewTab', () => {
   it('renders all six setup stages plus fuzz and LLM analysis', () => {
     const ui = reactive({
       linearStages: Array.from({length: 6}, (_, index) => ({
-        id: `stage-${index + 1}`,
+        id: index === 2 ? 'configured' : `stage-${index + 1}`,
         index: index + 1,
         name: `阶段 ${index + 1}`,
         owner: 'Go',
@@ -77,6 +77,8 @@ describe('OverviewTab', () => {
       flowRows: [],
       apiDriverTitle: driver => `d${driver.driver_id} / v${driver.seq}`,
       setDetailTab: () => {},
+      canOpenLibraryConfig: true,
+      openLibraryConfig: vi.fn(),
       openDriverCoverage: () => {},
       driverSchedule: {
         meta: '轮次 3 · 运行 1/3 · 等待 2 · 并发 1',
@@ -106,5 +108,6 @@ describe('OverviewTab', () => {
     expect(wrapper.find('.driver-schedule-tile.running').text()).toContain('d1');
     expect(wrapper.find('.driver-schedule-tile.next').text()).toContain('v2');
     expect(wrapper.find('.driver-schedule-tile.idle').text()).toContain('d3');
+    expect(wrapper.find('.stage-action-button').text()).toBe('查看配置');
   });
 });

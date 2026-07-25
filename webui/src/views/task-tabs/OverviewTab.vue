@@ -14,6 +14,13 @@ const ui = useAutofuzz();
               <div class="stage-top"><span class="stage-index">{{ stage.index }}</span><span class="spinner"></span></div>
               <div class="stage-name">{{ stage.name }}</div>
               <span class="stage-owner">{{ stage.owner }}</span>
+              <button
+                v-if="stage.id === 'configured'"
+                class="stage-action-button"
+                type="button"
+                :disabled="!ui.canOpenLibraryConfig"
+                @click.stop="ui.openLibraryConfig"
+              >查看配置</button>
             </div>
             <div class="flow-connector" aria-hidden="true"></div>
           </template>

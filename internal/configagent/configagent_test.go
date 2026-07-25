@@ -164,3 +164,28 @@ func TestValidateConfig(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
+
+func TestBuildPromptDescribesHeaderPathsAsAPIScope(t *testing.T) {
+	prompt := buildPrompt(Request{
+		Name:                "sample",
+		TargetDir:           t.TempDir(),
+		PromeFuzzConfigPath: "/tmp/promefuzz/config.toml",
+		CompileCommands:     "/tmp/sample/compile_commands.json",
+		StaticLibraries:     []string{"/tmp/sample/libsample.a"},
+	})
+
+	for _, want := range []string{
+		"header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表",
+		"优先列出具体 public header 文件",
+		"仅用于编译的 include 搜索路径放入 header_paths",
+		"编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args",
+		"driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "header_paths 必须是编译器观察到的源码/构建头文件位置") {
+		t.Fatalf("prompt still contains the old include-path-oriented header_paths instruction:\n%s", prompt)
+	}
+}

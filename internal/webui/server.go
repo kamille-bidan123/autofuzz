@@ -40,6 +40,8 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/runs/{id}/events", server.runEvents)
 	server.mux.HandleFunc("GET /api/runs/{id}/history", server.runHistory)
 	server.mux.HandleFunc("GET /api/runs/{id}/fuzz-flow", server.fuzzFlow)
+	server.mux.HandleFunc("GET /api/runs/{id}/library-config", server.libraryConfig)
+	server.mux.HandleFunc("POST /api/runs/{id}/library-config/reprocess", server.reprocessLibraryConfig)
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
@@ -264,6 +266,40 @@ func (s *Server) triggerFuzz(response http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{"status": "triggered"})
+}
+
+func (s *Server) libraryConfig(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.LibraryConfig(request.PathValue("id"))
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) reprocessLibraryConfig(response http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	var input LibraryConfigReprocessRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	snapshot, err := s.manager.ReprocessLibraryConfig(request.PathValue("id"), input.Content)
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusAccepted, snapshot)
 }
 
 func (s *Server) coverage(response http.ResponseWriter, request *http.Request) {
