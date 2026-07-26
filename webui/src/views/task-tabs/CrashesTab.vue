@@ -214,7 +214,7 @@ const ui = useAutofuzz();
             </div>
             <section class="crash-preview-section">
               <h4>分析结论</h4>
-              <pre>{{ ui.uniqueCrashTriagePreview.analysis }}</pre>
+              <div class="codex-markdown crash-analysis-markdown" v-html="ui.uniqueCrashTriagePreview.analysisHtml"></div>
             </section>
             <section class="crash-preview-section">
               <h4>栈签名</h4>

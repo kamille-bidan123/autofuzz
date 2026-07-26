@@ -117,7 +117,7 @@ const crashAnalysisSchema = `{
   "required":["classification","analysis"],
   "properties":{
     "classification":{"type":"string","enum":["fuzz_driver_bug","library_bug","unknown"]},
-    "analysis":{"type":"string","description":"必须使用简体中文说明复现结果、根因判断和证据；如果 classification 为 fuzz_driver_bug，必须写清楚 fuzz driver 的错误位置、错误原因以及具体修改建议"}
+    "analysis":{"type":"string","description":"必须使用简体中文 Markdown 文本说明复现结果、根因判断和证据；如果 classification 为 fuzz_driver_bug，必须写清楚 fuzz driver 的错误位置、错误原因以及具体修改建议；如果 classification 为 library_bug，必须包含“漏洞分析”“库代码现场”“复现程序”“修复建议”四个 Markdown 章节，且复现程序必须是单个 C 语言程序代码块"}
   }
 }`
 
@@ -371,6 +371,24 @@ func validateCrashLLMReport(resp CrashLLMReport) error {
 	if strings.TrimSpace(resp.Analysis) == "" {
 		return fmt.Errorf("analysis is empty")
 	}
+	if !strings.Contains(resp.Analysis, "#") {
+		return fmt.Errorf("analysis is not Markdown-formatted")
+	}
+	if resp.Classification == "library_bug" {
+		for _, section := range []string{
+			"## 漏洞分析",
+			"## 库代码现场",
+			"## 复现程序",
+			"## 修复建议",
+		} {
+			if !strings.Contains(resp.Analysis, section) {
+				return fmt.Errorf("library_bug analysis is missing required section %q", section)
+			}
+		}
+		if !strings.Contains(resp.Analysis, "```c") {
+			return fmt.Errorf("library_bug analysis is missing a C code block reproduction program")
+		}
+	}
 	return nil
 }
 
@@ -439,14 +457,19 @@ Go 侧已经做过一次快速复现、栈去重，并把 ASan report 组装如�
    - fuzz_driver_bug：driver 违反 API 前置条件、构造了不可能由真实调用方产生的非法对象、生命周期/回调/内存归属明显错误，或 crash 发生在 driver 自身逻辑。
    - library_bug：输入通过目标库公开/预期 API 到达库代码，driver 没有明显违反前置条件，crash 根因在库代码。
    - unknown：证据不足，无法可靠判断。
-5. analysis 必须写成一段完整的简体中文分析，包含 Go 侧 ASan report 的复现信息、关键证据、根因判断，以及为什么分类为 fuzz_driver_bug / library_bug / unknown。
-6. 如果 classification 为 fuzz_driver_bug，analysis 必须写清楚 fuzz driver 的错误位置、错误原因、为什么不是库漏洞，以及具体修改建议。
-7. 如果 classification 为 library_bug，analysis 必须写成库漏洞报告，包含影响组件、触发条件、根因、潜在安全影响、复现方式和建议修复。
-8. 如果 classification 为 unknown，analysis 必须明确缺失哪些证据以及下一步需要什么验证。
+5. analysis 必须是完整的简体中文 Markdown 文本，包含 Go 侧 ASan report 的复现信息、关键证据、根因判断，以及为什么分类为 fuzz_driver_bug / library_bug / unknown。
+6. 如果 classification 为 fuzz_driver_bug，analysis 必须用 Markdown 写清楚 fuzz driver 的错误位置、错误原因、为什么不是库漏洞，以及具体修改建议。
+7. 如果 classification 为 library_bug，analysis 必须写成 Markdown 形式的库漏洞报告，并且必须严格包含以下二级章节：
+   - ## 漏洞分析
+   - ## 库代码现场
+   - ## 复现程序
+   - ## 修复建议
+   其中“复现程序”章节必须给出一个单文件、可直接编译运行的 C 语言最小复现程序，并放在 c 代码块里（即三个反引号后跟字母 c 的 Markdown fenced code block）。
+8. 如果 classification 为 unknown，analysis 必须用 Markdown 明确缺失哪些证据以及下一步需要什么验证。
 
 	最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。字段只能为：
 	classification、analysis。
-	不要输出 crash_file、reproduced、confidence、crash_type、asan_report、root_cause、trigger_mechanism、affected_file、affected_function、affected_line、fuzz_driver_assessment、library_vulnerability_report、evidence、recommended_action、severity、impact、title 等额外字段。analysis 必须使用简体中文。`,
+	不要输出 crash_file、reproduced、confidence、crash_type、asan_report、root_cause、trigger_mechanism、affected_file、affected_function、affected_line、fuzz_driver_assessment、library_vulnerability_report、evidence、recommended_action、severity、impact、title 等额外字段。analysis 必须使用简体中文 Markdown。`,
 		req.SnapshotDir, req.SourceDir, req.BinaryPath, req.CrashPath, req.UniqueCrashPath,
 		req.CrashFile, req.CrashType, req.Stack, req.ASanReport)
 }

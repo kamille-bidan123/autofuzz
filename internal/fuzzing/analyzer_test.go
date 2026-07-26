@@ -51,6 +51,12 @@ func TestCrashAnalysisPromptRequiresCrashClassification(t *testing.T) {
 		`ASAN_OPTIONS=symbolize=1`,
 		`给 timeout 留出更长等待时间`,
 		`如果 classification 为 fuzz_driver_bug`,
+		`analysis 必须是完整的简体中文 Markdown 文本`,
+		`## 漏洞分析`,
+		`## 库代码现场`,
+		`## 复现程序`,
+		`## 修复建议`,
+		`三个反引号后跟字母 c`,
 		`具体修改建议`,
 		`最后回复必须是且仅是一个 JSON 对象`,
 		`classification、analysis`,
@@ -84,6 +90,9 @@ func TestCrashAnalysisPromptRequiresCrashClassification(t *testing.T) {
 	if !strings.Contains(crashAnalysisSchema, `"classification"`) || !strings.Contains(crashAnalysisSchema, `"library_bug"`) || !strings.Contains(crashAnalysisSchema, `"analysis"`) {
 		t.Fatal("crash schema does not require a classification enum")
 	}
+	if !strings.Contains(crashAnalysisSchema, `Markdown`) || !strings.Contains(crashAnalysisSchema, `漏洞分析`) {
+		t.Fatal("crash schema does not require Markdown library bug sections")
+	}
 }
 
 func TestValidateCrashAnalysisPayloadRejectsPartialResponse(t *testing.T) {
@@ -98,10 +107,10 @@ func TestValidateCrashAnalysisPayloadRejectsPartialResponse(t *testing.T) {
 }
 
 func TestValidateCrashAnalysisPayloadAcceptsCompleteResponse(t *testing.T) {
-	payload := []byte(`{
-		"classification":"library_bug",
-		"analysis":"这是库缺陷。"
-	}`)
+	payload := []byte("{\n" +
+		"  \"classification\":\"library_bug\",\n" +
+		"  \"analysis\":\"## 漏洞分析\\n这是库缺陷。\\n\\n## 库代码现场\\n问题出在边界检查缺失。\\n\\n## 复现程序\\n```c\\nint main(void) { return 0; }\\n```\\n\\n## 修复建议\\n补充边界检查。\"\n" +
+		"}")
 
 	if err := validateCrashAnalysisPayload(payload); err != nil {
 		t.Fatalf("validateCrashAnalysisPayload(): %v", err)
@@ -112,6 +121,28 @@ func TestValidateCrashAnalysisPayloadAcceptsCompleteResponse(t *testing.T) {
 	}
 	if err := validateCrashLLMReport(report); err != nil {
 		t.Fatalf("validateCrashLLMReport(): %v", err)
+	}
+}
+
+func TestValidateCrashLLMReportRejectsNonMarkdownAnalysis(t *testing.T) {
+	report := CrashLLMReport{
+		Classification: "unknown",
+		Analysis:       "这是纯文本，没有 markdown 标题。",
+	}
+	err := validateCrashLLMReport(report)
+	if err == nil || !strings.Contains(err.Error(), "Markdown") {
+		t.Fatalf("validateCrashLLMReport() error = %v, want Markdown rejection", err)
+	}
+}
+
+func TestValidateCrashLLMReportRejectsLibraryBugMissingSections(t *testing.T) {
+	report := CrashLLMReport{
+		Classification: "library_bug",
+		Analysis:       "## 漏洞分析\n有漏洞。\n\n## 修复建议\n修复它。",
+	}
+	err := validateCrashLLMReport(report)
+	if err == nil || !strings.Contains(err.Error(), "## 库代码现场") {
+		t.Fatalf("validateCrashLLMReport() error = %v, want missing section rejection", err)
 	}
 }
 

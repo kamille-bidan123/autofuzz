@@ -28,6 +28,7 @@ const ui = useAutofuzz();
             <section v-for="section in card.sections" :key="section.title" class="crash-report-section">
               <h4>{{ section.title }}</h4>
               <ul v-if="section.items"><li v-for="(item, index) in section.items" :key="index">{{ item }}</li></ul>
+              <div v-else-if="section.html" class="codex-markdown crash-analysis-markdown" v-html="section.html"></div>
               <p v-else>{{ section.text }}</p>
             </section>
           </div>

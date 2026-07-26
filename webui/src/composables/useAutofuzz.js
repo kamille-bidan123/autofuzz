@@ -446,16 +446,112 @@ function escapeHtmlText(value) {
 }
 
 function markdownToHtml(text) {
+  const source = String(text ?? '').replace(/\r\n/g, '\n');
+  if (!source.trim()) return '<p>(empty message)</p>';
+
+  const lines = source.split('\n');
+  const html = [];
+  let paragraph = [];
+  let listType = '';
+  let listItems = [];
+  let inCodeBlock = false;
+  let codeFence = '';
+  let codeLines = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${renderInlineMarkdown(paragraph.join('<br>'))}</p>`);
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (!listItems.length) return;
+    html.push(`<${listType}>${listItems.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</${listType}>`);
+    listType = '';
+    listItems = [];
+  };
+
+  const flushCodeBlock = () => {
+    if (!inCodeBlock) return;
+    const classAttr = codeFence ? ` class="language-${escapeHtmlText(codeFence)}"` : '';
+    html.push(`<pre><code${classAttr}>${escapeHtmlText(codeLines.join('\n'))}</code></pre>`);
+    inCodeBlock = false;
+    codeFence = '';
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
+    if (fenceMatch) {
+      flushParagraph();
+      flushList();
+      if (inCodeBlock) flushCodeBlock();
+      else {
+        inCodeBlock = true;
+        codeFence = fenceMatch[1] || '';
+      }
+      continue;
+    }
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = headingMatch[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+    const bulletMatch = trimmed.match(/^([-*])\s+(.*)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      if (listType && listType !== 'ul') flushList();
+      listType = 'ul';
+      listItems.push(bulletMatch[2]);
+      continue;
+    }
+    const orderedMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listType && listType !== 'ol') flushList();
+      listType = 'ol';
+      listItems.push(orderedMatch[2]);
+      continue;
+    }
+    flushList();
+    paragraph.push(escapeHtmlText(trimmed));
+  }
+
+  flushParagraph();
+  flushList();
+  flushCodeBlock();
+  return html.join('');
+}
+
+function renderInlineMarkdown(text) {
   return String(text ?? '')
-    .split(/\r?\n/)
-    .map(line => escapeHtmlText(line))
-    .join('<br>') || '(empty message)';
+    .replace(/`([^`]+)`/g, (_, code) => `<code>${escapeHtmlText(code)}</code>`)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, href) => `<a href="${escapeHtmlText(href)}" target="_blank" rel="noreferrer">${escapeHtmlText(label)}</a>`);
 }
 
 function reportSection(title, text) {
   const value = codexString(text);
   if (!value) return null;
   return {title, text: value};
+}
+
+function markdownReportSection(title, text) {
+  const value = codexString(text);
+  if (!value) return null;
+  return {title, text: value, html: markdownToHtml(value)};
 }
 
 function crashReportAnalyzeLabel(status) {
@@ -494,7 +590,7 @@ function buildCrashReportCard(item, focusFile) {
   const asanReport = report.asan_report || entry.asan_report || envelope.asan_report || envelope.stack_signature || '';
   const sections = [
     reportSection('ASan 报告', asanReport),
-    reportSection('分析结论', report.analysis || entry.report_error || item?.error || '等待 LLM 分析输出'),
+    markdownReportSection('分析结论', report.analysis || entry.report_error || item?.error || '等待 LLM 分析输出'),
     reportSection('错误', entry.report_error || item?.error)
   ].filter(Boolean);
   if (!sections.length) sections.push({title: '状态', text: '暂无报告正文'});
@@ -1256,6 +1352,7 @@ export function useAutofuzzController() {
         stack: crashStackPreview(entry),
         asan: shortCrashText(entry.asan_report, 360),
         analysis: uniqueCrashAnalysisSummary(item, 700),
+        analysisHtml: markdownToHtml(uniqueCrashAnalysisSummary(item, 700)),
         createdAt: uniqueCrashCreatedAt(item),
         lastAnalysisAt: uniqueCrashLastAnalysisAt(item),
         fixable: crashFixEligible(item)

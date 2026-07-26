@@ -512,6 +512,8 @@
     .crash-preview-section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
     .crash-preview-section h4 { margin: 0 0 7px; color: var(--muted); font-size: 11px; font-weight: 900; }
     .crash-preview-section pre { max-height: 180px; margin: 0; padding: 9px 10px; overflow: auto; border-radius: var(--radius); background: #0f172a; color: #dbe5f5; font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .crash-analysis-markdown { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+    .crash-analysis-markdown pre { max-height: 220px; padding: 9px 10px; overflow: auto; border-radius: var(--radius); background: #0f172a; color: #dbe5f5; }
     .crash-preview-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .crash-queue-list { display: grid; gap: 10px; padding: 12px; max-height: 260px; overflow: auto; background: var(--surface); }
     .crash-queue-row { display: grid; grid-template-columns: 72px 62px minmax(220px,1fr) 96px 126px 90px; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: white; font-size: 11px; }
