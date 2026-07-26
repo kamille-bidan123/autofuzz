@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -52,6 +53,8 @@ type Client struct {
 	Runner    runner.Runner
 	EventSink func(json.RawMessage)
 }
+
+var documentURLHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 func (c Client) Generate(ctx context.Context, request Request) (Report, Result, error) {
 	if c.Command == "" {
@@ -190,16 +193,8 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 			return Result{}, fmt.Errorf("header path does not exist: %s", path)
 		}
 	}
-	foundLibrary := false
-	for _, arg := range cfg.DriverBuildArgs {
-		for _, library := range request.StaticLibraries {
-			if samePath(arg, library) {
-				foundLibrary = true
-			}
-		}
-	}
-	if !foundLibrary {
-		return Result{}, fmt.Errorf("driver_build_args does not contain a validated static library")
+	if err := validateDriverBuildArgs(cfg.DriverBuildArgs, request.StaticLibraries, request.InstallDir); err != nil {
+		return Result{}, err
 	}
 	for _, path := range cfg.ConsumerCasePaths {
 		info, err := os.Stat(path)
@@ -246,7 +241,7 @@ func validateJSONFile(path string, target interface{}) error {
 // empty local documents that PromeFuzz's RAG loader cannot embed.
 func validateDocPath(p string, excludePaths []string) error {
 	if u, err := url.Parse(p); err == nil && u.Scheme != "" && u.Host != "" {
-		return nil
+		return validateReachableDocumentURL(p)
 	}
 	info, err := os.Stat(p)
 	if err != nil {
@@ -272,6 +267,36 @@ func validateDocPath(p string, excludePaths []string) error {
 	})
 }
 
+func validateReachableDocumentURL(rawURL string) error {
+	status, err := documentURLStatus(http.MethodHead, rawURL)
+	if err != nil {
+		return fmt.Errorf("unreachable URL %s: %w", rawURL, err)
+	}
+	if status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+		status, err = documentURLStatus(http.MethodGet, rawURL)
+		if err != nil {
+			return fmt.Errorf("unreachable URL %s: %w", rawURL, err)
+		}
+	}
+	if status < 200 || status >= 400 {
+		return fmt.Errorf("URL %s returned HTTP %d", rawURL, status)
+	}
+	return nil
+}
+
+func documentURLStatus(method, rawURL string) (int, error) {
+	req, err := http.NewRequestWithContext(context.Background(), method, rawURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := documentURLHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 func validateNonEmptyDocumentFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -279,6 +304,45 @@ func validateNonEmptyDocumentFile(path string) error {
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return fmt.Errorf("empty document file %s", path)
+	}
+	return nil
+}
+
+func validateDriverBuildArgs(args, validatedLibraries []string, installDir string) error {
+	foundLibrary := false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		for _, library := range validatedLibraries {
+			if samePath(arg, library) {
+				foundLibrary = true
+			}
+		}
+		if strings.HasSuffix(arg, ".a") {
+			if !within(installDir, arg) {
+				return fmt.Errorf("driver_build_args static library is outside install_dir: %s", arg)
+			}
+			continue
+		}
+		if arg == "-I" {
+			if index+1 >= len(args) {
+				return fmt.Errorf("driver_build_args has -I without a following path")
+			}
+			index++
+			includePath := args[index]
+			if !within(installDir, includePath) {
+				return fmt.Errorf("driver_build_args include path is outside install_dir: %s", includePath)
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-I") && len(arg) > 2 {
+			includePath := strings.TrimPrefix(arg, "-I")
+			if !within(installDir, includePath) {
+				return fmt.Errorf("driver_build_args include path is outside install_dir: %s", includePath)
+			}
+		}
+	}
+	if !foundLibrary {
+		return fmt.Errorf("driver_build_args does not contain a validated static library")
 	}
 	return nil
 }
@@ -353,15 +417,19 @@ func buildPrompt(request Request) string {
      - 否则（连接失败 / 非 200 / 响应格式错误）：回退 document_paths=[] 且 document_has_api_usage=false，并在 analysis 里简述失败原因。
   document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL；不要包含空文件或只有空白字符的本地文档（如空的 *.txt/README），PromeFuzz RAG 无法为这类文档生成 embedding。
 - compile_commands_path 必须严格等于下方已校验的路径；
+- 必须使用下方给出的 install_dir 作为 header_paths 的选择范围来源；先检查该目录内已安装的公开头，再决定最小必要的 header_paths；
 - output_path 必须在目标工作区内；
-- header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。只填写声明公开、外部可用、值得 fuzz 的 API 的头文件或最小公开头目录。优先列出具体 public header 文件；只有当目录下几乎全是公开 API 头时才填写目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径放入 header_paths。若源码头和 install/include 头内容一致，优先使用与 compile_commands/AST 对应的源码或构建树头；不要使用 AST 路径不一致的安装副本；
-- driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
+- header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。必须从 install_dir 下已安装的公开头文件或公开头目录中选择，只填写声明公开、外部可用、值得 fuzz 的 API。优先列出 install_dir 下的具体 public header 文件；只有当某个 install_dir 子目录下几乎全是公开 API 头时才填写该目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径放入 header_paths；
+- driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内。编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
 - driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围；可填聚合头或必要公共依赖头，优先使用绝对路径，不要放私有/internal 头；
 - consumer_case_paths 必须是包含真实 API 用法的目录；
 - api_ban_list_path 和 api_hints_path：不用时必须设为空字符串 ""（PromeFuzz 的约定，会跳过加载）；使用时必须指向一个已存在、内容为合法 JSON 的文件。绝不要创建空占位文件——空文件不是合法 JSON，会让 PromeFuzz 在 json.load 时崩溃。api_ban_list_path 必须是字符串数组（形如 ["source/header.h:42:6"]，表示被禁函数定位）；api_hints_path 必须是对象（函数名→提示字符串）。
 - 其余字段由你根据证据自行决定。
 
 已校验产物：
+%s
+
+header_paths 必须从这个 install_dir 中挑选公开头：
 %s
 
 之前的文件（若有）：
@@ -372,7 +440,7 @@ func buildPrompt(request Request) string {
 
 写完文件后，自查它，并报告其相对目标工作区的路径。
 
-最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么，须包含 embed 测试结果与 document_paths / document_has_api_usage 的决定依据）、library_config_path（字符串，所写 library.toml 相对目标工作区的路径）、evidence（字符串数组，关键证据/校验结果）。`, request.Name, configPath, request.Name, request.PromeFuzzConfigPath, string(artifacts), previous, request.FailureSummary)
+最后，你的最终回复必须是且仅是一个 JSON 对象（不要在 JSON 之外输出任何文字、不要用 markdown 代码块包裹），字段为：analysis_summary（字符串，概述你做了什么，须包含 embed 测试结果与 document_paths / document_has_api_usage 的决定依据）、library_config_path（字符串，所写 library.toml 相对目标工作区的路径）、evidence（字符串数组，关键证据/校验结果）。`, request.Name, configPath, request.Name, request.PromeFuzzConfigPath, string(artifacts), request.InstallDir, previous, request.FailureSummary)
 }
 
 const responseSchema = `{
