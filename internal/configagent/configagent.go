@@ -170,17 +170,32 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 	if !samePath(cfg.CompileCommandsPath, request.CompileCommands) {
 		return Result{}, fmt.Errorf("library.toml does not use the validated compile_commands.json")
 	}
+	rewriteConfig := false
 	if cfg.DocumentHasAPIUsage {
-		if len(cfg.DocumentPaths) == 0 {
-			return Result{}, fmt.Errorf("library.toml has document_has_api_usage=true but document_paths is empty")
-		}
+		filtered := cfg.DocumentPaths[:0]
 		for _, p := range cfg.DocumentPaths {
 			if err := validateDocPath(p, cfg.ExcludePaths); err != nil {
+				if isDocumentURL(p) {
+					rewriteConfig = true
+					continue
+				}
 				return Result{}, fmt.Errorf("document_paths entry is invalid: %w", err)
 			}
+			filtered = append(filtered, p)
+		}
+		cfg.DocumentPaths = filtered
+		if len(cfg.DocumentPaths) == 0 {
+			cfg.DocumentHasAPIUsage = false
+			rewriteConfig = true
 		}
 	} else if len(cfg.DocumentPaths) > 0 {
 		return Result{}, fmt.Errorf("library.toml has document_has_api_usage=false but document_paths is non-empty")
+	}
+	if rewriteConfig {
+		tables[request.Name] = cfg
+		if err := writeLibraryConfig(absolute, tables); err != nil {
+			return Result{}, fmt.Errorf("rewrite library.toml after pruning invalid document URLs: %w", err)
+		}
 	}
 	if !within(request.TargetDir, cfg.OutputPath) {
 		return Result{}, fmt.Errorf("library.toml output_path is invalid")
@@ -240,7 +255,7 @@ func validateJSONFile(path string, target interface{}) error {
 // validateDocPath accepts a URL or an existing local file/directory, and rejects
 // empty local documents that PromeFuzz's RAG loader cannot embed.
 func validateDocPath(p string, excludePaths []string) error {
-	if u, err := url.Parse(p); err == nil && u.Scheme != "" && u.Host != "" {
+	if isDocumentURL(p) {
 		return validateReachableDocumentURL(p)
 	}
 	info, err := os.Stat(p)
@@ -265,6 +280,11 @@ func validateDocPath(p string, excludePaths []string) error {
 		}
 		return nil
 	})
+}
+
+func isDocumentURL(p string) bool {
+	u, err := url.Parse(p)
+	return err == nil && u.Scheme != "" && u.Host != ""
 }
 
 func validateReachableDocumentURL(rawURL string) error {
@@ -381,6 +401,14 @@ func samePath(left, right string) bool {
 	a, errA := filepath.Abs(left)
 	b, errB := filepath.Abs(right)
 	return errA == nil && errB == nil && a == b
+}
+
+func writeLibraryConfig(path string, tables map[string]libraryConfigTable) error {
+	data, err := toml.Marshal(tables)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 func within(root, path string) bool {

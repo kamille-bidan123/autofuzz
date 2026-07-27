@@ -1,6 +1,7 @@
 package configagent
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -128,7 +129,7 @@ func TestValidateConfigAcceptsReachableDocumentURL(t *testing.T) {
 	}
 }
 
-func TestValidateConfigRejects404DocumentURL(t *testing.T) {
+func TestValidateConfigPrunes404DocumentURL(t *testing.T) {
 	previousClient := documentURLHTTPClient
 	documentURLHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -162,9 +163,141 @@ func TestValidateConfigRejects404DocumentURL(t *testing.T) {
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}})
-	if err == nil || !strings.Contains(err.Error(), "returned HTTP 404") {
-		t.Fatalf("expected 404 document URL rejection, got: %v", err)
+
+	if _, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}}); err != nil {
+		t.Fatalf("expected 404 document URL to be pruned, got: %v", err)
+	}
+
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("https://docs.example.test/missing")) {
+		t.Fatalf("expected 404 URL to be removed from config, got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("document_has_api_usage = false")) {
+		t.Fatalf("expected document usage to be disabled after pruning the last URL, got:\n%s", data)
+	}
+}
+
+func TestValidateConfigPrunesUnreachableDocumentURL(t *testing.T) {
+	previousClient := documentURLHTTPClient
+	documentURLHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "docs.example.test":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Request:    req,
+			}, nil
+		case "missing.example.test":
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Request:    req,
+			}, nil
+		default:
+			return nil, io.EOF
+		}
+	})}
+	defer func() { documentURLHTTPClient = previousClient }()
+
+	root := t.TempDir()
+	include := filepath.Join(root, "source", "include")
+	install := filepath.Join(root, "install")
+	localDoc := filepath.Join(root, "README.md")
+	if err := os.MkdirAll(include, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(install, "libsample.a")
+	compile := filepath.Join(root, "compile_commands.json")
+	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localDoc, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "library.toml")
+	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = [\"https://docs.example.test/reference\", \"https://missing.example.test/missing\", \"" + localDoc + "\"]\ndocument_has_api_usage = true\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
+	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}}); err != nil {
+		t.Fatalf("expected unreachable document URL to be pruned, got: %v", err)
+	}
+
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("https://missing.example.test/missing")) {
+		t.Fatalf("expected unreachable URL to be removed from config, got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("https://docs.example.test/reference")) || !bytes.Contains(data, []byte(localDoc)) {
+		t.Fatalf("expected remaining document paths to stay in config, got:\n%s", data)
+	}
+}
+
+func TestValidateConfigDisablesDocumentUsageWhenAllURLsArePruned(t *testing.T) {
+	previousClient := documentURLHTTPClient
+	documentURLHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})}
+	defer func() { documentURLHTTPClient = previousClient }()
+
+	root := t.TempDir()
+	include := filepath.Join(root, "source", "include")
+	install := filepath.Join(root, "install")
+	if err := os.MkdirAll(include, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(install, "libsample.a")
+	compile := filepath.Join(root, "compile_commands.json")
+	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "library.toml")
+	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = [\"https://missing.example.test/missing\"]\ndocument_has_api_usage = true\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
+	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}}); err != nil {
+		t.Fatalf("expected all unreachable document URLs to be pruned, got: %v", err)
+	}
+
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("https://missing.example.test/missing")) {
+		t.Fatalf("expected unreachable URL to be removed from config, got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("document_paths = []")) {
+		t.Fatalf("expected document_paths to be emptied, got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("document_has_api_usage = false")) {
+		t.Fatalf("expected document_has_api_usage to be disabled, got:\n%s", data)
 	}
 }
 
