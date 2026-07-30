@@ -205,7 +205,7 @@ Autofuzz 默认执行浅克隆，不递归下载 submodule，并在状态文件�
 
 Go 不再生成或执行结构化 Plan，也没有命令白名单和固定构建兜底。Go 只验收 Codex 报告的路径确实位于目标 workspace、`compile_commands.json` 含 ASan，且静态库真实存在。
 
-构建完成后，第二个 workspace-write Codex Agent直接创建 `library.toml`。它自主选择公共头文件、consumer、exclude/source 路径、静态库和链接参数，并可编译运行 consumer 验证配置。Go 只验收必需字段和已验证产物引用；若 PromeFuzz 提取到 0 API，会把错误交回 Codex 修复 TOML 后再试。
+构建完成后，第二个 workspace-write Codex Agent直接创建 `library.toml`。它自主选择公共头文件、consumer、exclude/source 路径、静态库和链接参数，并可编译运行 consumer 验证配置。Go 会额外验收 `header_paths` 必须来自 `compile_commands.json` 可观测到的源码/构建头，并且每个头都能与 `install_dir` 下同名且内容一致的公开安装头对应；若 PromeFuzz 提取到 0 API，会把错误交回 Codex 修复 TOML 后再试。
 
 指定 Codex 模型：
 

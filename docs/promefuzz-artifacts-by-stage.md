@@ -46,7 +46,7 @@ library.toml + compile_commands.json
 
 这一步没有复杂中间产物，但会决定后面所有结果的正确性。配置里最关键的是：
 
-- `header_paths`：哪些头文件代表公开 API
+- `header_paths`：哪些编译/AST 侧头文件代表公开 API（且必须能与 install 头一一对应）
 - `source_paths`：哪些源码属于库本体
 - `consumer_case_paths`：有没有真实调用样例
 - `driver_build_args`：driver 编译时怎么链接

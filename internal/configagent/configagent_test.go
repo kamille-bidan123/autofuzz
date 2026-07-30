@@ -10,24 +10,53 @@ import (
 	"testing"
 )
 
-func TestValidateConfigToleratesTrailingCommas(t *testing.T) {
-	root := t.TempDir()
+func writeSampleCompileCommands(t *testing.T, root, includeDir string) string {
+	t.Helper()
+	sourceDir := filepath.Join(root, "source", "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceFile := filepath.Join(sourceDir, "sample.c")
+	if err := os.WriteFile(sourceFile, []byte("#include \"sample.h\"\nint sample(void) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compile := filepath.Join(root, "compile_commands.json")
+	content := `[{"directory":"` + root + `","file":"` + sourceFile + `","arguments":["clang","-I","` + includeDir + `","-c","` + sourceFile + `"]}]`
+	if err := os.WriteFile(compile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return compile
+}
+
+func writeMatchingHeaders(t *testing.T, root string) (string, string) {
+	t.Helper()
 	include := filepath.Join(root, "source", "include")
 	install := filepath.Join(root, "install")
+	installInclude := filepath.Join(install, "include")
 	if err := os.MkdirAll(include, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
+	if err := os.MkdirAll(installInclude, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	headerContent := []byte("#ifndef SAMPLE_H\n#define SAMPLE_H\nint sample(void);\n#endif\n")
+	if err := os.WriteFile(filepath.Join(include, "sample.h"), headerContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installInclude, "sample.h"), headerContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return include, install
+}
+
+func TestValidateConfigToleratesTrailingCommas(t *testing.T) {
+	root := t.TempDir()
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	// Trailing commas after every array's last element — Codex emits these
 	// regularly. A real TOML parser accepts them; the old JSON-based hack did not.
@@ -58,22 +87,12 @@ func TestValidateConfigRejectsInvalidTOML(t *testing.T) {
 
 func TestValidateConfigRejectsEmptyDocumentFiles(t *testing.T) {
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	emptyDoc := filepath.Join(root, "source", "pending_code_changes.txt")
 	if err := os.WriteFile(emptyDoc, []byte("\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -102,22 +121,12 @@ func TestValidateConfigAcceptsReachableDocumentURL(t *testing.T) {
 	defer func() { documentURLHTTPClient = previousClient }()
 
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = [\"https://docs.example.test/reference\"]\ndocument_has_api_usage = true\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
@@ -142,22 +151,12 @@ func TestValidateConfigPrunes404DocumentURL(t *testing.T) {
 	defer func() { documentURLHTTPClient = previousClient }()
 
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = [\"https://docs.example.test/missing\"]\ndocument_has_api_usage = true\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
@@ -303,22 +302,12 @@ func TestValidateConfigDisablesDocumentUsageWhenAllURLsArePruned(t *testing.T) {
 
 func TestValidateConfigRejectsDriverBuildArgsLibraryOutsideInstallDir(t *testing.T) {
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(root, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = []\ndocument_has_api_usage = false\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
@@ -332,23 +321,16 @@ func TestValidateConfigRejectsDriverBuildArgsLibraryOutsideInstallDir(t *testing
 
 func TestValidateConfigRejectsDriverBuildArgsIncludeOutsideInstallDir(t *testing.T) {
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
+	include, install := writeMatchingHeaders(t, root)
 	installInclude := filepath.Join(install, "include")
 	installLibrary := filepath.Join(install, "libsample.a")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(installInclude, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(installLibrary, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = []\ndocument_has_api_usage = false\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + installLibrary + "\", \"-I\", \"" + include + "\"]\nconsumer_case_paths = []\n"
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
@@ -368,22 +350,12 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestValidateConfigBanListPath(t *testing.T) {
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	emptyBan := filepath.Join(root, "ban_empty.json")
 	if err := os.WriteFile(emptyBan, []byte(""), 0o644); err != nil {
 		t.Fatal(err)
@@ -431,22 +403,12 @@ func TestValidateConfigBanListPath(t *testing.T) {
 
 func TestValidateConfig(t *testing.T) {
 	root := t.TempDir()
-	include := filepath.Join(root, "source", "include")
-	install := filepath.Join(root, "install")
-	if err := os.MkdirAll(include, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(install, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	include, install := writeMatchingHeaders(t, root)
 	library := filepath.Join(install, "libsample.a")
-	compile := filepath.Join(root, "compile_commands.json")
 	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(compile, []byte("[]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	compile := writeSampleCompileCommands(t, root, include)
 	config := filepath.Join(root, "library.toml")
 	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = []\ndocument_has_api_usage = false\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + include + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\nconsumer_build_args = []\nsource_paths = []\nexclude_paths = []\ndriver_headers = []\napi_hints_path = \"\"\napi_ban_list_path = \"\"\n"
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
@@ -472,27 +434,81 @@ func TestBuildPromptDescribesHeaderPathsAsAPIScope(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"必须使用下方给出的 install_dir 作为 header_paths 的选择范围来源",
 		"header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表",
-		"必须从 install_dir 下已安装的公开头文件或公开头目录中选择",
-		"优先列出 install_dir 下的具体 public header 文件",
+		"必须先从 compile_commands.json 提取真实编译上下文",
+		"最终在 header_paths 中填写这份编译/AST 侧路径",
+		"每个头文件（若填目录则目录中每个头）都必须在 install_dir 下找到一个唯一对应的公开安装头",
+		"优先填写最小必要的具体 public header 文件",
 		"其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内",
-		"仅用于编译的 include 搜索路径放入 header_paths",
 		"编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args",
 		"driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围",
-		"header_paths 必须从这个 install_dir 中挑选公开头：\n/tmp/sample/install",
+		"header_paths 中每个编译/AST 侧头都必须在这个 install_dir 中找到唯一的同名同内容公开头对应物：\n/tmp/sample/install",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
 	}
 	for _, banned := range []string{
-		"header_paths 必须是编译器观察到的源码/构建头文件位置",
-		"优先使用与 compile_commands/AST 对应的源码或构建树头",
-		"不要使用 AST 路径不一致的安装副本",
+		"必须使用下方给出的 install_dir 作为 header_paths 的选择范围来源",
+		"必须从 install_dir 下已安装的公开头文件或公开头目录中选择",
+		"header_paths 必须从这个 install_dir 中挑选公开头",
 	} {
 		if strings.Contains(prompt, banned) {
 			t.Fatalf("prompt still contains old header_paths guidance %q:\n%s", banned, prompt)
 		}
+	}
+}
+
+func TestValidateConfigRejectsHeaderOutsideCompileCommandsObservation(t *testing.T) {
+	root := t.TempDir()
+	include, install := writeMatchingHeaders(t, root)
+	other := filepath.Join(root, "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherHeader := filepath.Join(other, "other.h")
+	installOther := filepath.Join(install, "include", "other.h")
+	content := []byte("#ifndef OTHER_H\n#define OTHER_H\nint other(void);\n#endif\n")
+	if err := os.WriteFile(otherHeader, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installOther, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(install, "libsample.a")
+	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compile := writeSampleCompileCommands(t, root, include)
+	config := filepath.Join(root, "library.toml")
+	contentTOML := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = []\ndocument_has_api_usage = false\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + otherHeader + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
+	if err := os.WriteFile(config, []byte(contentTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}})
+	if err == nil || !strings.Contains(err.Error(), "not observable from compile_commands.json") {
+		t.Fatalf("expected compile_commands observability rejection, got: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsHeaderWithoutMatchingInstallContent(t *testing.T) {
+	root := t.TempDir()
+	include, install := writeMatchingHeaders(t, root)
+	if err := os.WriteFile(filepath.Join(install, "include", "sample.h"), []byte("#define DIFFERENT 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(install, "libsample.a")
+	if err := os.WriteFile(library, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compile := writeSampleCompileCommands(t, root, include)
+	config := filepath.Join(root, "library.toml")
+	content := "[sample]\nlanguage = \"c\"\ncompile_commands_path = \"" + compile + "\"\ndocument_paths = []\ndocument_has_api_usage = false\noutput_path = \"" + filepath.Join(root, "out") + "\"\nheader_paths = [\"" + filepath.Join(include, "sample.h") + "\"]\ndriver_build_args = [\"" + library + "\"]\nconsumer_case_paths = []\n"
+	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ValidateConfig(Report{LibraryConfigPath: "library.toml"}, Request{Name: "sample", TargetDir: root, InstallDir: install, CompileCommands: compile, StaticLibraries: []string{library}})
+	if err == nil || !strings.Contains(err.Error(), "same filename and content") {
+		t.Fatalf("expected install content mismatch rejection, got: %v", err)
 	}
 }

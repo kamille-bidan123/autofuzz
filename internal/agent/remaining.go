@@ -73,6 +73,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 		assessment, err := client.Preprocess(ctx, a.State.LibraryConfigPath, min(a.Options.Jobs, 8), 1)
 		if err != nil && strings.Contains(err.Error(), "zero API") {
 			fmt.Printf("PromeFuzz extracted zero APIs; asking Codex to correct library.toml: %v\n", err)
+			a.stageFailed(state.StagePreprocessed, "PromeFuzz 提取到 0 个 API，回退到 library.toml 修复")
 			if configureErr := a.configureWithCodex(ctx, 3, err.Error()); configureErr != nil {
 				return a.fail(state.StageConfigured, configureErr)
 			}

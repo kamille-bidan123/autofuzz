@@ -3,12 +3,14 @@ package configagent
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -139,6 +141,13 @@ type libraryConfigTable struct {
 	APIHintsPath        string   `toml:"api_hints_path"`
 }
 
+type compileCommandEntry struct {
+	Directory string   `json:"directory"`
+	File      string   `json:"file"`
+	Command   string   `json:"command"`
+	Arguments []string `json:"arguments"`
+}
+
 func ValidateConfig(report Report, request Request) (Result, error) {
 	configPath := report.LibraryConfigPath
 	if !filepath.IsAbs(configPath) {
@@ -203,10 +212,8 @@ func ValidateConfig(report Report, request Request) (Result, error) {
 	if len(cfg.HeaderPaths) == 0 {
 		return Result{}, fmt.Errorf("library.toml needs header_paths")
 	}
-	for _, path := range cfg.HeaderPaths {
-		if _, err := os.Stat(path); err != nil {
-			return Result{}, fmt.Errorf("header path does not exist: %s", path)
-		}
+	if err := validateHeaderPaths(cfg.HeaderPaths, request.CompileCommands, request.InstallDir); err != nil {
+		return Result{}, err
 	}
 	if err := validateDriverBuildArgs(cfg.DriverBuildArgs, request.StaticLibraries, request.InstallDir); err != nil {
 		return Result{}, err
@@ -367,6 +374,228 @@ func validateDriverBuildArgs(args, validatedLibraries []string, installDir strin
 	return nil
 }
 
+func validateHeaderPaths(headerPaths []string, compileCommandsPath, installDir string) error {
+	commands, err := loadCompileCommands(compileCommandsPath)
+	if err != nil {
+		return fmt.Errorf("header_paths compile_commands analysis failed: %w", err)
+	}
+	observedRoots, err := compileObservedRoots(commands)
+	if err != nil {
+		return fmt.Errorf("header_paths compile_commands analysis failed: %w", err)
+	}
+	installHeaders, err := collectInstallHeaders(installDir)
+	if err != nil {
+		return fmt.Errorf("header_paths install_dir analysis failed: %w", err)
+	}
+	for _, configured := range headerPaths {
+		info, err := os.Stat(configured)
+		if err != nil {
+			return fmt.Errorf("header path does not exist: %s", configured)
+		}
+		if info.IsDir() {
+			headers, err := expandHeaderDirectory(configured)
+			if err != nil {
+				return err
+			}
+			if len(headers) == 0 {
+				return fmt.Errorf("header path directory does not contain header files: %s", configured)
+			}
+			for _, header := range headers {
+				if err := validateObservedHeader(header, observedRoots, installHeaders); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := validateObservedHeader(configured, observedRoots, installHeaders); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadCompileCommands(path string) ([]compileCommandEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var commands []compileCommandEntry
+	if err := json.Unmarshal(data, &commands); err != nil {
+		return nil, err
+	}
+	return commands, nil
+}
+
+func compileObservedRoots(commands []compileCommandEntry) ([]string, error) {
+	roots := map[string]struct{}{}
+	for _, command := range commands {
+		if command.File != "" {
+			sourcePath := command.File
+			if !filepath.IsAbs(sourcePath) {
+				sourcePath = filepath.Join(command.Directory, sourcePath)
+			}
+			sourcePath, err := filepath.Abs(sourcePath)
+			if err == nil {
+				roots[filepath.Dir(sourcePath)] = struct{}{}
+			}
+		}
+		for _, include := range parseIncludePaths(command) {
+			absolute := include
+			if !filepath.IsAbs(absolute) {
+				absolute = filepath.Join(command.Directory, absolute)
+			}
+			absolute, err := filepath.Abs(absolute)
+			if err == nil {
+				roots[absolute] = struct{}{}
+			}
+		}
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("compile_commands.json does not expose any source or include roots")
+	}
+	result := make([]string, 0, len(roots))
+	for root := range roots {
+		result = append(result, root)
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+func parseIncludePaths(command compileCommandEntry) []string {
+	args := command.Arguments
+	if len(args) == 0 && command.Command != "" {
+		args = strings.Fields(command.Command)
+	}
+	var includes []string
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-I" || arg == "-isystem" || arg == "-iquote":
+			if index+1 < len(args) {
+				index++
+				includes = append(includes, args[index])
+			}
+		case strings.HasPrefix(arg, "-I") && len(arg) > 2:
+			includes = append(includes, strings.TrimPrefix(arg, "-I"))
+		case strings.HasPrefix(arg, "-isystem") && len(arg) > len("-isystem"):
+			includes = append(includes, strings.TrimPrefix(arg, "-isystem"))
+		case strings.HasPrefix(arg, "-iquote") && len(arg) > len("-iquote"):
+			includes = append(includes, strings.TrimPrefix(arg, "-iquote"))
+		}
+	}
+	return includes
+}
+
+func collectInstallHeaders(installDir string) (map[string][]string, error) {
+	headers := map[string][]string{}
+	err := filepath.WalkDir(installDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !isHeaderFile(path) {
+			return nil
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		headers[filepath.Base(absolute)] = append(headers[filepath.Base(absolute)], absolute)
+		return nil
+	})
+	return headers, err
+}
+
+func expandHeaderDirectory(dir string) ([]string, error) {
+	var headers []string
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !isHeaderFile(path) {
+			return nil
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		headers = append(headers, absolute)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("header path directory is invalid: %w", err)
+	}
+	slices.Sort(headers)
+	return headers, nil
+}
+
+func validateObservedHeader(header string, observedRoots []string, installHeaders map[string][]string) error {
+	absolute, err := filepath.Abs(header)
+	if err != nil {
+		return fmt.Errorf("header path is invalid: %s", header)
+	}
+	if !isObservedHeader(absolute, observedRoots) {
+		return fmt.Errorf("header path is not observable from compile_commands.json: %s", absolute)
+	}
+	matches, err := matchingInstallHeaders(absolute, installHeaders[filepath.Base(absolute)])
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("header path has no install_dir counterpart with the same filename and content: %s", absolute)
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("header path matches multiple install_dir headers with the same filename and content: %s", absolute)
+	}
+	return nil
+}
+
+func isObservedHeader(header string, observedRoots []string) bool {
+	for _, root := range observedRoots {
+		if within(root, header) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchingInstallHeaders(header string, candidates []string) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	sum, err := fileMD5(header)
+	if err != nil {
+		return nil, fmt.Errorf("header path is unreadable: %s", header)
+	}
+	var matches []string
+	for _, candidate := range candidates {
+		candidateSum, err := fileMD5(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("install header is unreadable: %s", candidate)
+		}
+		if sum == candidateSum {
+			matches = append(matches, candidate)
+		}
+	}
+	return matches, nil
+}
+
+func fileMD5(path string) ([16]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return [16]byte{}, err
+	}
+	return md5.Sum(data), nil
+}
+
+func isHeaderFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".h", ".hpp", ".hh", ".hxx":
+		return true
+	default:
+		return false
+	}
+}
+
 func isPromeFuzzDocumentFile(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".md", ".txt", ".html", ".htm", ".pdf", ".adoc", ".rst":
@@ -445,9 +674,10 @@ func buildPrompt(request Request) string {
      - 否则（连接失败 / 非 200 / 响应格式错误）：回退 document_paths=[] 且 document_has_api_usage=false，并在 analysis 里简述失败原因。
   document_paths 的每一项必须是已存在的本地文件/目录，或合法的 http(s) URL；不要包含空文件或只有空白字符的本地文档（如空的 *.txt/README），PromeFuzz RAG 无法为这类文档生成 embedding。
 - compile_commands_path 必须严格等于下方已校验的路径；
-- 必须使用下方给出的 install_dir 作为 header_paths 的选择范围来源；先检查该目录内已安装的公开头，再决定最小必要的 header_paths；
 - output_path 必须在目标工作区内；
-- header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。必须从 install_dir 下已安装的公开头文件或公开头目录中选择，只填写声明公开、外部可用、值得 fuzz 的 API。优先列出 install_dir 下的具体 public header 文件；只有当某个 install_dir 子目录下几乎全是公开 API 头时才填写该目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径放入 header_paths；
+- header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。必须先从 compile_commands.json 提取真实编译上下文，确认该头文件/目录中的头属于编译器实际可观测到的源码或构建树头；最终在 header_paths 中填写这份编译/AST 侧路径，不要直接填写 install 副本路径；
+- header_paths 中的每个头文件（若填目录则目录中每个头）都必须在 install_dir 下找到一个唯一对应的公开安装头，要求文件名相同且内容完全一致；若找不到对应安装头，或同名同内容匹配不唯一，就不要把它写进 header_paths；
+- 优先填写最小必要的具体 public header 文件；只有当某个目录下几乎全是公开 API 头、且目录中每个头都满足“compile_commands 可观测 + install_dir 中有唯一同名同内容对应物”时，才填写目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径直接放入 header_paths；
 - driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内。编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
 - driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围；可填聚合头或必要公共依赖头，优先使用绝对路径，不要放私有/internal 头；
 - consumer_case_paths 必须是包含真实 API 用法的目录；
@@ -457,7 +687,7 @@ func buildPrompt(request Request) string {
 已校验产物：
 %s
 
-header_paths 必须从这个 install_dir 中挑选公开头：
+header_paths 中每个编译/AST 侧头都必须在这个 install_dir 中找到唯一的同名同内容公开头对应物：
 %s
 
 之前的文件（若有）：

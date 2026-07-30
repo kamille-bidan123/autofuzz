@@ -206,6 +206,8 @@ func setupLibraryConfigTask(t *testing.T, id string) libraryConfigTaskFixture {
 	installDir := filepath.Join(targetDir, "install")
 	promeFuzzRoot := filepath.Join(targetDir, "promefuzz")
 	headerDir := filepath.Join(sourceDir, "include")
+	sourceFile := filepath.Join(sourceDir, "src", "sample.c")
+	installHeaderDir := filepath.Join(installDir, "include")
 	outputPath := filepath.Join(targetDir, "promefuzz-output")
 	compileCommands := filepath.Join(buildDir, "compile_commands.json")
 	staticLibrary := filepath.Join(installDir, "lib", "libsample.a")
@@ -213,6 +215,8 @@ func setupLibraryConfigTask(t *testing.T, id string) libraryConfigTaskFixture {
 	pythonPath := filepath.Join(promeFuzzRoot, ".venv", "bin", "python")
 	for _, dir := range []string{
 		headerDir,
+		filepath.Dir(sourceFile),
+		installHeaderDir,
 		filepath.Dir(compileCommands),
 		filepath.Dir(staticLibrary),
 		filepath.Dir(pythonPath),
@@ -225,8 +229,12 @@ func setupLibraryConfigTask(t *testing.T, id string) libraryConfigTaskFixture {
 			t.Fatal(err)
 		}
 	}
+	headerContent := "#ifndef SAMPLE_H\n#define SAMPLE_H\nint sample(void);\n#endif\n"
 	for path, content := range map[string]string{
-		compileCommands: "[]\n",
+		filepath.Join(headerDir, "sample.h"):                                 headerContent,
+		filepath.Join(installHeaderDir, "sample.h"):                          headerContent,
+		sourceFile:                                                           "#include \"sample.h\"\nint sample(void) { return 0; }\n",
+		compileCommands:                                                      "[{\"directory\":\"" + targetDir + "\",\"file\":\"" + sourceFile + "\",\"arguments\":[\"clang\",\"-I\",\"" + headerDir + "\",\"-c\",\"" + sourceFile + "\"]}]\n",
 		staticLibrary:   "",
 		filepath.Join(promeFuzzRoot, "PromeFuzz.py"): "",
 		promeFuzzConfig: "",
