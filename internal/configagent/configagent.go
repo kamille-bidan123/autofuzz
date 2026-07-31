@@ -678,7 +678,7 @@ func buildPrompt(request Request) string {
 - header_paths 是 PromeFuzz 的 API 提取范围，不是普通编译 -I 列表。必须先从 compile_commands.json 提取真实编译上下文，确认该头文件/目录中的头属于编译器实际可观测到的源码或构建树头；最终在 header_paths 中填写这份编译/AST 侧路径，不要直接填写 install 副本路径；
 - header_paths 中的每个头文件（若填目录则目录中每个头）都必须在 install_dir 下找到一个唯一对应的公开安装头，要求文件名相同且内容完全一致；若找不到对应安装头，或同名同内容匹配不唯一，就不要把它写进 header_paths；
 - 优先填写最小必要的具体 public header 文件；只有当某个目录下几乎全是公开 API 头、且目录中每个头都满足“compile_commands 可观测 + install_dir 中有唯一同名同内容对应物”时，才填写目录。不要把源码根目录、build/config 目录、compat 目录、私有/internal 头目录、仅用于编译的 include 搜索路径直接放入 header_paths；
-- driver_build_args 必须至少包含下方一个已校验的静态库，外加任何真正需要的链接标志；其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内。编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
+- driver_build_args 必须包含 install_dir 目录下的所有静态库，外加任何真正需要的链接标志；其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内。编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args，而不是 header_paths；
 - driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围；可填聚合头或必要公共依赖头，优先使用绝对路径，不要放私有/internal 头；
 - consumer_case_paths 必须是包含真实 API 用法的目录；
 - api_ban_list_path 和 api_hints_path：不用时必须设为空字符串 ""（PromeFuzz 的约定，会跳过加载）；使用时必须指向一个已存在、内容为合法 JSON 的文件。绝不要创建空占位文件——空文件不是合法 JSON，会让 PromeFuzz 在 json.load 时崩溃。api_ban_list_path 必须是字符串数组（形如 ["source/header.h:42:6"]，表示被禁函数定位）；api_hints_path 必须是对象（函数名→提示字符串）。

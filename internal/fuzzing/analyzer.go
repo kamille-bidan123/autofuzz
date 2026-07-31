@@ -49,7 +49,6 @@ type TargetAnalysisRequest struct {
 }
 
 type TargetAnalysisResponse struct {
-	DriverID      int          `json:"driver_id"`
 	NeedsUpdate   bool         `json:"needs_update"`
 	TargetBranch  TargetBranch `json:"target_branch"`
 	ChangedFiles  []string     `json:"changed_files"`
@@ -89,9 +88,8 @@ const analysisSchema = `{
 
 const targetAnalysisSchema = `{
   "type":"object","additionalProperties":false,
-  "required":["driver_id","needs_update","target_branch","changed_files","proof_seed","compile_passed","branch_covered","analysis"],
+  "required":["needs_update","target_branch","changed_files","proof_seed","compile_passed","branch_covered","analysis"],
   "properties":{
-    "driver_id":{"type":"integer"},
     "needs_update":{"type":"boolean"},
     "target_branch":{
       "type":"object","additionalProperties":false,
@@ -506,9 +504,9 @@ func buildTargetAnalysisPrompt(req TargetAnalysisRequest) string {
 ## 当前 Driver 覆盖状态
 %s
 
-最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。analysis 必须使用简体中文。`,
+最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。不要输出 driver_id；当前 driver 已由 Go 侧固定为 driver_id=%d。analysis 必须使用简体中文。`,
 		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath, req.WorkDir,
-		string(fuzzJSON), string(coverageJSON))
+		string(fuzzJSON), string(coverageJSON), req.DriverID)
 }
 
 func (c CodexAnalyzer) logf(format string, args ...any) {

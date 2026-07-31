@@ -1231,9 +1231,6 @@ func collectTargetAggregateCoverage(cfg FuzzConfig, snapshotDir, binaryPath, fal
 }
 
 func validateTargetAnalysis(ctx context.Context, cfg FuzzConfig, tmpDir string, target FuzzTarget, currentHash string, response TargetAnalysisResponse) error {
-	if response.DriverID != target.DriverID {
-		return fmt.Errorf("LLM returned driver_id=%d, expected %d", response.DriverID, target.DriverID)
-	}
 	if !response.CompilePassed {
 		return fmt.Errorf("LLM reported compile_passed=false")
 	}

@@ -439,6 +439,7 @@ func TestBuildPromptDescribesHeaderPathsAsAPIScope(t *testing.T) {
 		"最终在 header_paths 中填写这份编译/AST 侧路径",
 		"每个头文件（若填目录则目录中每个头）都必须在 install_dir 下找到一个唯一对应的公开安装头",
 		"优先填写最小必要的具体 public header 文件",
+		"driver_build_args 必须包含 install_dir 目录下的所有静态库",
 		"其中所有 .a 路径和所有 -I 后的头文件目录都必须位于 install_dir 内",
 		"编译 driver 所需的 -I 路径应放入 driver_build_args 或 consumer_build_args",
 		"driver_headers 只用于生成 driver 时额外 include，不决定 API 提取范围",
