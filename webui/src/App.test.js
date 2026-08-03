@@ -27,6 +27,62 @@ describe('App routing', () => {
           recent_issues: []
         });
       }
+      if (path === '/api/coverage-queue') {
+        return jsonResponse({
+          generated_at: '2026-08-01T09:00:00+08:00',
+          summary: {
+            total: 2,
+            queued: 1,
+            running: 1,
+            refresh: 1,
+            required: 1,
+            snapshots: 1,
+            branch_reach: 1
+          },
+          items: [
+            {
+              id: 'llvm-cov-000001',
+              status: 'running',
+              mode: 'required',
+              mode_label: '前台等待',
+              kind: 'branch_reach',
+              kind_label: 'Proof 分支触达校验',
+              task_id: 'run-1',
+              task_name: 'libexif',
+              repository_url: '/src/libexif',
+              current_stage: 'fuzzing',
+              driver_id: 1,
+              seq: 2,
+              snapshot_dir: '/work/libexif/logs/fuzzing/driver-targets/driver-0001/v002',
+              profdata_path: '/work/libexif/logs/fuzzing/driver-targets/driver-0001/v002/validate/seed-1.profdata',
+              binary_path: '/work/libexif/logs/fuzzing/driver-targets/driver-0001/v002/cov_driver',
+              queued_at: '2026-08-01T08:59:00+08:00',
+              started_at: '2026-08-01T08:59:10+08:00',
+              coalesced: 1
+            },
+            {
+              id: 'llvm-cov-000002',
+              status: 'queued',
+              position: 1,
+              mode: 'refresh',
+              mode_label: '后台刷新',
+              kind: 'live_refresh',
+              kind_label: '实时覆盖刷新',
+              task_id: 'run-2',
+              task_name: 'freetype',
+              repository_url: '/src/freetype',
+              current_stage: 'fuzzing',
+              driver_id: 18,
+              seq: 3,
+              snapshot_dir: '/work/freetype/logs/fuzzing/driver-targets/driver-0018/v003',
+              profdata_path: '/work/freetype/logs/fuzzing/driver-targets/driver-0018/v003/monitor/aggregate.profdata',
+              binary_path: '/work/freetype/logs/fuzzing/driver-targets/driver-0018/v003/cov_driver',
+              queued_at: '2026-08-01T08:59:20+08:00',
+              coalesced: 4
+            }
+          ]
+        });
+      }
       if (path === '/api/defaults') {
         return jsonResponse({
           jobs: 1,
@@ -116,6 +172,23 @@ describe('App routing', () => {
     expect(wrapper.findAll('.linear-stage')).toHaveLength(6);
   });
 
+  it('renders the global coverage queue page from the sidebar route', async () => {
+    wrapper = mount(App, {global: {plugins: [router]}});
+    await flushPromises();
+
+    await router.push('/coverage-queue');
+    await flushPromises();
+    await flushPromises();
+
+    expect(router.currentRoute.value.name).toBe('coverage-queue');
+    expect(wrapper.text()).toContain('覆盖队列');
+    expect(wrapper.text()).toContain('当前执行');
+    expect(wrapper.text()).toContain('等待队列');
+    expect(wrapper.text()).toContain('Proof 分支触达校验');
+    expect(wrapper.text()).toContain('实时覆盖刷新');
+    expect(wrapper.text()).toContain('d18/v3');
+  });
+
   it('opens child driver coverage as a routed page instead of a modal', async () => {
     const defaultFetch = fetch.getMockImplementation();
     let releaseCoverage;
@@ -148,6 +221,59 @@ describe('App routing', () => {
     await flushPromises();
 
     expect(router.currentRoute.value.fullPath).toBe('/tasks/run-1/coverage');
+  });
+
+  it('renders the overview driver schedule before coverage data finishes loading', async () => {
+    const defaultFetch = fetch.getMockImplementation();
+    let releaseCoverage;
+    fetch.mockImplementation(url => {
+      if (String(url) === '/api/runs/run-1') {
+        return jsonResponse({
+          id: 'run-1',
+          status: 'running',
+          request: {repository_url: '/src/libexif'},
+          stages: [{id: 'cloned', status: 'completed'}, {id: 'fuzzing', status: 'running'}],
+          target_dir: '/work/libexif',
+          driver_schedule: {
+            mode: 'multi',
+            timestamp: '2026-08-01T09:00:00+08:00',
+            iteration: 3,
+            active_targets: 1,
+            max_parallel_targets: 1,
+            running_versions: [{driver_id: 1, seq: 2}],
+            queued_versions: [{driver_id: 2, seq: 1}],
+            next_versions: [{driver_id: 2, seq: 1}],
+            analysis_remaining_seconds: 120,
+            targets: [
+              {driver_id: 1, seq: 2, status: 'running'},
+              {driver_id: 2, seq: 1, status: 'queued'}
+            ]
+          }
+        });
+      }
+      if (String(url) !== '/api/runs/run-1/coverage') return defaultFetch(url);
+      return new Promise(resolve => {
+        releaseCoverage = () => defaultFetch(url).then(resolve);
+      });
+    });
+
+    wrapper = mount(App, {global: {plugins: [router]}});
+    await flushPromises();
+
+    await router.push('/tasks/run-1/overview');
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('子 driver 调度');
+    expect(wrapper.findAll('.driver-schedule-tile')).toHaveLength(2);
+    expect(wrapper.find('.driver-schedule-tile.running').text()).toContain('d1');
+    expect(wrapper.find('.driver-schedule-tile.next').text()).toContain('d2');
+
+    if (releaseCoverage) {
+      releaseCoverage();
+      await flushPromises();
+      await flushPromises();
+    }
   });
 
   it('renders the task overview control center with coverage-derived driver data', async () => {

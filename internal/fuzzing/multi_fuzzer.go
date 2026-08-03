@@ -18,6 +18,7 @@ import (
 const (
 	defaultMultiFuzzWindowCycles = 3
 	multiCoverageEmitInterval    = 15 * time.Second
+	multiCoverageRefreshInterval = 10 * time.Minute
 )
 
 type FuzzTarget struct {
@@ -258,11 +259,18 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 	defer analysisTimer.Stop()
 	coverageTicker := time.NewTicker(multiCoverageEmitInterval)
 	defer coverageTicker.Stop()
+	refreshTicker := time.NewTicker(multiCoverageRefreshInterval)
+	defer refreshTicker.Stop()
 	for {
 		triggerSource := "interval"
 		select {
 		case <-analysisTimer.C:
 		case <-coverageTicker.C:
+			lastCycleData = collectMultiLiveData(running, st.Iteration)
+			emitCoverage(lastCycleData)
+			continue
+		case <-refreshTicker.C:
+			refreshRunningCoverageCaches(ctx, running, cfg.logf)
 			lastCycleData = collectMultiLiveData(running, st.Iteration)
 			emitCoverage(lastCycleData)
 			continue
@@ -285,7 +293,7 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		flow.CycleStarted = &cycleStarted
 		emitFlow(FuzzFlowCollecting, "running", triggerSource, "正在采集所有子 driver 的运行状态与覆盖数据", 0)
 
-		cycleData := collectMultiCycleData(cfg, running, st.Iteration)
+		cycleData := collectMultiCycleData(ctx, cfg, running, st.Iteration)
 		lastCycleData = cycleData
 		emitCoverage(lastCycleData)
 		if err := st.Save(statePath); err != nil {
@@ -732,6 +740,7 @@ func startRunningTarget(ctx context.Context, parent FuzzConfig, targetState *Tar
 	targetCfg.ForkWorkers = 1
 	targetCfg.OnMonitorChanged = nil
 	targetCfg.OnCoverageChanged = nil
+	targetCfg.DisableMonitorCoverageLoop = true
 	tracker := NewFuzzStatusTracker()
 	stderrPath := filepath.Join(targetState.CurrentSnapshot, "fuzz.stderr.log")
 	stdoutPath := filepath.Join(targetState.CurrentSnapshot, "fuzz.stdout.log")
@@ -764,7 +773,7 @@ func resolveMultiFuzzParallelism(cfg FuzzConfig, totalTargets int) int {
 	}
 	limit := cfg.MaxParallelDrivers
 	if limit <= 0 {
-		limit = runtime.NumCPU()
+		limit = runtime.NumCPU() / 2
 	}
 	if limit < 1 {
 		limit = 1
@@ -849,24 +858,15 @@ func multiFuzzingIdleMessage(active, total, maxParallel int, suffix string) stri
 	return base + "，" + suffix
 }
 
-func collectMultiCycleData(cfg FuzzConfig, running map[targetRuntimeKey]*runningTarget, iteration int) []targetCycleData {
+func collectMultiCycleData(ctx context.Context, cfg FuzzConfig, running map[targetRuntimeKey]*runningTarget, iteration int) []targetCycleData {
 	var out []targetCycleData
-	keys := make([]targetRuntimeKey, 0, len(running))
-	for key := range running {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].driverID != keys[j].driverID {
-			return keys[i].driverID < keys[j].driverID
-		}
-		return keys[i].seq < keys[j].seq
-	})
+	keys := sortedRunningTargetKeys(running)
 	for _, key := range keys {
 		rt := running[key]
 		status := rt.tracker.Snapshot()
 		var cov CorpusCoverageStatus
 		if rt.monitor != nil {
-			if snapshot, err := rt.monitor.Snapshot(cfg.SourceDir, cfg.BuildDir, cfg.logf); err == nil {
+			if snapshot, err := rt.monitor.SnapshotContext(ctx, cfg.SourceDir, cfg.BuildDir, cfg.logf); err == nil {
 				cov = snapshot
 			} else {
 				cfg.logf("[fuzzing] driver %d v%d coverage snapshot failed: %v\n", key.driverID, key.seq, err)
@@ -893,16 +893,7 @@ func collectMultiCycleData(cfg FuzzConfig, running map[targetRuntimeKey]*running
 
 func collectMultiLiveData(running map[targetRuntimeKey]*runningTarget, iteration int) []targetCycleData {
 	var out []targetCycleData
-	keys := make([]targetRuntimeKey, 0, len(running))
-	for key := range running {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].driverID != keys[j].driverID {
-			return keys[i].driverID < keys[j].driverID
-		}
-		return keys[i].seq < keys[j].seq
-	})
+	keys := sortedRunningTargetKeys(running)
 	for _, key := range keys {
 		rt := running[key]
 		status := rt.tracker.Snapshot()
@@ -928,6 +919,39 @@ func collectMultiLiveData(running map[targetRuntimeKey]*runningTarget, iteration
 		})
 	}
 	return out
+}
+
+func refreshRunningCoverageCaches(ctx context.Context, running map[targetRuntimeKey]*runningTarget, logf func(string, ...any)) {
+	keys := sortedRunningTargetKeys(running)
+	if len(keys) == 0 {
+		return
+	}
+	if logf != nil {
+		logf("[fuzzing] refreshing live coverage for %d active child driver(s)\n", len(keys))
+	}
+	for _, key := range keys {
+		rt := running[key]
+		if rt == nil || rt.monitor == nil {
+			continue
+		}
+		if err := rt.monitor.RefreshCoverageCacheContext(ctx, logf); err != nil && logf != nil {
+			logf("[fuzzing] driver %d v%d live coverage refresh failed: %v\n", key.driverID, key.seq, err)
+		}
+	}
+}
+
+func sortedRunningTargetKeys(running map[targetRuntimeKey]*runningTarget) []targetRuntimeKey {
+	keys := make([]targetRuntimeKey, 0, len(running))
+	for key := range running {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].driverID != keys[j].driverID {
+			return keys[i].driverID < keys[j].driverID
+		}
+		return keys[i].seq < keys[j].seq
+	})
+	return keys
 }
 
 func coveragePointFromCorpus(iteration int, cov CorpusCoverageStatus) CoverageSummaryPoint {
@@ -1220,9 +1244,9 @@ func collectTargetAggregateCoverage(cfg FuzzConfig, snapshotDir, binaryPath, fal
 	if !fileExists(profdataPath) {
 		return CorpusCoverageStatus{CorpusDir: corpusDir}, nil
 	}
-	cs, err := CollectCoverageStatus(profdataPath, binaryPath, cfg.SourceDir, cfg.BuildDir)
+	cs, err := CollectCoverageStatusWithinTask(profdataPath, binaryPath, cfg.SourceDir, cfg.BuildDir, cfg.TaskDir)
 	if err != nil && fallbackBinaryPath != "" && fallbackBinaryPath != binaryPath {
-		cs, err = CollectCoverageStatus(profdataPath, fallbackBinaryPath, cfg.SourceDir, cfg.BuildDir)
+		cs, err = CollectCoverageStatusWithinTask(profdataPath, fallbackBinaryPath, cfg.SourceDir, cfg.BuildDir, cfg.TaskDir)
 	}
 	if err != nil {
 		return CorpusCoverageStatus{}, err
@@ -1326,7 +1350,7 @@ func verifyProofSeedCoversBranch(ctx context.Context, cfg FuzzConfig, driverDir,
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return false, err
 	}
-	reach, ok := runSeedCoverage(ctx, binaryPath, cfg.SourceDir, cfg.BuildDir, driverDir, seedPath, workDir, 0)
+	reach, ok := runSeedCoverage(ctx, binaryPath, cfg.SourceDir, cfg.BuildDir, cfg.TaskDir, driverDir, seedPath, workDir, 0)
 	if !ok {
 		return false, fmt.Errorf("proof seed produced no usable coverage profile")
 	}
@@ -1334,7 +1358,7 @@ func verifyProofSeedCoversBranch(ctx context.Context, cfg FuzzConfig, driverDir,
 		return false, nil
 	}
 	profdataPath := filepath.Join(workDir, "seed-0.profdata")
-	status, err := CollectCoverageStatus(profdataPath, binaryPath, cfg.SourceDir, cfg.BuildDir)
+	status, err := CollectCoverageStatusWithinTask(profdataPath, binaryPath, cfg.SourceDir, cfg.BuildDir, cfg.TaskDir)
 	if err != nil {
 		return false, err
 	}

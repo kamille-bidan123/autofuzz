@@ -3,10 +3,10 @@ import vue from '@vitejs/plugin-vue';
 import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
-  base: '/static/',
+  base: '/static/generated/',
   plugins: [vue()],
   build: {
-    outDir: fileURLToPath(new URL('../internal/webui/static', import.meta.url)),
+    outDir: fileURLToPath(new URL('../internal/webui/static/generated', import.meta.url)),
     emptyOutDir: true,
     assetsDir: 'assets'
   },

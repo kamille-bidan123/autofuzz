@@ -1,1 +1,0 @@
-.terminal-shell{background:#111827;height:calc(100vh - 190px);min-height:560px;position:relative}.runtime-terminal{width:100%;height:100%;padding:7px}.terminal-status{color:#94a3b8;place-items:center;font-size:12px;display:grid;position:absolute;inset:0}@media (width<=960px){.terminal-shell{height:70vh;min-height:420px}}

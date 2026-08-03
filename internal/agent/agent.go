@@ -101,14 +101,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.stageStarted(state.StageCloned, "正在复制本地源码或浅克隆 Git 仓库")
 		commit, err := repository.Prepare(ctx, a.Runner, a.Options.RepositoryURL, a.State.SourceKind, a.Options.Ref, a.State.SourceDir, filepath.Join(a.LogsDir, "clone"))
 		if err != nil {
-			a.State.Stage = state.StageFailed
-			a.State.RecordError(state.StageCloned, err)
-			_ = a.State.Save(a.StatePath)
-			a.stageFailed(state.StageCloned, err.Error())
-			return err
+			return a.fail(state.StageCloned, err)
 		}
 		a.State.Commit = commit
 		a.State.Stage = state.StageCloned
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}

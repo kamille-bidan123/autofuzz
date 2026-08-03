@@ -88,7 +88,7 @@ func CoverageStatusToCorpusCoverage(aggregate CoverageStatus, seedCount int, sam
 // (trueCount+falseCount > 0). ok=false means no usable profile was produced
 // (e.g. ASan abort). This is used only to verify an LLM-provided proof seed,
 // not to replay the corpus for analysis.
-func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, buildDir, driverDir, seedPath, logDir string, idx int) (map[string]map[[2]int]bool, bool) {
+func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, buildDir, taskDir, driverDir, seedPath, logDir string, idx int) (map[string]map[[2]int]bool, bool) {
 	profrawPath := filepath.Join(logDir, fmt.Sprintf("seed-%d.profraw", idx))
 	profdataPath := filepath.Join(logDir, fmt.Sprintf("seed-%d.profdata", idx))
 	seedCtx, cancel := context.WithTimeout(ctx, defaultPerSeedTimeout)
@@ -118,7 +118,7 @@ func runSeedCoverage(ctx context.Context, binaryPath, sourceDir, buildDir, drive
 	if !fileExists(profdataPath) {
 		return nil, false
 	}
-	reach, err := CollectBranchReach(profdataPath, binaryPath, sourceDir, buildDir)
+	reach, err := collectBranchReachContext(ctx, profdataPath, binaryPath, sourceDir, buildDir, taskDir)
 	if err != nil {
 		return nil, false
 	}

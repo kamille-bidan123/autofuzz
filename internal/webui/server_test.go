@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +30,7 @@ func TestDefaultsEndpoint(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &defaults); err != nil {
 		t.Fatal(err)
 	}
-	if defaults.CodexCommand != "codex" || defaults.StopAfter != "fuzzing" || defaults.MaxFuzzDrivers != runtime.NumCPU() {
+	if defaults.CodexCommand != "codex" || defaults.StopAfter != "fuzzing" || defaults.MaxFuzzDrivers != agent.DefaultOptions().MaxFuzzDrivers {
 		t.Fatalf("unexpected defaults: %#v", defaults)
 	}
 }
@@ -44,10 +43,26 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 	body := response.Body.String()
-	combined := body + embeddedStaticText(t, "static/assets")
+	if !embeddedFileExists("static/generated/index.html") {
+		for _, marker := range []string{
+			`Autofuzz 控制台资源未构建`,
+			`make web`,
+			`make`,
+		} {
+			if !strings.Contains(body, marker) {
+				t.Fatalf("placeholder index is missing %s", marker)
+			}
+		}
+		if strings.Contains(body, `id="app"`) {
+			t.Fatal("placeholder index should not contain the Vue mount root")
+		}
+		return
+	}
+
+	combined := body + embeddedStaticText(t, "static/generated/assets")
 	for _, marker := range []string{
 		`id="app"`,
-		`/static/assets/`,
+		`/static/generated/assets/`,
 		`运行看板`,
 		`创建任务`,
 		`task-detail`,
@@ -64,6 +79,8 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 		`driver-cov-row`,
 		`driver-graph-node`,
 		`/coverage/function-sources`,
+		`/api/coverage-queue`,
+		`覆盖队列`,
 		`/crash-analysis-queue`,
 		`unique-crashes`,
 		`/crash-reports/analyze`,
@@ -101,9 +118,21 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 }
 
 func TestStaticAssetsServed(t *testing.T) {
-	entries, err := staticFiles.ReadDir("static/assets")
+	entries, err := staticFiles.ReadDir("static/generated/assets")
 	if err != nil {
-		t.Fatalf("read embedded assets: %v", err)
+		if embeddedFileExists("static/generated/index.html") {
+			t.Fatalf("read embedded assets: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		response := httptest.NewRecorder()
+		NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d", response.Code)
+		}
+		if !strings.Contains(response.Body.String(), `Autofuzz 控制台资源未构建`) {
+			t.Fatal("placeholder page should be served when generated assets are absent")
+		}
+		return
 	}
 	assetsByExt := make(map[string]string)
 	for _, entry := range entries {
@@ -122,7 +151,7 @@ func TestStaticAssetsServed(t *testing.T) {
 		if name == "" {
 			t.Fatalf("missing embedded %s asset", ext)
 		}
-		request := httptest.NewRequest(http.MethodGet, "/static/assets/"+name, nil)
+		request := httptest.NewRequest(http.MethodGet, "/static/generated/assets/"+name, nil)
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
 		if response.Code != http.StatusOK {
@@ -167,6 +196,143 @@ func TestFilterCoverageDataByDriverSelectsRequestedVersion(t *testing.T) {
 	}
 }
 
+func TestDriverScheduleFromCoverageDataExtractsLightweightSchedulerState(t *testing.T) {
+	next := time.Date(2026, 8, 1, 1, 2, 3, 0, time.UTC)
+	schedule := driverScheduleFromCoverageData(fuzzing.MultiCoverageSnapshot{
+		Timestamp:                time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		Mode:                     "multi",
+		Iteration:                4,
+		ActiveTargets:            1,
+		MaxParallelTargets:       2,
+		RunningTargets:           []int{1},
+		QueuedTargets:            []int{2},
+		NextTargets:              []int{2},
+		RunningVersions:          []fuzzing.TargetVersionRef{{DriverID: 1, Seq: 3}},
+		QueuedVersions:           []fuzzing.TargetVersionRef{{DriverID: 2, Seq: 1}},
+		NextVersions:             []fuzzing.TargetVersionRef{{DriverID: 2, Seq: 1}},
+		FuzzIntervalSeconds:      600,
+		NextAnalysisAt:           &next,
+		AnalysisRemainingSeconds: 120,
+		Targets: []fuzzing.TargetCoverageSnapshot{
+			{
+				DriverID:  1,
+				Seq:       3,
+				Status:    "running",
+				Available: true,
+				Summary:   fuzzing.CoverageSummary{ExecutedFunctions: 9},
+				Coverage:  fuzzing.CoverageStatus{Summary: fuzzing.CoverageSummary{ExecutedFunctions: 9}},
+			},
+			{
+				DriverID: 2,
+				Seq:      1,
+				Status:   "queued",
+			},
+		},
+	})
+	if schedule == nil {
+		t.Fatal("driver schedule should be extracted from multi coverage data")
+	}
+	if schedule.Mode != "multi" || schedule.Iteration != 4 || schedule.ActiveTargets != 1 || schedule.MaxParallelTargets != 2 {
+		t.Fatalf("unexpected scheduler metadata: %#v", schedule)
+	}
+	if len(schedule.Targets) != 2 || schedule.Targets[0] != (DriverScheduleTarget{DriverID: 1, Seq: 3, Status: "running"}) || schedule.Targets[1] != (DriverScheduleTarget{DriverID: 2, Seq: 1, Status: "queued"}) {
+		t.Fatalf("unexpected scheduler targets: %#v", schedule.Targets)
+	}
+	if schedule.NextAnalysisAt == nil || !schedule.NextAnalysisAt.Equal(next) || schedule.AnalysisRemainingSeconds != 120 {
+		t.Fatalf("unexpected scheduler countdown: %#v", schedule)
+	}
+}
+
+func TestCoverageQueueEndpoint(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/coverage-queue", nil)
+	response := httptest.NewRecorder()
+
+	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var got CoverageQueueResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.GeneratedAt == "" {
+		t.Fatal("generated_at should be populated")
+	}
+	if got.Summary.Total != 0 || len(got.Items) != 0 {
+		t.Fatalf("unexpected non-empty default coverage queue: %#v", got)
+	}
+}
+
+func TestHistoricalCoverageEndpointReadsPersistedCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workspace := t.TempDir()
+	targetDir := filepath.Join(workspace, "cached-lib")
+	snapshotDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", "driver-0001", "v001")
+	if err := os.MkdirAll(filepath.Join(snapshotDir, "monitor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cache := fuzzing.CoverageSnapshot{
+		Timestamp: time.Date(2026, 7, 31, 8, 9, 10, 0, time.UTC),
+		Available: true,
+		SeedCount: 3,
+		Coverage: fuzzing.CoverageStatus{Summary: fuzzing.CoverageSummary{
+			ExecutedFunctions: 7,
+			FullFunctions:     5,
+			PartialFunctions:  2,
+		},
+			Full: []fuzzing.FunctionCoverage{
+				{Function: "fn_a", File: "/src/a.c"},
+				{Function: "fn_b", File: "/src/b.c"},
+				{Function: "fn_c", File: "/src/c.c"},
+				{Function: "fn_d", File: "/src/d.c"},
+				{Function: "fn_e", File: "/src/e.c"},
+			},
+			Partial: []fuzzing.PartialFunctionCoverage{
+				{Function: "fn_f", File: "/src/f.c"},
+				{Function: "fn_g", File: "/src/g.c"},
+			},
+		},
+	}
+	cacheData, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshotDir, "monitor", "coverage-cache.json"), cacheData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertTaskRegistry(registryEntry{
+		ID:            "historical-coverage-cache",
+		Workspace:     workspace,
+		Name:          "cached-lib",
+		RepositoryURL: "https://example.com/cached-lib.git",
+		CreatedAt:     time.Date(2026, 7, 31, 7, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		Status:        "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/runs/historical-coverage-cache/coverage", nil)
+	response := httptest.NewRecorder()
+	NewServer(NewManager(context.Background())).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got fuzzing.MultiCoverageSnapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !got.Available {
+		t.Fatal("coverage should be available from persisted cache")
+	}
+	if got.Coverage.Summary.ExecutedFunctions != 7 {
+		t.Fatalf("executed_functions = %d, want 7", got.Coverage.Summary.ExecutedFunctions)
+	}
+	if len(got.Targets) != 1 || got.Targets[0].DriverID != 1 || got.Targets[0].SeedCount != 3 {
+		t.Fatalf("unexpected targets: %#v", got.Targets)
+	}
+}
+
 func embeddedStaticText(t *testing.T, directory string) string {
 	t.Helper()
 	entries, err := staticFiles.ReadDir(directory)
@@ -185,6 +351,11 @@ func embeddedStaticText(t *testing.T, directory string) string {
 		builder.Write(data)
 	}
 	return builder.String()
+}
+
+func embeddedFileExists(name string) bool {
+	_, err := staticFiles.ReadFile(name)
+	return err == nil
 }
 
 type libraryConfigTaskFixture struct {
@@ -231,10 +402,10 @@ func setupLibraryConfigTask(t *testing.T, id string) libraryConfigTaskFixture {
 	}
 	headerContent := "#ifndef SAMPLE_H\n#define SAMPLE_H\nint sample(void);\n#endif\n"
 	for path, content := range map[string]string{
-		filepath.Join(headerDir, "sample.h"):                                 headerContent,
-		filepath.Join(installHeaderDir, "sample.h"):                          headerContent,
-		sourceFile:                                                           "#include \"sample.h\"\nint sample(void) { return 0; }\n",
-		compileCommands:                                                      "[{\"directory\":\"" + targetDir + "\",\"file\":\"" + sourceFile + "\",\"arguments\":[\"clang\",\"-I\",\"" + headerDir + "\",\"-c\",\"" + sourceFile + "\"]}]\n",
+		filepath.Join(headerDir, "sample.h"):        headerContent,
+		filepath.Join(installHeaderDir, "sample.h"): headerContent,
+		sourceFile:      "#include \"sample.h\"\nint sample(void) { return 0; }\n",
+		compileCommands: "[{\"directory\":\"" + targetDir + "\",\"file\":\"" + sourceFile + "\",\"arguments\":[\"clang\",\"-I\",\"" + headerDir + "\",\"-c\",\"" + sourceFile + "\"]}]\n",
 		staticLibrary:   "",
 		filepath.Join(promeFuzzRoot, "PromeFuzz.py"): "",
 		promeFuzzConfig: "",

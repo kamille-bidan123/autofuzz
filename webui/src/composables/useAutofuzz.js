@@ -15,6 +15,7 @@ const statusLabels = {
 const mainViewTitles = {
   dashboard: ['运行看板', '任务状态、发现问题与 crash 分析队列概览'],
   tasks: ['任务列表', '创建、启动并查看所有 Autofuzz 任务'],
+  'coverage-queue': ['覆盖队列', '全局 llvm-cov 覆盖导出与实时刷新队列'],
   detail: ['任务中控', '查看阶段、覆盖、crash、snapshot 与日志']
 };
 
@@ -687,6 +688,14 @@ function coverageTargetRef(target) {
   return {driver_id: Number(target?.driver_id || 0), seq: Number(target?.seq || 0)};
 }
 
+function sortDriverTargets(targets = []) {
+  return [...targets].sort((a, b) => {
+    const driverDelta = Number(a?.driver_id || 0) - Number(b?.driver_id || 0);
+    if (driverDelta !== 0) return driverDelta;
+    return Number(a?.seq || 0) - Number(b?.seq || 0);
+  });
+}
+
 function schedulerLists(data) {
   const targets = data?.targets || [];
   const statusRefs = statuses => targets
@@ -989,6 +998,8 @@ export function useAutofuzzController() {
     let pendingDetailFocus = null;
     const detailPollTimers = new Map();
     const detailResourceRequests = new Map();
+    let coverageRefreshTimer = 0;
+    let coverageRefreshVersion = 0;
     let coverageSourceRequest = 0;
     const driverSourceCache = new Map();
     const messages = reactive({ dashboard: '', list: '' });
@@ -1007,6 +1018,9 @@ export function useAutofuzzController() {
     const selectedUniqueCrashKey = ref('');
     const coverageDriverFilter = ref('all');
     const coverageDriverSort = ref('risk');
+    const coverageRefreshBusy = ref(false);
+    const coverageRefreshTracking = ref(false);
+    const coverageRefreshMessage = ref('');
     const apiCoverageQuery = ref('');
     const apiCoverageOnlyMissing = ref(false);
     const uniqueCrashFilters = reactive({
@@ -1062,6 +1076,8 @@ export function useAutofuzzController() {
       crashQueue: [],
       uniqueCrashes: [],
       snapshots: [],
+      snapshotStatus: 'idle',
+      snapshotMessage: '',
       snapshotDiff: {
         visible: false,
         title: 'Driver Diff',
@@ -1086,6 +1102,8 @@ export function useAutofuzzController() {
         status: 'idle',
         message: ''
       },
+      driverScheduleData: null,
+      driverScheduleReceivedAt: 0,
       coverageDetail: {
         visible: false,
         driverId: 0,
@@ -1228,7 +1246,7 @@ export function useAutofuzzController() {
     const controlLoopSummary = computed(() => {
       const flow = detail.fuzzFlow || {};
       const phase = flow.phase || '';
-      const activeDrivers = coverageTargets.value.filter(target => target.status === 'running');
+      const activeDrivers = scheduleTargets.value.filter(target => target.status === 'running');
       const latest = flowRows.value[0];
       return {
         phase: flowPhaseLabels[phase] || phase || (detail.status === 'running' ? '等待 loop 数据' : detail.statusText),
@@ -1367,13 +1385,18 @@ export function useAutofuzzController() {
     const coverageLoading = computed(() => detail.coverage.status === 'loading' && !detail.coverage.data);
     const coverageError = computed(() => detail.coverage.status === 'error' && !detail.coverage.data);
     const coverageMessage = computed(() => detail.coverage.message || '');
+    const coverageRefreshPending = computed(() => coverageRefreshBusy.value || coverageRefreshTracking.value);
     const coverageIsMulti = computed(() => coverageData.value?.mode === 'multi');
-    const coverageTargets = computed(() =>
-      [...(coverageData.value?.targets || [])].sort((a, b) => {
-        const driverDelta = Number(a.driver_id || 0) - Number(b.driver_id || 0);
-        if (driverDelta !== 0) return driverDelta;
-        return Number(a.seq || 0) - Number(b.seq || 0);
-      })
+    const coverageTargets = computed(() => sortDriverTargets(coverageData.value?.targets || []));
+    const scheduleData = computed(() =>
+      coverageData.value?.mode === 'multi'
+        ? coverageData.value
+        : detail.driverScheduleData?.mode === 'multi' ? detail.driverScheduleData : null
+    );
+    const scheduleTargets = computed(() =>
+      coverageData.value?.mode === 'multi'
+        ? coverageTargets.value
+        : sortDriverTargets(detail.driverScheduleData?.targets || [])
     );
     const coverageTotalMeta = computed(() => {
       const data = coverageData.value;
@@ -1442,13 +1465,18 @@ export function useAutofuzzController() {
       return `${report.covered_apis || 0}/${report.total_apis || 0} · ${apiCoveragePercent(report)}`;
     });
     const driverSchedule = computed(() =>
-      buildDriverSchedule(coverageData.value, coverageTargets.value, nowMs.value, coverageReceivedAtMs.value)
+      buildDriverSchedule(
+        scheduleData.value,
+        scheduleTargets.value,
+        nowMs.value,
+        coverageData.value?.mode === 'multi' ? coverageReceivedAtMs.value : detail.driverScheduleReceivedAt
+      )
     );
     const coverageDriverMeta = computed(() => {
-      const data = coverageData.value;
+      const data = scheduleData.value;
       if (!data || data.mode !== 'multi') return '等待调度';
-      const {targets, queued} = schedulerLists(data);
-      return `运行 ${data.active_targets || 0}/${targets.length} · queued ${queued.length}`;
+      const {queued} = schedulerLists(data);
+      return `运行 ${data.active_targets || 0}/${scheduleTargets.value.length} · queued ${queued.length}`;
     });
     const driverBoardRows = computed(() => {
       const apiCountByKey = new Map(apiDriverCoverageRows.value.map(row => [row.key, row.apis.length]));
@@ -1678,7 +1706,11 @@ export function useAutofuzzController() {
         router.push({name: 'task-detail', params: {taskId: selectedTaskId.value, tab: detail.activeTab || 'overview'}});
         return;
       }
-      router.push({name: view === 'tasks' ? 'tasks' : 'dashboard'});
+      if (view === 'tasks' || view === 'dashboard' || view === 'coverage-queue') {
+        router.push({name: view});
+        return;
+      }
+      router.push({name: 'dashboard'});
     }
 
     function openTask(id) {
@@ -1906,6 +1938,7 @@ export function useAutofuzzController() {
         const coveragePatch = patch.coverage;
         setCoverage(coveragePatch && typeof coveragePatch === 'object' && Object.prototype.hasOwnProperty.call(coveragePatch, 'data') ? coveragePatch.data : coveragePatch);
       }
+      if (Object.prototype.hasOwnProperty.call(patch, 'driverScheduleData')) setDriverScheduleData(patch.driverScheduleData);
       if (Object.prototype.hasOwnProperty.call(patch, 'coverageDetail')) setCoverageDetail(patch.coverageDetail);
       if (Object.prototype.hasOwnProperty.call(patch, 'libraryConfig')) {
         const config = patch.libraryConfig || {};
@@ -2502,6 +2535,8 @@ export function useAutofuzzController() {
 
     function setSnapshots(items) {
       detail.snapshots = Array.isArray(items) ? items : [];
+      detail.snapshotStatus = 'ready';
+      detail.snapshotMessage = '';
     }
 
     function setSnapshotDiff(patch = {}) {
@@ -2533,6 +2568,76 @@ export function useAutofuzzController() {
       if (detail.coverageDetail.visible) refreshDriverCoverageSource();
     }
 
+    function setDriverScheduleData(data) {
+      detail.driverScheduleData = data || null;
+      detail.driverScheduleReceivedAt = data ? Date.now() : 0;
+    }
+
+    function stopCoverageRefreshTracking() {
+      coverageRefreshVersion++;
+      coverageRefreshTracking.value = false;
+      if (coverageRefreshTimer) {
+        window.clearInterval(coverageRefreshTimer);
+        coverageRefreshTimer = 0;
+      }
+    }
+
+    async function pollCoverageRefreshQueue(id = detail.id, trackingVersion = coverageRefreshVersion) {
+      if (!id) return;
+      try {
+        const response = await fetch('/api/coverage-queue');
+        const queue = await responseJSON(response, '覆盖队列读取失败');
+        if (detail.id !== id || trackingVersion !== coverageRefreshVersion) return;
+        const items = (Array.isArray(queue.items) ? queue.items : [])
+          .filter(item => item.task_id === id && item.kind === 'live_refresh');
+        const running = items.filter(item => item.status === 'running').length;
+        const queued = items.filter(item => item.status === 'queued').length;
+        if (items.length === 0) {
+          stopCoverageRefreshTracking();
+          await refreshDetailData(id, ['coverage']);
+          if (detail.id === id) {
+            coverageRefreshMessage.value = '覆盖刷新队列已执行完毕，页面已重新读取缓存。';
+          }
+          return;
+        }
+        coverageRefreshTracking.value = true;
+        coverageRefreshMessage.value = `覆盖刷新已入队：执行中 ${running}，排队 ${queued}。页面会按缓存自动刷新。`;
+        await loadDetailResource('coverage', id, detailPollingVersion);
+      } catch (error) {
+        if (detail.id === id && trackingVersion === coverageRefreshVersion) {
+          coverageRefreshMessage.value = error.message || '覆盖队列读取失败';
+        }
+      }
+    }
+
+    function startCoverageRefreshTracking(id = detail.id) {
+      stopCoverageRefreshTracking();
+      if (!id) return;
+      const trackingVersion = coverageRefreshVersion;
+      void pollCoverageRefreshQueue(id, trackingVersion);
+      coverageRefreshTimer = window.setInterval(() => {
+        void pollCoverageRefreshQueue(id, trackingVersion);
+      }, 5000);
+    }
+
+    async function refreshCoverageCache() {
+      const id = detail.id;
+      if (!id || coverageRefreshBusy.value) return;
+      coverageRefreshBusy.value = true;
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/coverage/refresh`, {method: 'POST'});
+        const result = await responseJSON(response, '覆盖刷新入队失败');
+        coverageRefreshMessage.value = result.message || `已将 ${result.queued || 0} 个覆盖刷新任务入队。`;
+        startCoverageRefreshTracking(id);
+      } catch (error) {
+        if (detail.id === id) {
+          coverageRefreshMessage.value = error.message || '覆盖刷新入队失败';
+        }
+      } finally {
+        if (detail.id === id) coverageRefreshBusy.value = false;
+      }
+    }
+
     function stopDetailPolling() {
       detailPollingVersion++;
       detailPollTimers.forEach(timer => window.clearInterval(timer));
@@ -2552,6 +2657,9 @@ export function useAutofuzzController() {
       if (resource === 'coverage' && !detail.coverage.data) {
         detail.coverage.status = 'loading';
         detail.coverage.message = '';
+      } else if (resource === 'snapshots' && !detail.snapshots.length) {
+        detail.snapshotStatus = 'loading';
+        detail.snapshotMessage = '';
       }
       try {
         const response = await fetch(`/api/runs/${encodeURIComponent(id)}/${paths[resource]}`);
@@ -2565,6 +2673,9 @@ export function useAutofuzzController() {
         if (resource === 'coverage' && pollingVersion === detailPollingVersion && requestId === detailResourceRequests.get(resource) && detail.id === id && !detail.coverage.data) {
           detail.coverage.status = 'error';
           detail.coverage.message = error.message || '覆盖数据读取失败';
+        } else if (resource === 'snapshots' && pollingVersion === detailPollingVersion && requestId === detailResourceRequests.get(resource) && detail.id === id) {
+          detail.snapshotStatus = 'error';
+          detail.snapshotMessage = error.message || 'Snapshot 列表读取失败';
         }
         // Polling is best-effort; the next interval retries transient failures.
       }
@@ -2604,9 +2715,12 @@ export function useAutofuzzController() {
       crashReportRequestVersion++;
       pendingDetailFocus = null;
       closeEventStream();
+      stopCoverageRefreshTracking();
       stopDetailPolling();
       coverageSourceRequest++;
       driverSourceCache.clear();
+      coverageRefreshBusy.value = false;
+      coverageRefreshMessage.value = '';
       detailActionBusy.trigger = false;
       detailActionBusy.library = false;
       resetLibraryConfig();
@@ -2668,6 +2782,9 @@ export function useAutofuzzController() {
     function resetTaskDetail(id) {
       selectedTaskId.value = id;
       coverageReceivedAtMs.value = 0;
+      stopCoverageRefreshTracking();
+      coverageRefreshBusy.value = false;
+      coverageRefreshMessage.value = '';
       detailActionBusy.resume = false;
       detailActionBusy.cancel = false;
       detailActionBusy.trigger = false;
@@ -2695,6 +2812,8 @@ export function useAutofuzzController() {
         crashQueue: [],
         uniqueCrashes: [],
         snapshots: [],
+        snapshotStatus: 'idle',
+        snapshotMessage: '',
         snapshotDiff: {
           visible: false,
           title: 'Driver Diff',
@@ -2715,6 +2834,8 @@ export function useAutofuzzController() {
           driverId: 0
         },
         coverage: {data: null, status: 'idle', message: ''},
+        driverScheduleData: null,
+        driverScheduleReceivedAt: 0,
         coverageDetail: {
           visible: false,
           driverId: 0,
@@ -2781,6 +2902,7 @@ export function useAutofuzzController() {
         detail.meta = `任务 ${id}${parentMeta}${originMeta} · workspace: ${snapshot.target_dir || ''}${snapshot.error ? ' · 错误: ' + snapshot.error : ''}`;
         detail.status = snapshot.status || '';
         detail.statusText = statusLabels[snapshot.status] || snapshot.status || '未启动';
+        setDriverScheduleData(snapshot.driver_schedule || null);
         loadFuzzFlow(id, selectionVersion);
         if (snapshot.status === 'running' || snapshot.status === 'stopping') {
           connectEvents(id);
@@ -2849,6 +2971,7 @@ export function useAutofuzzController() {
         if (detail.id !== id) return;
         setDetailStages(snapshot.stages || []);
         detail.meta = `任务 ${snapshot.id || id} · workspace: ${snapshot.target_dir || ''}${snapshot.error ? ' · 错误: ' + snapshot.error : ''}`;
+        setDriverScheduleData(snapshot.driver_schedule || null);
       } catch (_) {
         // The final run event already carries the authoritative status.
       }
@@ -3250,6 +3373,12 @@ export function useAutofuzzController() {
         loadTasks();
         return;
       }
+      if (route.name === 'coverage-queue') {
+        if (activeMainView.value !== 'coverage-queue') stopTaskRuntime();
+        setMainView('coverage-queue', '');
+        loadTasks();
+        return;
+      }
       if (route.name !== 'task-detail' && !isDriverCoverageRouteName(route.name)) return;
       const id = String(route.params.taskId || '');
       if (!id) return;
@@ -3402,6 +3531,9 @@ export function useAutofuzzController() {
       coverageIsMulti,
       coverageLoading,
       coverageMessage,
+      coverageRefreshBusy,
+      coverageRefreshMessage,
+      coverageRefreshPending,
       coveragePartials,
       coverageGapSummary,
       coverageDriverFilter,
@@ -3475,6 +3607,7 @@ export function useAutofuzzController() {
       removeTask,
       removeCrashQueueItem,
       pathPickerState,
+      refreshCoverageCache,
       resetApiCoverageTools,
       resetUniqueCrashFilters,
       resumeTask,

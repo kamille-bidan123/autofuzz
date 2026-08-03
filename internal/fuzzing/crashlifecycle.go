@@ -206,6 +206,39 @@ func crashReplayEnv(env []string) []string {
 	return append(out, "LLVM_PROFILE_FILE=/dev/null")
 }
 
+const replayWorkspacePrefix = ".autofuzz-replay-"
+
+// prepareReplayWorkDir creates an isolated cwd for crash replay while mirroring
+// the snapshot's top-level layout via symlinks. Drivers that materialize fuzz
+// input as ./dummy_file then write into this scratch dir instead of polluting
+// crashes/ or the snapshot root.
+func prepareReplayWorkDir(driverDir string) (string, func(), error) {
+	workDir, err := os.MkdirTemp(driverDir, replayWorkspacePrefix)
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(workDir)
+	}
+	entries, err := os.ReadDir(driverDir)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	workBase := filepath.Base(workDir)
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == workBase || name == "dummy_file" || strings.HasPrefix(name, replayWorkspacePrefix) {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(driverDir, name), filepath.Join(workDir, name)); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+	}
+	return workDir, cleanup, nil
+}
+
 // replayCrashDetailed runs the given binary once on a crash input and returns
 // the full crash triage data needed by unique-crash LLM analysis. ASan
 // symbolization is kept ON (not symbolize=0) because the stack function names
@@ -213,8 +246,17 @@ func crashReplayEnv(env []string) []string {
 func replayCrashDetailed(ctx context.Context, binary, driverDir, crashPath string) crashReplayResult {
 	replayCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	workDir := driverDir
+	cleanup := func() {}
+	if strings.TrimSpace(driverDir) != "" {
+		if isolatedDir, isolatedCleanup, err := prepareReplayWorkDir(driverDir); err == nil {
+			workDir = isolatedDir
+			cleanup = isolatedCleanup
+		}
+	}
+	defer cleanup()
 	cmd := exec.CommandContext(replayCtx, binary, "-runs=1", crashPath)
-	cmd.Dir = driverDir
+	cmd.Dir = workDir
 	cmd.Env = crashReplayEnv(os.Environ())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

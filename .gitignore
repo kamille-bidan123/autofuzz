@@ -11,6 +11,7 @@
 /webui/.vite-temp/
 /webui/dist/
 /webui/coverage/
+/internal/webui/static/generated/
 
 # Package manager logs.
 npm-debug.log*

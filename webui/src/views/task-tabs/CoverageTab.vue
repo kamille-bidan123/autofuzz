@@ -1,11 +1,22 @@
 <script setup>
+import { RefreshCcw } from '@lucide/vue';
 import { useAutofuzz } from '../../appContext';
 const ui = useAutofuzz();
 </script>
 
 <template>
   <section class="panel">
-    <div class="panel-head compact"><div><h2>覆盖数据</h2><p>任务 union 与子 driver 明细</p></div><span class="panel-meta">{{ ui.coverageTotalMeta }}</span></div>
+    <div class="panel-head compact">
+      <div><h2>覆盖数据</h2><p>任务 union 与子 driver 明细</p></div>
+      <div class="coverage-panel-actions">
+        <span class="panel-meta">{{ ui.coverageTotalMeta }}</span>
+        <button class="primary command-button coverage-refresh-button" type="button" :disabled="ui.coverageRefreshBusy" @click="ui.refreshCoverageCache">
+          <RefreshCcw :size="14" aria-hidden="true" />
+          <span>{{ ui.coverageRefreshBusy ? '正在入队' : '刷新缓存' }}</span>
+        </button>
+      </div>
+    </div>
+    <div v-if="ui.coverageRefreshMessage" class="coverage-refresh-alert" role="status">{{ ui.coverageRefreshMessage }}</div>
     <div class="coverage-summary-strip">
       <div v-for="item in ui.coverageSummaryItems" :key="item.label" :class="item.className">
         <span>{{ item.label }}</span>

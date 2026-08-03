@@ -23,7 +23,20 @@ func TestSaveLoad(t *testing.T) {
 	}
 }
 
-func TestRestoreResumeStage(t *testing.T) {
+func TestEffectiveStageForLegacyTerminalState(t *testing.T) {
+	runState := New("repo", "", "repo", "/source")
+	runState.Stage = StageBlocked
+	runState.RecordError(StageComprehended, errors.New("temporary failure"))
+
+	if got := runState.EffectiveStage(); got != StagePreprocessed {
+		t.Fatalf("EffectiveStage() = %q, want %q", got, StagePreprocessed)
+	}
+	if got := runState.TerminalStatus(); got != RunStatusBlocked {
+		t.Fatalf("TerminalStatus() = %q, want %q", got, RunStatusBlocked)
+	}
+}
+
+func TestRestoreResumeStageFromLegacyTerminalState(t *testing.T) {
 	runState := New("repo", "", "repo", "/source")
 	runState.Stage = StageBlocked
 	runState.RecordError(StageComprehended, errors.New("temporary failure"))
@@ -34,9 +47,29 @@ func TestRestoreResumeStage(t *testing.T) {
 	if runState.Stage != StagePreprocessed {
 		t.Fatalf("got resume stage %q, want %q", runState.Stage, StagePreprocessed)
 	}
+	if runState.RunStatus != "" {
+		t.Fatalf("RunStatus = %q, want cleared status", runState.RunStatus)
+	}
 }
 
-func TestRestoreResumeStageRejectsMissingError(t *testing.T) {
+func TestRestoreResumeStageFromRunStatusKeepsCompletedStage(t *testing.T) {
+	runState := New("repo", "", "repo", "/source")
+	runState.Stage = StageGenerated
+	runState.RunStatus = RunStatusFailed
+	runState.RecordError(StageFuzzing, errors.New("fuzz interrupted"))
+
+	if err := runState.RestoreResumeStage(); err != nil {
+		t.Fatal(err)
+	}
+	if runState.Stage != StageGenerated {
+		t.Fatalf("got resume stage %q, want %q", runState.Stage, StageGenerated)
+	}
+	if runState.RunStatus != "" {
+		t.Fatalf("RunStatus = %q, want cleared status", runState.RunStatus)
+	}
+}
+
+func TestRestoreResumeStageRejectsLegacyMissingError(t *testing.T) {
 	runState := New("repo", "", "repo", "/source")
 	runState.Stage = StageFailed
 	if err := runState.RestoreResumeStage(); err == nil {

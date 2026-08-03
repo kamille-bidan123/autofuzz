@@ -93,20 +93,24 @@ func (m *CorpusMonitor) Start(ctx context.Context) {
 	_ = os.MkdirAll(m.profileDir, 0o755)
 	_ = os.MkdirAll(m.uniqueCrashesDir, 0o755)
 	_ = os.MkdirAll(m.crashReportsDir, 0o755)
+	m.loadCoverageSnapshotCache()
 	registerLiveCorpusMonitor(m)
 	// Load existing crash analysis (resume): rebuild dedup state + mark
 	// existing crash files as seen so we only analyze new ones.
 	m.loadCrashAnalysis()
 	m.enqueuePendingCrashReports(ctx)
-	m.wg.Add(2)
-	go func() { defer m.wg.Done(); m.coverageLoop(ctx) }()
+	if !m.cfg.DisableMonitorCoverageLoop {
+		m.wg.Add(1)
+		go func() { defer m.wg.Done(); m.coverageLoop(ctx) }()
+	}
+	m.wg.Add(1)
 	go func() { defer m.wg.Done(); m.crashLoop(ctx) }()
 }
 
 // coverageLoop merges live profraw files and runs llvm-cov export on the
 // aggregate profdata every minute. The export is NOT under the main mutex.
 func (m *CorpusMonitor) coverageLoop(ctx context.Context) {
-	m.updateCoverageCache()
+	_ = m.RefreshCoverageCacheContext(ctx, nil)
 	ticker := time.NewTicker(monitorCovInterval)
 	defer ticker.Stop()
 	for {
@@ -116,31 +120,76 @@ func (m *CorpusMonitor) coverageLoop(ctx context.Context) {
 		case <-m.stop:
 			return
 		case <-ticker.C:
-			m.updateCoverageCache()
+			_ = m.RefreshCoverageCacheContext(ctx, nil)
 		}
 	}
 }
 
-func (m *CorpusMonitor) updateCoverageCache() {
-	m.mergeLiveProfiles()
-	snap := CoverageSnapshot{Timestamp: time.Now()}
-	var cs CoverageStatus
-	if fileExists(m.profdataPath) {
-		var err error
-		cs, err = CollectCoverageStatus(m.profdataPath, m.cfg.BinaryPath, m.cfg.SourceDir, m.cfg.BuildDir)
-		if err == nil {
-			snap.Available = true
-			snap.Coverage = cs
-		}
+func (m *CorpusMonitor) storeCoverageSnapshot(snap CoverageSnapshot) {
+	m.covMu.Lock()
+	m.covCache = snap
+	m.covMu.Unlock()
+	_ = writeCoverageSnapshotCache(m.coverageCachePath(), snap)
+}
+
+func (m *CorpusMonitor) coverageCachePath() string {
+	return filepath.Join(m.workDir, coverageCacheFileName)
+}
+
+func (m *CorpusMonitor) loadCoverageSnapshotCache() {
+	data, err := os.ReadFile(m.coverageCachePath())
+	if err != nil {
+		return
 	}
+	var snapshot CoverageSnapshot
+	if json.Unmarshal(data, &snapshot) != nil {
+		return
+	}
+	m.covMu.Lock()
+	m.covCache = snapshot
+	m.covMu.Unlock()
+}
+
+// RefreshCoverageCache merges the latest live profiles and refreshes the
+// monitor's cached aggregate coverage once. It is used by the monitor's own
+// timer in single-driver mode and by the task-level scheduler in multi-driver
+// mode.
+func (m *CorpusMonitor) RefreshCoverageCache(logf func(string, ...any)) error {
+	return m.RefreshCoverageCacheContext(context.Background(), logf)
+}
+
+func (m *CorpusMonitor) RefreshCoverageCacheContext(ctx context.Context, logf func(string, ...any)) error {
+	m.mergeLiveProfiles()
 	seedCount := countCorpusSeeds(m.cfg.CorpusDir)
 	m.mu.Lock()
 	m.totalSeeds = seedCount
 	m.mu.Unlock()
-	snap.SeedCount = seedCount
-	m.covMu.Lock()
-	m.covCache = snap
-	m.covMu.Unlock()
+	if !fileExists(m.profdataPath) {
+		m.covMu.RLock()
+		hadSnapshot := m.covCache.Available
+		m.covMu.RUnlock()
+		if !hadSnapshot {
+			m.storeCoverageSnapshot(CoverageSnapshot{Timestamp: time.Now(), SeedCount: seedCount})
+		}
+		return nil
+	}
+	cs, err := collectCoverageStatusRefreshContext(ctx, m.profdataPath, m.cfg.BinaryPath, m.cfg.SourceDir, m.cfg.BuildDir, m.cfg.TaskDir, "")
+	if err != nil {
+		return err
+	}
+	m.storeCoverageSnapshot(CoverageSnapshot{
+		Timestamp: time.Now(),
+		Available: true,
+		SeedCount: seedCount,
+		Coverage:  cs,
+	})
+	if logf != nil {
+		status := CoverageStatusToCorpusCoverage(cs, seedCount, false, m.cfg.CorpusDir)
+		logf("[corpus-monitor] refreshed coverage cache: seeds=%d executed=%d full=%d partial=%d uncovered=%d\n",
+			seedCount, status.Summary.ExecutedFunctions,
+			status.Summary.FullFunctions, status.Summary.PartialFunctions, len(status.Uncovered))
+	}
+	return nil
 }
 
 func (m *CorpusMonitor) mergeLiveProfiles() {
@@ -252,12 +301,16 @@ func corpusMonitorSnapshotKey(snapshotDir string) string {
 // Snapshot returns the current aggregate coverage status instantly. It does
 // not replay corpus seeds or attribute branches to individual seeds.
 func (m *CorpusMonitor) Snapshot(sourceDir, buildDir string, logf func(string, ...any)) (CorpusCoverageStatus, error) {
+	return m.SnapshotContext(context.Background(), sourceDir, buildDir, logf)
+}
+
+func (m *CorpusMonitor) SnapshotContext(ctx context.Context, sourceDir, buildDir string, logf func(string, ...any)) (CorpusCoverageStatus, error) {
 	m.mergeLiveProfiles()
 	if !fileExists(m.profdataPath) {
 		return CorpusCoverageStatus{CorpusDir: m.cfg.CorpusDir}, nil
 	}
 
-	cs, err := CollectCoverageStatus(m.profdataPath, m.cfg.BinaryPath, sourceDir, buildDir)
+	cs, err := collectCoverageStatusContext(ctx, m.profdataPath, m.cfg.BinaryPath, sourceDir, buildDir, m.cfg.TaskDir, "")
 	if err != nil {
 		return CorpusCoverageStatus{}, fmt.Errorf("monitor snapshot: %w", err)
 	}
@@ -266,14 +319,12 @@ func (m *CorpusMonitor) Snapshot(sourceDir, buildDir string, logf func(string, .
 	m.mu.Lock()
 	m.totalSeeds = seedCount
 	m.mu.Unlock()
-	m.covMu.Lock()
-	m.covCache = CoverageSnapshot{
+	m.storeCoverageSnapshot(CoverageSnapshot{
 		Timestamp: time.Now(),
 		Available: true,
 		SeedCount: seedCount,
 		Coverage:  cs,
-	}
-	m.covMu.Unlock()
+	})
 	status := CoverageStatusToCorpusCoverage(cs, seedCount, false, m.cfg.CorpusDir)
 
 	if logf != nil {
@@ -329,7 +380,7 @@ func (m *CorpusMonitor) scanAndAnalyzeCrashes(ctx context.Context) {
 		}
 		// Replay on the snapshot's own binary (the exact driver that found
 		// the crash). ASan symbolization is ON (needed for stack-based dedup).
-		replay := replayCrashDetailed(ctx, m.snapshotBinaryPath, m.crashesDir, path)
+		replay := replayCrashDetailed(ctx, m.snapshotBinaryPath, m.snapshotDir, path)
 		m.crashMu.Lock()
 		m.seenCrashes[path] = true
 		m.totalCrashCount++

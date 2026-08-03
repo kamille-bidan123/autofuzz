@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,6 +51,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 		a.State.CompileCommandsPath = result.CompileCommands
 		a.State.StaticLibraries = result.StaticLibraries
 		a.State.Stage = state.StageBuilt
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -87,6 +89,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 			return a.block(state.StagePreprocessed, fmt.Errorf("extracted %d APIs; header scope is too broad for safe automatic refinement", assessment.Count))
 		}
 		a.State.Stage = state.StagePreprocessed
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -109,6 +112,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 			return a.fail(state.StageComprehended, err)
 		}
 		a.State.Stage = state.StageComprehended
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -134,6 +138,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 			return a.fail(state.StageGenerated, fmt.Errorf("generate returned successfully but produced no fuzz driver"))
 		}
 		a.State.Stage = state.StageGenerated
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -149,6 +154,7 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 			return a.fail(state.StageFuzzing, err)
 		}
 		a.State.Stage = state.StageFuzzing
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -188,6 +194,7 @@ func (a *Agent) runCrashFixChild(ctx context.Context) error {
 		a.State.CompileCommandsPath = result.CompileCommands
 		a.State.StaticLibraries = result.StaticLibraries
 		a.State.Stage = state.StageBuilt
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -207,6 +214,7 @@ func (a *Agent) runCrashFixChild(ctx context.Context) error {
 			return a.fail(state.StageGenerated, fmt.Errorf("crash fix child task produced no fuzz driver"))
 		}
 		a.State.Stage = state.StageGenerated
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -221,6 +229,7 @@ func (a *Agent) runCrashFixChild(ctx context.Context) error {
 			return a.fail(state.StageFuzzing, err)
 		}
 		a.State.Stage = state.StageFuzzing
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -493,6 +502,7 @@ func (a *Agent) configureWithCodex(ctx context.Context, firstAttempt int, failur
 		a.State.LibraryConfigPath = result.ConfigPath
 		a.State.OutputPath = result.OutputPath
 		a.State.Stage = state.StageConfigured
+		a.State.RunStatus = ""
 		if err := a.State.Save(a.StatePath); err != nil {
 			return err
 		}
@@ -503,8 +513,26 @@ func (a *Agent) configureWithCodex(ctx context.Context, firstAttempt int, failur
 	return lastErr
 }
 
+func isCancellationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context canceled") ||
+		strings.Contains(message, "command cancelled") ||
+		strings.Contains(message, "command canceled")
+}
+
 func (a *Agent) fail(stage state.Stage, err error) error {
-	a.State.Stage = state.StageFailed
+	if isCancellationError(err) {
+		a.State.RunStatus = ""
+		_ = a.State.Save(a.StatePath)
+		return err
+	}
+	a.State.RunStatus = state.RunStatusFailed
 	a.State.RecordError(stage, err)
 	_ = a.State.Save(a.StatePath)
 	a.stageFailed(stage, err.Error())
@@ -512,7 +540,12 @@ func (a *Agent) fail(stage state.Stage, err error) error {
 }
 
 func (a *Agent) block(stage state.Stage, err error) error {
-	a.State.Stage = state.StageBlocked
+	if isCancellationError(err) {
+		a.State.RunStatus = ""
+		_ = a.State.Save(a.StatePath)
+		return err
+	}
+	a.State.RunStatus = state.RunStatusBlocked
 	a.State.RecordError(stage, err)
 	_ = a.State.Save(a.StatePath)
 	a.stageFailed(stage, err.Error())
@@ -569,6 +602,7 @@ func (a *Agent) runFuzzing(ctx context.Context) error {
 
 	cfg := fuzzing.FuzzConfig{
 		DriverDir:          driverDir,
+		TaskDir:            a.TargetDir,
 		SourceDir:          a.State.SourceDir,
 		BuildDir:           a.State.BuildDir,
 		BuildScript:        buildScript,

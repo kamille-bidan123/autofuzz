@@ -41,7 +41,7 @@ cd /home/tsj/fuzz_agent/autofuzz
 make
 ```
 
-`make` 会先通过 npm/Vite 构建 Vue Web 页面到 `internal/webui/static`，再编译完整的 Go 二进制。`make test` 会同时执行 Vitest 前端组件测试和 Go 测试：
+`make` 会先通过 npm/Vite 构建 Vue Web 页面到 `internal/webui/static/generated`，再编译完整的 Go 二进制。`make test` 会同时执行 Vitest 前端组件测试和 Go 测试：
 
 ```text
 bin/autofuzz
@@ -64,7 +64,7 @@ make test
 
 ## Web 控制台
 
-Autofuzz 提供一个 Web 控制台。静态资源在编译时嵌入 `autofuzz-web`，运行已构建好的服务不需要 Node.js。启动服务：
+Autofuzz 提供一个 Web 控制台。静态资源在编译时嵌入 `autofuzz-web`，运行已构建好的服务不需要 Node.js。仓库只保留一个占位页 `internal/webui/static/index.html`，真正的前端产物输出到 `internal/webui/static/generated` 并由 `.gitignore` 忽略。启动服务：
 
 ```bash
 cd /home/tsj/fuzz_agent/autofuzz
@@ -84,6 +84,8 @@ http://127.0.0.1:8080
 ```
 
 控制台使用 Vue Router 的 hash 路由保存 Dashboard、Tasks、Task Detail 和详情 Tab 状态；刷新页面或使用浏览器前进、后退时可以恢复当前视图。
+
+如果直接执行 `go build ./cmd/autofuzz-web`，Go 不会自动触发前端打包。未先执行 `make web` 或 `make` 时，服务仍可启动，但首页只会显示“前端资源未构建”的占位页，而不是完整控制台。
 
 Web 表单覆盖当前 Autofuzz CLI 的业务配置项：目标仓库、Git ref、workspace、PromeFuzz 路径、配置文件、虚拟环境 Python、并发度、Codex 命令/模型/profile、恢复运行和停止阶段。
 

@@ -96,12 +96,15 @@ func TestTargetReachedPlateauRequiresTwoFlatDeltas(t *testing.T) {
 }
 
 func TestResolveMultiFuzzParallelismCapsChildDrivers(t *testing.T) {
-	wantDefault := runtime.NumCPU()
+	wantDefault := runtime.NumCPU() / 2
+	if wantDefault < 1 {
+		wantDefault = 1
+	}
 	if wantDefault > 64 {
 		wantDefault = 64
 	}
 	if got := resolveMultiFuzzParallelism(FuzzConfig{}, 64); got != wantDefault {
-		t.Fatalf("default parallelism = %d, want min(nproc, target count) = %d", got, wantDefault)
+		t.Fatalf("default parallelism = %d, want min(max(1, nproc/2), target count) = %d", got, wantDefault)
 	}
 	if got := resolveMultiFuzzParallelism(FuzzConfig{MaxParallelDrivers: 4}, 64); got != 4 {
 		t.Fatalf("parallelism = %d, want 4", got)
@@ -280,6 +283,31 @@ func TestCollectMultiLiveDataPreservesLastSummary(t *testing.T) {
 	}
 	if data[0].coverage.Summary.ExecutedFunctions != 9 {
 		t.Fatalf("executed summary = %d, want preserved value 9", data[0].coverage.Summary.ExecutedFunctions)
+	}
+}
+
+func TestSortedRunningTargetKeysOrdersByDriverThenSeq(t *testing.T) {
+	running := map[targetRuntimeKey]*runningTarget{
+		{driverID: 3, seq: 1}: {state: &TargetState{DriverID: 3, Seq: 1}},
+		{driverID: 1, seq: 2}: {state: &TargetState{DriverID: 1, Seq: 2}},
+		{driverID: 1, seq: 1}: {state: &TargetState{DriverID: 1, Seq: 1}},
+		{driverID: 2, seq: 4}: {state: &TargetState{DriverID: 2, Seq: 4}},
+	}
+
+	got := sortedRunningTargetKeys(running)
+	want := []targetRuntimeKey{
+		{driverID: 1, seq: 1},
+		{driverID: 1, seq: 2},
+		{driverID: 2, seq: 4},
+		{driverID: 3, seq: 1},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(sortedRunningTargetKeys) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sortedRunningTargetKeys()[%d] = %#v, want %#v", i, got[i], want[i])
+		}
 	}
 }
 

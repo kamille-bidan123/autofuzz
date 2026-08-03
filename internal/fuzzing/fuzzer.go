@@ -20,6 +20,7 @@ import (
 // FuzzConfig holds all parameters needed to run the fuzzing phase.
 type FuzzConfig struct {
 	DriverDir    string        // directory containing the active driver and build scripts
+	TaskDir      string        // task workspace root; when set, llvm-cov data under this tree is kept
 	SourceDir    string        // target library source directory
 	BuildDir     string        // out-of-tree build directory (sources may be copied here; llvm-cov reports them under here)
 	BuildScript  string        // coverage build script path
@@ -43,6 +44,9 @@ type FuzzConfig struct {
 	// child driver(s), so multi-driver startup should copy it without stripping
 	// a PromeFuzz dispatcher selector byte. Used by crash-fix child tasks.
 	DriverLocalCorpus bool
+	// DisableMonitorCoverageLoop disables the CorpusMonitor's built-in periodic
+	// llvm-cov refresh loop so callers can manage refresh timing centrally.
+	DisableMonitorCoverageLoop bool
 
 	// TriggerCh is an optional channel that, when signaled, causes the
 	// fuzz loop to immediately skip the remaining wait and proceed to
@@ -392,7 +396,7 @@ func RunFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		var corpusCov CorpusCoverageStatus
 		if monitor != nil {
 			var covErr error
-			corpusCov, covErr = monitor.Snapshot(cfg.SourceDir, cfg.BuildDir, cfg.logf)
+			corpusCov, covErr = monitor.SnapshotContext(ctx, cfg.SourceDir, cfg.BuildDir, cfg.logf)
 			if covErr != nil {
 				cfg.logf("[fuzzing] iteration %d: corpus coverage error: %v\n", iteration, covErr)
 				corpusCov = CorpusCoverageStatus{}

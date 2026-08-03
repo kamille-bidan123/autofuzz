@@ -153,7 +153,7 @@ func TestFailedTaskCanResumeWithSameID(t *testing.T) {
 	manager := NewManager(context.Background())
 	runError := errors.New("build failed")
 	manager.runAgent = func(_ context.Context, autoAgent *agent.Agent) error {
-		autoAgent.State.Stage = state.StageFailed
+		autoAgent.State.RunStatus = state.RunStatusFailed
 		autoAgent.State.RecordError(state.StageCloned, runError)
 		if err := autoAgent.State.Save(autoAgent.StatePath); err != nil {
 			return err
@@ -190,6 +190,25 @@ func TestFailedTaskCanResumeWithSameID(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, resumed, "stopped")
+}
+
+func TestHistoricalStatusUsesRunStatusWithoutLosingStage(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "agent-state.json")
+	runState := state.New("repo", "", "repo", "/source")
+	runState.Stage = state.StageGenerated
+	runState.RunStatus = state.RunStatusFailed
+	runState.RecordError(state.StageFuzzing, errors.New("fuzzing failed"))
+	if err := runState.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+
+	status, stage := historicalStatus(statePath)
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+	if stage != string(state.StageGenerated) {
+		t.Fatalf("stage = %q, want %q", stage, state.StageGenerated)
+	}
 }
 
 func TestCreateAndStartHTTPRoutesAreSeparate(t *testing.T) {

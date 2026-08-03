@@ -23,20 +23,28 @@ func mustMarshalExport(t *testing.T, fns []exportFunc) []byte {
 // filtered out (the historical "0 executed functions" bug); with buildDir they
 // are counted.
 func TestParseExportJSONBuildDir(t *testing.T) {
-	sourceDir := t.TempDir()
-	buildDir := t.TempDir()
-	driverDir := t.TempDir()
+	taskDir := t.TempDir()
+	sourceDir := filepath.Join(taskDir, "source")
+	buildDir := filepath.Join(taskDir, "build")
+	driverDir := filepath.Join(taskDir, "fuzz_driver")
+	installDir := filepath.Join(taskDir, "install")
+	for _, dir := range []string{sourceDir, buildDir, driverDir, installDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	fns := []exportFunc{
 		{Name: "src_fn", Filenames: []string{filepath.Join(sourceDir, "lib.c")}, Count: 3},
 		{Name: "build_fn", Filenames: []string{filepath.Join(buildDir, "lib.c")}, Count: 7},
 		{Name: "driver_fn", Filenames: []string{filepath.Join(driverDir, "entry.c")}, Count: 2},
+		{Name: "install_fn", Filenames: []string{filepath.Join(installDir, "include", "freetype.h")}, Count: 5},
 		{Name: "unrelated_fn", Filenames: []string{"/elsewhere/other.c"}, Count: 9},
 	}
 	data := mustMarshalExport(t, fns)
 
 	t.Run("with_buildDir", func(t *testing.T) {
-		got, err := parseExportJSON(data, sourceDir, buildDir, driverDir)
+		got, err := parseExportJSON(data, sourceDir, buildDir, "", driverDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,6 +55,9 @@ func TestParseExportJSONBuildDir(t *testing.T) {
 		if len(got) != 3 || !names["src_fn"] || !names["build_fn"] || !names["driver_fn"] {
 			t.Fatalf("expected src_fn+build_fn+driver_fn (3), got %d: %v", len(got), names)
 		}
+		if names["install_fn"] {
+			t.Fatal("install_fn should stay filtered without taskDir")
+		}
 		if names["unrelated_fn"] {
 			t.Fatal("unrelated_fn should have been filtered out")
 		}
@@ -56,7 +67,7 @@ func TestParseExportJSONBuildDir(t *testing.T) {
 		// Regression guard: build_fn must be filtered out when buildDir is
 		// empty, matching the pre-fix behavior that caused 0 executed
 		// functions for out-of-tree builds.
-		got, err := parseExportJSON(data, sourceDir, "", driverDir)
+		got, err := parseExportJSON(data, sourceDir, "", "", driverDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,6 +80,23 @@ func TestParseExportJSONBuildDir(t *testing.T) {
 		}
 		if len(got) != 2 || !names["src_fn"] || !names["driver_fn"] {
 			t.Fatalf("expected src_fn+driver_fn (2), got %d: %v", len(got), names)
+		}
+	})
+
+	t.Run("with_taskDir", func(t *testing.T) {
+		got, err := parseExportJSON(data, sourceDir, buildDir, taskDir, driverDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := map[string]bool{}
+		for _, f := range got {
+			names[f.name] = true
+		}
+		if len(got) != 4 || !names["src_fn"] || !names["build_fn"] || !names["driver_fn"] || !names["install_fn"] {
+			t.Fatalf("expected all task-local functions (4), got %d: %v", len(got), names)
+		}
+		if names["unrelated_fn"] {
+			t.Fatal("unrelated_fn should have been filtered out")
 		}
 	})
 }
@@ -88,7 +116,7 @@ func TestParseExportJSONFunctionLineRange(t *testing.T) {
 			{2, 3, 2, 18, 1},
 		},
 	}})
-	got, err := parseExportJSON(data, sourceDir, "", "")
+	got, err := parseExportJSON(data, sourceDir, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +156,7 @@ func TestParseExportJSONMacroExpansionKeepsFunctionRangeInMainFile(t *testing.T)
 			{51, 9, 51, 13, 0, 1, 1, 0, 4}, // branch in macro.h mapped to test.c line 3
 		},
 	}})
-	got, err := parseExportJSON(data, sourceDir, "", "")
+	got, err := parseExportJSON(data, sourceDir, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,16 +181,24 @@ func TestParseExportJSONMacroExpansionKeepsFunctionRangeInMainFile(t *testing.T)
 // TestParseBranchReachBuildDir mirrors the buildDir filter for proof-seed
 // branch-site reach validation.
 func TestParseBranchReachBuildDir(t *testing.T) {
-	sourceDir := t.TempDir()
-	buildDir := t.TempDir()
+	taskDir := t.TempDir()
+	sourceDir := filepath.Join(taskDir, "source")
+	buildDir := filepath.Join(taskDir, "build")
+	installDir := filepath.Join(taskDir, "install")
+	for _, dir := range []string{sourceDir, buildDir, installDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Branch row: [line, col, endLine, endCol, trueCount, falseCount].
 	fns := []exportFunc{
 		{Name: "src_fn", Filenames: []string{filepath.Join(sourceDir, "lib.c")}, Count: 1, Branches: [][]int64{{10, 0, 11, 0, 1, 0}}},
 		{Name: "build_fn", Filenames: []string{filepath.Join(buildDir, "lib.c")}, Count: 1, Branches: [][]int64{{20, 0, 21, 0, 0, 1}}},
+		{Name: "install_fn", Filenames: []string{filepath.Join(installDir, "include", "ft.h")}, Count: 1, Branches: [][]int64{{30, 0, 31, 0, 1, 0}}},
 	}
 	data := mustMarshalExport(t, fns)
 
-	withBuild, err := parseBranchReach(data, sourceDir, buildDir)
+	withBuild, err := parseBranchReach(data, sourceDir, buildDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +208,11 @@ func TestParseBranchReachBuildDir(t *testing.T) {
 	if _, ok := withBuild["src_fn"]; !ok {
 		t.Fatalf("src_fn should be reached, got %v", withBuild)
 	}
+	if _, ok := withBuild["install_fn"]; ok {
+		t.Fatalf("install_fn should stay filtered without taskDir, got %v", withBuild)
+	}
 
-	withoutBuild, err := parseBranchReach(data, sourceDir, "")
+	withoutBuild, err := parseBranchReach(data, sourceDir, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +221,14 @@ func TestParseBranchReachBuildDir(t *testing.T) {
 	}
 	if _, ok := withoutBuild["src_fn"]; !ok {
 		t.Fatalf("src_fn should still be reached, got %v", withoutBuild)
+	}
+
+	withTaskDir, err := parseBranchReach(data, sourceDir, buildDir, taskDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := withTaskDir["install_fn"]; !ok {
+		t.Fatalf("install_fn should be reached when taskDir is set, got %v", withTaskDir)
 	}
 }
 
@@ -214,7 +261,7 @@ func TestParseExportJSONSymlinkedSourcePath(t *testing.T) {
 		Filenames: []string{aliasedFile},
 		Count:     1,
 	}})
-	got, err := parseExportJSON(data, sourceDir, "", "")
+	got, err := parseExportJSON(data, sourceDir, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

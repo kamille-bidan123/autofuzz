@@ -355,6 +355,9 @@
     .coverage-summary-strip .completed strong { color: var(--green); }
     .coverage-summary-strip .warning strong { color: var(--orange); }
     .coverage-summary-strip .failed strong { color: var(--red); }
+    .coverage-panel-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; min-width: 0; }
+    .coverage-refresh-button { min-height: 34px; padding: 7px 11px; white-space: nowrap; }
+    .coverage-refresh-alert { padding: 10px 14px; border-bottom: 1px solid var(--line); background: #f4f8ff; color: #31517e; font-size: 12px; }
     .coverage-cards { display: grid; gap: 14px; padding: 14px; background: var(--surface); }
     .coverage-card { border: 1px solid var(--line); border-radius: var(--radius); background: white; overflow: hidden; }
     .coverage-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -618,6 +621,27 @@
       .dashboard-row { display: grid; gap: 4px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: white; cursor: pointer; }
       .dashboard-row:hover { border-color: #b8cffb; background: #fbfdff; box-shadow: 0 6px 16px rgba(37, 99, 235, .08); }
       .dashboard-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+      .coverage-queue-grid { display: grid; gap: 16px; }
+      .coverage-queue-stack { display: grid; gap: 12px; padding: 12px; background: var(--surface); }
+      .coverage-queue-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: white; }
+      .coverage-queue-card.running { border-color: #bed3ff; background: #f6f9ff; box-shadow: 0 8px 20px rgba(37, 99, 235, .08); }
+      .coverage-queue-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+      .coverage-queue-card-head strong { color: #26344d; font-size: 13px; }
+      .coverage-queue-card-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+      .queue-status-pill { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; background: #edf1f8; color: #60708d; font-size: 10px; font-weight: 900; }
+      .queue-status-pill.running { background: var(--blue-soft); color: var(--blue); }
+      .coverage-queue-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; }
+      .coverage-queue-facts div { min-width: 0; display: grid; gap: 4px; }
+      .coverage-queue-facts span { color: var(--muted); font-size: 10px; font-weight: 850; }
+      .coverage-queue-facts strong { color: #26344d; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+      .coverage-queue-paths { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcff; }
+      .coverage-queue-path { display: grid; gap: 3px; }
+      .coverage-queue-path span { color: var(--muted); font-size: 10px; font-weight: 850; }
+      .coverage-queue-path code {
+        padding: 0; background: transparent; color: #31405c;
+        font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere;
+      }
       .dashboard-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
       .dashboard-row-main { min-width: 0; display: grid; gap: 3px; }
       .dashboard-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
@@ -816,6 +840,7 @@
       .topbar, .list-toolbar { align-items: stretch; flex-direction: column; }
       .command-button { width: 100%; }
       .dashboard-kpis, .status-board, .form-grid, .driver-detail-grid { grid-template-columns: 1fr; }
+      .coverage-queue-facts { grid-template-columns: 1fr; }
       .side-nav { grid-template-columns: 1fr; }
       .search-box { flex-basis: auto; max-width: none; }
       .filter-control { justify-content: space-between; }
@@ -833,6 +858,7 @@
       .detail-repo { max-width: calc(100vw - 130px); }
       .detail-actions { width: 100%; margin-left: 0; }
       .detail-actions button { flex: 1; }
+      .coverage-panel-actions { width: 100%; justify-content: flex-start; }
       .control-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .control-summary-item:nth-child(2n) { border-right: 0; }
       .coverage-summary-strip, .crash-triage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }

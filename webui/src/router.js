@@ -13,6 +13,11 @@ const routes = [
     component: () => import('./views/TasksView.vue')
   },
   {
+    path: '/coverage-queue',
+    name: 'coverage-queue',
+    component: () => import('./views/CoverageQueueView.vue')
+  },
+  {
     path: '/tasks/:taskId/coverage/drivers/:driverId(\\d+)/versions/:seq(\\d+)',
     name: 'driver-coverage',
     component: () => import('./views/TaskDetailView.vue'),

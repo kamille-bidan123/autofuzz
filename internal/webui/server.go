@@ -33,6 +33,7 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/defaults", server.defaults)
 	server.mux.HandleFunc("GET /api/browse", server.browse)
 	server.mux.HandleFunc("GET /api/overview", server.overview)
+	server.mux.HandleFunc("GET /api/coverage-queue", server.coverageQueue)
 	server.mux.HandleFunc("POST /api/runs", server.createRun)
 	server.mux.HandleFunc("GET /api/runs", server.listRuns)
 	server.mux.HandleFunc("GET /api/runs/{id}", server.runSnapshot)
@@ -45,6 +46,7 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage", server.coverage)
+	server.mux.HandleFunc("POST /api/runs/{id}/coverage/refresh", server.refreshCoverage)
 	server.mux.HandleFunc("GET /api/runs/{id}/coverage/function-sources", server.coverageFunctionSources)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
 	server.mux.HandleFunc("GET /api/runs/{id}/unique-crashes", server.uniqueCrashes)
@@ -72,7 +74,10 @@ func (s *Server) index(response http.ResponseWriter, request *http.Request) {
 		http.NotFound(response, request)
 		return
 	}
-	data, err := staticFiles.ReadFile("static/index.html")
+	data, err := staticFiles.ReadFile("static/generated/index.html")
+	if err != nil {
+		data, err = staticFiles.ReadFile("static/index.html")
+	}
 	if err != nil {
 		http.Error(response, err.Error(), http.StatusInternalServerError)
 		return
@@ -244,6 +249,10 @@ func (s *Server) overview(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, s.manager.Overview())
 }
 
+func (s *Server) coverageQueue(response http.ResponseWriter, request *http.Request) {
+	writeJSON(response, http.StatusOK, s.manager.CoverageQueue())
+}
+
 func (s *Server) deleteRun(response http.ResponseWriter, request *http.Request) {
 	if err := s.manager.Delete(request.PathValue("id")); err != nil {
 		writeError(response, http.StatusConflict, err.Error())
@@ -314,6 +323,19 @@ func (s *Server) coverage(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, data)
+}
+
+func (s *Server) refreshCoverage(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.QueueCoverageRefresh(request.PathValue("id"))
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusAccepted, result)
 }
 
 func (s *Server) coverageFunctionSources(response http.ResponseWriter, request *http.Request) {

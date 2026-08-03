@@ -19,8 +19,17 @@ const (
 	StageComprehended Stage = "comprehended"
 	StageGenerated    Stage = "generated"
 	StageFuzzing      Stage = "fuzzing"
-	StageBlocked      Stage = "blocked"
-	StageFailed       Stage = "failed"
+	// Legacy terminal stage markers kept for backward compatibility with
+	// historical state files written before run_status existed.
+	StageBlocked Stage = "blocked"
+	StageFailed  Stage = "failed"
+)
+
+type RunStatus string
+
+const (
+	RunStatusBlocked RunStatus = "blocked"
+	RunStatusFailed  RunStatus = "failed"
 )
 
 var stageOrder = map[Stage]int{
@@ -57,6 +66,7 @@ type ErrorRecord struct {
 type RunState struct {
 	Version             int            `json:"version"`
 	Stage               Stage          `json:"stage"`
+	RunStatus           RunStatus      `json:"run_status,omitempty"`
 	RepositoryURL       string         `json:"repository_url"`
 	SourceKind          string         `json:"source_kind,omitempty"`
 	Ref                 string         `json:"ref,omitempty"`
@@ -137,25 +147,89 @@ func (s *RunState) RecordError(stage Stage, err error) {
 	s.Errors = append(s.Errors, ErrorRecord{Stage: stage, Message: err.Error(), Timestamp: time.Now()})
 }
 
-// RestoreResumeStage turns a terminal status into the last stage known to have
-// completed. The failed/blocked operation itself will then be retried.
-func (s *RunState) RestoreResumeStage() error {
-	if s.Stage != StageBlocked && s.Stage != StageFailed {
-		return nil
+func (s *RunState) TerminalStatus() RunStatus {
+	if s == nil {
+		return ""
 	}
-	if len(s.Errors) == 0 {
-		return fmt.Errorf("state is %s but contains no error record", s.Stage)
+	if s.RunStatus != "" {
+		return s.RunStatus
 	}
-	attempted := s.Errors[len(s.Errors)-1].Stage
+	switch s.Stage {
+	case StageBlocked:
+		return RunStatusBlocked
+	case StageFailed:
+		return RunStatusFailed
+	default:
+		return ""
+	}
+}
+
+func (s *RunState) LastAttemptedStage() (Stage, bool) {
+	if s == nil || len(s.Errors) == 0 {
+		return "", false
+	}
+	return s.Errors[len(s.Errors)-1].Stage, true
+}
+
+func (s *RunState) FailedStage() Stage {
+	if s.TerminalStatus() == "" {
+		return ""
+	}
+	stage, _ := s.LastAttemptedStage()
+	return stage
+}
+
+func (s *RunState) EffectiveStage() Stage {
+	if s == nil {
+		return StageInit
+	}
+	if !isLegacyTerminalStage(s.Stage) {
+		return s.Stage
+	}
+	attempted, ok := s.LastAttemptedStage()
+	if !ok {
+		return StageInit
+	}
+	stage, err := previousCompletedStage(attempted)
+	if err != nil {
+		return StageInit
+	}
+	return stage
+}
+
+func isLegacyTerminalStage(stage Stage) bool {
+	return stage == StageBlocked || stage == StageFailed
+}
+
+func previousCompletedStage(attempted Stage) (Stage, error) {
 	for index, candidate := range orderedStages {
 		if candidate == attempted {
 			if index == 0 {
-				s.Stage = StageInit
-			} else {
-				s.Stage = orderedStages[index-1]
+				return StageInit, nil
 			}
-			return nil
+			return orderedStages[index-1], nil
 		}
 	}
-	return fmt.Errorf("cannot resume unknown failed stage %q", attempted)
+	return "", fmt.Errorf("cannot resume unknown failed stage %q", attempted)
+}
+
+// RestoreResumeStage canonicalizes any legacy blocked/failed stage into the
+// last completed business stage, then clears the terminal run status so the
+// next run can proceed from that point.
+func (s *RunState) RestoreResumeStage() error {
+	if isLegacyTerminalStage(s.Stage) {
+		if len(s.Errors) == 0 {
+			return fmt.Errorf("state is %s but contains no error record", s.Stage)
+		}
+		if s.RunStatus == "" {
+			s.RunStatus = RunStatus(s.Stage)
+		}
+		stage, err := previousCompletedStage(s.Errors[len(s.Errors)-1].Stage)
+		if err != nil {
+			return err
+		}
+		s.Stage = stage
+	}
+	s.RunStatus = ""
+	return nil
 }

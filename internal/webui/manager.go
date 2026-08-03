@@ -141,8 +141,33 @@ type TaskSnapshot struct {
 	OriginDriverSeq int             `json:"origin_driver_seq,omitempty"`
 	OriginCrashes   []string        `json:"origin_crashes,omitempty"`
 	OriginSourceDir string          `json:"origin_source_dir,omitempty"`
+	DriverSchedule  *DriverSchedule `json:"driver_schedule,omitempty"`
 	Request         RunRequest      `json:"request"`
 	Stages          []StageSnapshot `json:"stages"`
+}
+
+type DriverSchedule struct {
+	Timestamp                time.Time                  `json:"timestamp"`
+	Mode                     string                     `json:"mode"`
+	Iteration                int                        `json:"iteration"`
+	ActiveTargets            int                        `json:"active_targets"`
+	MaxParallelTargets       int                        `json:"max_parallel_targets"`
+	RunningTargets           []int                      `json:"running_targets"`
+	QueuedTargets            []int                      `json:"queued_targets"`
+	NextTargets              []int                      `json:"next_targets,omitempty"`
+	RunningVersions          []fuzzing.TargetVersionRef `json:"running_versions,omitempty"`
+	QueuedVersions           []fuzzing.TargetVersionRef `json:"queued_versions,omitempty"`
+	NextVersions             []fuzzing.TargetVersionRef `json:"next_versions,omitempty"`
+	FuzzIntervalSeconds      int64                      `json:"fuzz_interval_seconds,omitempty"`
+	NextAnalysisAt           *time.Time                 `json:"next_analysis_at,omitempty"`
+	AnalysisRemainingSeconds int64                      `json:"analysis_remaining_seconds,omitempty"`
+	Targets                  []DriverScheduleTarget     `json:"targets"`
+}
+
+type DriverScheduleTarget struct {
+	DriverID int    `json:"driver_id"`
+	Seq      int    `json:"seq"`
+	Status   string `json:"status"`
 }
 
 type LibraryConfigResponse struct {
@@ -304,6 +329,10 @@ func (t *Task) Snapshot() TaskSnapshot {
 			Status: t.stages[definition.id],
 		})
 	}
+	var driverSchedule *DriverSchedule
+	if t.agent != nil {
+		driverSchedule = driverScheduleFromCoverageData(t.agent.CoverageData())
+	}
 	return TaskSnapshot{
 		ID: t.id, Status: t.status, Error: t.err, CreatedAt: t.createdAt,
 		FinishedAt: t.finishedAt, TargetDir: t.targetDir, StatePath: t.statePath,
@@ -311,6 +340,7 @@ func (t *Task) Snapshot() TaskSnapshot {
 		OriginDriverID: t.request.OriginDriverID, OriginDriverSeq: t.request.OriginDriverSeq,
 		OriginCrashes:   append([]string(nil), t.request.OriginCrashes...),
 		OriginSourceDir: t.request.OriginSourceDir,
+		DriverSchedule:  driverSchedule,
 		Request:         t.request, Stages: stages,
 	}
 }
@@ -638,6 +668,7 @@ func (m *Manager) ReprocessLibraryConfig(id, content string) (*TaskSnapshot, err
 
 	oldOutputPath := runState.OutputPath
 	runState.Stage = state.StageConfigured
+	runState.RunStatus = ""
 	runState.Language = validated.Language
 	runState.HeaderPaths = append([]string(nil), validated.HeaderPaths...)
 	runState.ConsumerPaths = append([]string(nil), validated.ConsumerPaths...)
@@ -689,6 +720,40 @@ func (m *Manager) CoverageData(id string, driverID, seq int) any {
 	return attachAPICoverage(data, targetDir)
 }
 
+func (m *Manager) QueueCoverageRefresh(id string) (CoverageRefreshResponse, error) {
+	targetDir := m.targetDirFor(id)
+	if targetDir == "" {
+		return CoverageRefreshResponse{}, fmt.Errorf("task not found")
+	}
+
+	specs := coverageRefreshSpecs(targetDir)
+	if len(specs) == 0 {
+		return CoverageRefreshResponse{}, fmt.Errorf("no coverage snapshots found")
+	}
+
+	sourceDir, buildDir := readStateDirs(filepath.Join(targetDir, "agent-state.json"))
+	for _, spec := range specs {
+		spec := spec
+		go func() {
+			_ = fuzzing.RefreshCoverageSnapshotCacheContext(
+				context.Background(),
+				spec.snapshotDir,
+				spec.profdataPath,
+				spec.binaryPath,
+				sourceDir,
+				buildDir,
+				targetDir,
+				"",
+				spec.corpusDir,
+				nil,
+			)
+		}()
+	}
+
+	message := fmt.Sprintf("已将 %d 个覆盖刷新任务入队，请等待队列完成后刷新页面。", len(specs))
+	return CoverageRefreshResponse{Queued: len(specs), Message: message}, nil
+}
+
 func attachAPICoverage(data any, targetDir string) any {
 	if targetDir == "" {
 		return data
@@ -724,6 +789,45 @@ func attachAPICoverage(data any, targetDir string) any {
 		}
 		return data
 	}
+}
+
+func driverScheduleFromCoverageData(data any) *DriverSchedule {
+	multi, ok := data.(fuzzing.MultiCoverageSnapshot)
+	if !ok {
+		ptr, ok := data.(*fuzzing.MultiCoverageSnapshot)
+		if !ok || ptr == nil {
+			return nil
+		}
+		multi = *ptr
+	}
+	schedule := &DriverSchedule{
+		Timestamp:                multi.Timestamp,
+		Mode:                     multi.Mode,
+		Iteration:                multi.Iteration,
+		ActiveTargets:            multi.ActiveTargets,
+		MaxParallelTargets:       multi.MaxParallelTargets,
+		RunningTargets:           append([]int(nil), multi.RunningTargets...),
+		QueuedTargets:            append([]int(nil), multi.QueuedTargets...),
+		NextTargets:              append([]int(nil), multi.NextTargets...),
+		RunningVersions:          append([]fuzzing.TargetVersionRef(nil), multi.RunningVersions...),
+		QueuedVersions:           append([]fuzzing.TargetVersionRef(nil), multi.QueuedVersions...),
+		NextVersions:             append([]fuzzing.TargetVersionRef(nil), multi.NextVersions...),
+		FuzzIntervalSeconds:      multi.FuzzIntervalSeconds,
+		AnalysisRemainingSeconds: multi.AnalysisRemainingSeconds,
+		Targets:                  make([]DriverScheduleTarget, 0, len(multi.Targets)),
+	}
+	if multi.NextAnalysisAt != nil {
+		next := *multi.NextAnalysisAt
+		schedule.NextAnalysisAt = &next
+	}
+	for _, target := range multi.Targets {
+		schedule.Targets = append(schedule.Targets, DriverScheduleTarget{
+			DriverID: target.DriverID,
+			Seq:      target.Seq,
+			Status:   target.Status,
+		})
+	}
+	return schedule
 }
 
 func filterCoverageDataByDriver(data any, driverID, seq int) any {
@@ -889,7 +993,7 @@ func coverageStatusFromData(data any, driverID int) (fuzzing.CoverageStatus, boo
 
 func coverageSourceRoots(targetDir string, driverID int) []string {
 	sourceDir, buildDir := readStateDirs(filepath.Join(targetDir, "agent-state.json"))
-	roots := []string{sourceDir, buildDir, filepath.Join(targetDir, "source"), filepath.Join(targetDir, "build")}
+	roots := []string{targetDir, sourceDir, buildDir, filepath.Join(targetDir, "source"), filepath.Join(targetDir, "build")}
 	if driverID > 0 {
 		roots = append(roots, filepath.Join(targetDir, "logs", "fuzzing", "driver-targets", fmt.Sprintf("driver-%04d", driverID)))
 	} else {
@@ -1073,6 +1177,27 @@ type CrashAnalysisQueueResponse struct {
 	Items []CrashAnalysisQueueView `json:"items"`
 }
 
+type CoverageQueueResponse struct {
+	GeneratedAt string               `json:"generated_at"`
+	Summary     CoverageQueueSummary `json:"summary"`
+	Items       []CoverageQueueView  `json:"items"`
+}
+
+type CoverageRefreshResponse struct {
+	Queued  int    `json:"queued"`
+	Message string `json:"message"`
+}
+
+type CoverageQueueSummary struct {
+	Total       int `json:"total"`
+	Queued      int `json:"queued"`
+	Running     int `json:"running"`
+	Refresh     int `json:"refresh"`
+	Required    int `json:"required"`
+	Snapshots   int `json:"snapshots"`
+	BranchReach int `json:"branch_reach"`
+}
+
 type CrashFixTaskRequest struct {
 	DriverID int      `json:"driver_id"`
 	Seq      int      `json:"seq"`
@@ -1105,6 +1230,29 @@ type CrashAnalysisQueueView struct {
 	QueuedAt    string `json:"queued_at,omitempty"`
 	StartedAt   string `json:"started_at,omitempty"`
 	Removable   bool   `json:"removable"`
+}
+
+type CoverageQueueView struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	Position      int    `json:"position"`
+	Mode          string `json:"mode"`
+	ModeLabel     string `json:"mode_label"`
+	Kind          string `json:"kind"`
+	KindLabel     string `json:"kind_label"`
+	TaskID        string `json:"task_id,omitempty"`
+	TaskName      string `json:"task_name,omitempty"`
+	RepositoryURL string `json:"repository_url,omitempty"`
+	TaskKind      string `json:"task_kind,omitempty"`
+	CurrentStage  string `json:"current_stage,omitempty"`
+	DriverID      int    `json:"driver_id,omitempty"`
+	Seq           int    `json:"seq,omitempty"`
+	SnapshotDir   string `json:"snapshot_dir,omitempty"`
+	ProfdataPath  string `json:"profdata_path,omitempty"`
+	BinaryPath    string `json:"binary_path,omitempty"`
+	QueuedAt      string `json:"queued_at,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	Coalesced     int    `json:"coalesced"`
 }
 
 type UniqueCrashView struct {
@@ -1154,6 +1302,162 @@ func (m *Manager) CrashAnalysisQueue(id string) (CrashAnalysisQueueResponse, err
 		result.Items = append(result.Items, view)
 	}
 	return result, nil
+}
+
+func (m *Manager) CoverageQueue() CoverageQueueResponse {
+	items := fuzzing.CoverageQueueSnapshot()
+	result := CoverageQueueResponse{
+		GeneratedAt: time.Now().Format(time.RFC3339),
+		Items:       []CoverageQueueView{},
+	}
+	tasks := m.List()
+	for _, item := range items {
+		view := coverageQueueViewFromItem(item, tasks)
+		result.Items = append(result.Items, view)
+		result.Summary.Total++
+		switch view.Status {
+		case "running":
+			result.Summary.Running++
+		case "queued":
+			result.Summary.Queued++
+		}
+		switch view.Mode {
+		case "refresh":
+			result.Summary.Refresh++
+		default:
+			result.Summary.Required++
+		}
+		switch view.Kind {
+		case "branch_reach":
+			result.Summary.BranchReach++
+		default:
+			result.Summary.Snapshots++
+		}
+	}
+	return result
+}
+
+func coverageQueueViewFromItem(item fuzzing.CoverageQueueEntry, tasks []TaskSummary) CoverageQueueView {
+	snapshotDir, driverID, seq := coverageQueueSnapshotIdentity(item)
+	task := coverageQueueTaskForItem(item, tasks)
+	view := CoverageQueueView{
+		ID:           item.ID,
+		Status:       item.Status,
+		Position:     item.Position,
+		Mode:         item.Mode,
+		ModeLabel:    coverageQueueModeLabel(item.Mode),
+		Kind:         string(item.Kind),
+		KindLabel:    coverageQueueKindLabel(string(item.Kind)),
+		DriverID:     driverID,
+		Seq:          seq,
+		SnapshotDir:  snapshotDir,
+		ProfdataPath: item.ProfdataPath,
+		BinaryPath:   item.BinaryPath,
+		Coalesced:    item.Coalesced,
+	}
+	if !item.QueuedAt.IsZero() {
+		view.QueuedAt = item.QueuedAt.Format(time.RFC3339)
+	}
+	if !item.StartedAt.IsZero() {
+		view.StartedAt = item.StartedAt.Format(time.RFC3339)
+	}
+	if task != nil {
+		view.TaskID = task.ID
+		view.TaskName = task.Name
+		view.RepositoryURL = task.RepositoryURL
+		view.TaskKind = task.TaskKind
+		view.CurrentStage = task.CurrentStage
+	}
+	return view
+}
+
+func coverageQueueModeLabel(mode string) string {
+	switch mode {
+	case "refresh":
+		return "后台刷新"
+	default:
+		return "前台等待"
+	}
+}
+
+func coverageQueueKindLabel(kind string) string {
+	switch kind {
+	case "live_refresh":
+		return "实时覆盖刷新"
+	case "branch_reach":
+		return "Proof 分支触达校验"
+	default:
+		return "覆盖快照导出"
+	}
+}
+
+func coverageQueueTaskForItem(item fuzzing.CoverageQueueEntry, tasks []TaskSummary) *TaskSummary {
+	paths := []string{
+		item.BinaryPath,
+		item.ProfdataPath,
+		item.TaskDir,
+		item.DriverDir,
+		item.SourceDir,
+		item.BuildDir,
+	}
+	var matched *TaskSummary
+	longestRoot := 0
+	for index := range tasks {
+		targetDir := filepath.Join(tasks[index].Workspace, tasks[index].Name)
+		for _, path := range paths {
+			if !isPathUnderRoot(path, targetDir) {
+				continue
+			}
+			if len(targetDir) <= longestRoot {
+				continue
+			}
+			longestRoot = len(targetDir)
+			matched = &tasks[index]
+		}
+	}
+	return matched
+}
+
+func coverageQueueSnapshotIdentity(item fuzzing.CoverageQueueEntry) (string, int, int) {
+	for _, path := range []string{item.BinaryPath, item.ProfdataPath, item.DriverDir} {
+		snapshotDir, driverID, seq, ok := coverageQueueSnapshotIdentityFromPath(path)
+		if ok {
+			return snapshotDir, driverID, seq
+		}
+	}
+	return "", 0, 0
+}
+
+func coverageQueueSnapshotIdentityFromPath(path string) (string, int, int, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", 0, 0, false
+	}
+	current := filepath.Clean(path)
+	if info, err := os.Stat(current); err != nil || !info.IsDir() {
+		current = filepath.Dir(current)
+	}
+	for {
+		base := filepath.Base(current)
+		parent := filepath.Base(filepath.Dir(current))
+		if strings.HasPrefix(parent, "driver-") && strings.HasPrefix(base, "v") {
+			driverID, errDriver := strconv.Atoi(strings.TrimPrefix(parent, "driver-"))
+			seq, errSeq := strconv.Atoi(strings.TrimPrefix(base, "v"))
+			if errDriver == nil && errSeq == nil && driverID > 0 && seq > 0 {
+				return current, driverID, seq, true
+			}
+		}
+		if strings.HasPrefix(base, "fuzz-") {
+			seq, err := strconv.Atoi(strings.TrimPrefix(base, "fuzz-"))
+			if err == nil && seq > 0 {
+				return current, 0, seq, true
+			}
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return "", 0, 0, false
+		}
+		current = next
+	}
 }
 
 func (m *Manager) RemoveCrashAnalysisQueueItem(id, itemID string) error {
@@ -2274,7 +2578,8 @@ func historicalEntry(id string) (workspace, name string) {
 }
 
 // historicalCoverageData reads the latest snapshot's aggregate.profdata for a
-// historical task and exports it. Returns nil if data is unavailable.
+// historical task from persisted coverage cache files. Returns nil if data is
+// unavailable.
 func historicalCoverageData(id string, driverID, seq int) any {
 	ws, name := historicalEntry(id)
 	if ws == "" {
@@ -2287,43 +2592,14 @@ func historicalCoverageData(id string, driverID, seq int) any {
 	if multi := historicalMultiCoverageData(targetDir); multi != nil {
 		return multi
 	}
-	// Find the latest snapshot.
-	entries, err := os.ReadDir(filepath.Join(targetDir, "logs", "fuzzing", "driver-snapshots"))
-	if err != nil {
-		return map[string]any{"available": false}
-	}
-	var latestSeq int
-	var latestDir string
-	for _, e := range entries {
-		var seq int
-		if _, err := fmt.Sscanf(e.Name(), "fuzz-%d", &seq); err != nil {
-			continue
-		}
-		if seq > latestSeq {
-			latestSeq = seq
-			latestDir = filepath.Join(targetDir, "logs", "fuzzing", "driver-snapshots", e.Name())
-		}
-	}
+	latestDir := latestDriverSnapshotDir(targetDir)
 	if latestDir == "" {
 		return map[string]any{"available": false}
 	}
-	profdata := filepath.Join(latestDir, "monitor", "aggregate.profdata")
-	binary := filepath.Join(latestDir, "cov_synthesized_driver")
-	if !fileExists(profdata) || !fileExists(binary) {
-		return map[string]any{"available": false}
+	if snapshot, ok := loadCachedCoverageSnapshot(latestDir); ok {
+		return snapshot
 	}
-	// Read source/build dirs from agent-state.json.
-	srcDir, buildDir := readStateDirs(filepath.Join(targetDir, "agent-state.json"))
-	cs, err := fuzzing.CollectCoverageStatus(profdata, binary, srcDir, buildDir)
-	if err != nil {
-		return map[string]any{"available": false}
-	}
-	return map[string]any{
-		"available":  true,
-		"seed_count": 0,
-		"coverage":   cs,
-		"timestamp":  time.Now().Format(time.RFC3339),
-	}
+	return map[string]any{"available": false}
 }
 
 func historicalTargetCoverageData(targetDir string, driverID, seq int) any {
@@ -2340,22 +2616,10 @@ func historicalTargetCoverageData(targetDir string, driverID, seq int) any {
 	if versionDir == "" {
 		return map[string]any{"available": false}
 	}
-	profdata := filepath.Join(versionDir, "monitor", "aggregate.profdata")
-	binary := filepath.Join(versionDir, "cov_driver")
-	if !fileExists(profdata) || !fileExists(binary) {
-		return map[string]any{"available": false}
+	if snapshot, ok := loadCachedCoverageSnapshot(versionDir); ok {
+		return snapshot
 	}
-	srcDir, buildDir := readStateDirs(filepath.Join(targetDir, "agent-state.json"))
-	cs, err := fuzzing.CollectCoverageStatus(profdata, binary, srcDir, buildDir)
-	if err != nil {
-		return map[string]any{"available": false}
-	}
-	return fuzzing.CoverageSnapshot{
-		Timestamp: time.Now(),
-		Available: true,
-		SeedCount: countRegularFiles(filepath.Join(versionDir, "corpus")),
-		Coverage:  cs,
-	}
+	return map[string]any{"available": false}
 }
 
 func historicalMultiCoverageData(targetDir string) any {
@@ -2364,10 +2628,10 @@ func historicalMultiCoverageData(targetDir string) any {
 	if err != nil {
 		return nil
 	}
-	srcDir, buildDir := readStateDirs(filepath.Join(targetDir, "agent-state.json"))
 	var targets []fuzzing.TargetCoverageSnapshot
 	var coverages []fuzzing.CoverageStatus
 	totalSeeds := 0
+	var timestamp time.Time
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "driver-") {
 			continue
@@ -2381,8 +2645,6 @@ func historicalMultiCoverageData(targetDir string) any {
 			continue
 		}
 		for _, versionDir := range versionDirs {
-			profdata := filepath.Join(versionDir, "monitor", "aggregate.profdata")
-			binary := filepath.Join(versionDir, "cov_driver")
 			seedCount := countRegularFiles(filepath.Join(versionDir, "corpus"))
 			totalSeeds += seedCount
 			target := fuzzing.TargetCoverageSnapshot{
@@ -2392,13 +2654,17 @@ func historicalMultiCoverageData(targetDir string) any {
 				SeedCount: seedCount,
 				CorpusDir: filepath.Join(versionDir, "corpus"),
 			}
-			if fileExists(profdata) && fileExists(binary) {
-				if cs, err := fuzzing.CollectCoverageStatus(profdata, binary, srcDir, buildDir); err == nil {
-					target.Available = true
-					target.Coverage = cs
-					target.Summary = cs.Summary
-					target.UncoveredCount = historicalUncoveredCount(cs)
-					coverages = append(coverages, cs)
+			if snapshot, ok := loadCachedCoverageSnapshot(versionDir); ok {
+				target.Available = snapshot.Available
+				target.SeedCount = snapshot.SeedCount
+				target.Coverage = snapshot.Coverage
+				target.Summary = snapshot.Coverage.Summary
+				target.UncoveredCount = historicalUncoveredCount(snapshot.Coverage)
+				if snapshot.Available {
+					coverages = append(coverages, snapshot.Coverage)
+				}
+				if snapshot.Timestamp.After(timestamp) {
+					timestamp = snapshot.Timestamp
 				}
 			}
 			targets = append(targets, target)
@@ -2408,13 +2674,85 @@ func historicalMultiCoverageData(targetDir string) any {
 		return nil
 	}
 	return fuzzing.MultiCoverageSnapshot{
-		Timestamp: time.Now(),
+		Timestamp: timestamp,
 		Available: len(coverages) > 0,
 		Mode:      "multi",
 		SeedCount: totalSeeds,
 		Coverage:  historicalUnionCoverageStatuses(coverages),
 		Targets:   targets,
 	}
+}
+
+type coverageRefreshSpec struct {
+	snapshotDir  string
+	profdataPath string
+	binaryPath   string
+	corpusDir    string
+}
+
+func loadCachedCoverageSnapshot(snapshotDir string) (fuzzing.CoverageSnapshot, bool) {
+	snapshot, err := fuzzing.LoadCoverageSnapshotCache(snapshotDir)
+	if err != nil {
+		return fuzzing.CoverageSnapshot{}, false
+	}
+	return snapshot, true
+}
+
+func latestDriverSnapshotDir(targetDir string) string {
+	snapshotsDir := filepath.Join(targetDir, "logs", "fuzzing", "driver-snapshots")
+	entries, err := os.ReadDir(snapshotsDir)
+	if err != nil {
+		return ""
+	}
+	var latestSeq int
+	var latestDir string
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "fuzz-") {
+			continue
+		}
+		seq, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), "fuzz-"))
+		if err != nil || seq <= 0 || seq < latestSeq {
+			continue
+		}
+		latestSeq = seq
+		latestDir = filepath.Join(snapshotsDir, entry.Name())
+	}
+	return latestDir
+}
+
+func coverageRefreshSpecs(targetDir string) []coverageRefreshSpec {
+	targetsRoot := filepath.Join(targetDir, "logs", "fuzzing", "driver-targets")
+	entries, err := os.ReadDir(targetsRoot)
+	if err == nil {
+		var specs []coverageRefreshSpec
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "driver-") {
+				continue
+			}
+			for _, versionDir := range targetSnapshotDirs(filepath.Join(targetsRoot, entry.Name())) {
+				specs = append(specs, coverageRefreshSpec{
+					snapshotDir:  versionDir,
+					profdataPath: filepath.Join(versionDir, "monitor", "aggregate.profdata"),
+					binaryPath:   filepath.Join(versionDir, "cov_driver"),
+					corpusDir:    filepath.Join(versionDir, "corpus"),
+				})
+			}
+		}
+		if len(specs) > 0 {
+			return specs
+		}
+	}
+
+	latestDir := latestDriverSnapshotDir(targetDir)
+	if latestDir == "" {
+		return nil
+	}
+	return []coverageRefreshSpec{{
+		snapshotDir:  latestDir,
+		profdataPath: filepath.Join(latestDir, "monitor", "aggregate.profdata"),
+		binaryPath:   filepath.Join(latestDir, "cov_synthesized_driver"),
+		corpusDir:    filepath.Join(latestDir, "corpus"),
+	}}
 }
 
 func targetSnapshotDirs(targetRoot string) []string {
@@ -2578,6 +2916,7 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 	if err != nil && status != "pending" && status != "stopped" {
 		status = "missing"
 	}
+	driverSchedule := driverScheduleFromCoverageData(historicalCoverageData(entry.ID, 0, 0))
 	return TaskSnapshot{
 		ID:              entry.ID,
 		Status:          status,
@@ -2590,6 +2929,7 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 		OriginDriverSeq: entry.Request.OriginDriverSeq,
 		OriginCrashes:   append([]string(nil), entry.Request.OriginCrashes...),
 		OriginSourceDir: entry.Request.OriginSourceDir,
+		DriverSchedule:  driverSchedule,
 		Stages:          stages,
 		Request:         entry.Request,
 	}
@@ -2609,12 +2949,8 @@ func pendingStageSnapshots(taskKind ...string) []StageSnapshot {
 }
 
 func stageSnapshotsFromState(runState *state.RunState) []StageSnapshot {
-	completedRank := stageRanks[string(runState.Stage)]
-	failedStage := ""
-	if (runState.Stage == state.StageFailed || runState.Stage == state.StageBlocked) && len(runState.Errors) > 0 {
-		failedStage = string(runState.Errors[len(runState.Errors)-1].Stage)
-		completedRank = stageRanks[failedStage] - 1
-	}
+	completedRank := stageRanks[string(runState.EffectiveStage())]
+	failedStage := string(runState.FailedStage())
 	stages := pendingStageSnapshots(runState.TaskKind)
 	for index := range stages {
 		if stageRanks[stages[index].ID] <= completedRank {
@@ -2635,10 +2971,7 @@ func runStateCompletedRank(runState *state.RunState) int {
 	if runState == nil {
 		return 0
 	}
-	if (runState.Stage == state.StageFailed || runState.Stage == state.StageBlocked) && len(runState.Errors) > 0 {
-		return stageRanks[string(runState.Errors[len(runState.Errors)-1].Stage)] - 1
-	}
-	return stageRanks[string(runState.Stage)]
+	return stageRanks[string(runState.EffectiveStage())]
 }
 
 func (m *Manager) currentTaskStatus(id string, entry registryEntry) string {
@@ -3030,27 +3363,22 @@ func effectiveRegistryStatus(entry registryEntry) string {
 }
 
 // historicalStatus reads agent-state.json to determine the task's status and
-// final stage. Returns ("completed", stage) if the last stage was reached,
-// ("interrupted", stage) if the state file exists but the run didn't finish,
-// ("missing", "") if the state file doesn't exist.
+// effective progress stage. Returns ("completed", stage) if the last stage was
+// reached, ("interrupted", stage) if the state file exists but the run didn't
+// finish, ("missing", "") if the state file doesn't exist.
 func historicalStatus(statePath string) (status, stage string) {
-	data, err := os.ReadFile(statePath)
+	runState, err := state.Load(statePath)
 	if err != nil {
 		return "missing", ""
 	}
-	var s struct {
-		Stage string `json:"stage"`
+	stage = string(runState.EffectiveStage())
+	if runState.TerminalStatus() != "" {
+		return "failed", stage
 	}
-	if json.Unmarshal(data, &s) != nil {
-		return "missing", ""
+	if runState.Stage == state.StageFuzzing {
+		return "completed", stage
 	}
-	if s.Stage == string(state.StageFuzzing) {
-		return "completed", s.Stage
-	}
-	if s.Stage == string(state.StageFailed) || s.Stage == string(state.StageBlocked) {
-		return "failed", s.Stage
-	}
-	return "interrupted", s.Stage
+	return "interrupted", stage
 }
 
 // Delete removes a task from the registry. If the task is running, it is

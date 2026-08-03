@@ -1,7 +1,7 @@
 <script setup>
 import { computed, provide, reactive } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { LayoutDashboard, ListTodo, Plus, RadioTower } from '@lucide/vue';
+import { Activity, LayoutDashboard, ListTodo, Plus, RadioTower } from '@lucide/vue';
 import { autofuzzKey } from './appContext';
 import { useAutofuzzController } from './composables/useAutofuzz';
 import CreateTaskModal from './components/CreateTaskModal.vue';
@@ -13,6 +13,7 @@ provide(autofuzzKey, ui);
 
 const activeView = computed(() => {
   if (route.name === 'task-detail' || route.name === 'driver-coverage' || route.name === 'driver-coverage-latest') return 'detail';
+  if (route.name === 'coverage-queue') return 'coverage-queue';
   return route.name || 'dashboard';
 });
 
@@ -41,6 +42,10 @@ function navigate(name) {
           <ListTodo :size="18" aria-hidden="true" />
           <span>任务</span>
           <span class="nav-count">{{ ui.taskCounts.total }}</span>
+        </button>
+        <button class="nav-item" :class="{active: activeView === 'coverage-queue'}" type="button" @click="navigate('coverage-queue')">
+          <Activity :size="18" aria-hidden="true" />
+          <span>覆盖队列</span>
         </button>
         <button v-if="ui.hasTaskDetail" class="nav-item" :class="{active: activeView === 'detail'}" type="button" @click="navigate('detail')">
           <RadioTower :size="18" aria-hidden="true" />

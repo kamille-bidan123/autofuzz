@@ -29,16 +29,23 @@ type snapshotEntry struct {
 	Analysis          string `json:"analysis"`
 }
 
-// SnapshotComparison collects per-snapshot coverage data for the web UI's
-// "driver version comparison" panel. For each driver snapshot (fuzz-NNN):
-//   - Past snapshots: exports the frozen aggregate.profdata via llvm-cov
-//     (cached — the profdata is frozen after the monitor stops, so the export
-//     never changes and is cached for subsequent calls).
-//   - Current snapshot: uses the monitor's 60s covCache (live, in-memory).
+type snapshotCoverageSummary struct {
+	ExecutedFunctions int
+	FullFunctions     int
+	PartialFunctions  int
+	UncoveredCount    int
+}
+
+// SnapshotComparison collects per-snapshot cached summary data for the web
+// UI's "driver version comparison" panel. It never runs llvm-cov in the
+// request path; instead it reads:
+//   - live in-memory coverage cache for running tasks
+//   - persisted multi-fuzz state summaries
+//   - fuzzing-history.jsonl coverage summaries
 //
 // Also counts crashes + corpus per snapshot and reads the LLM analysis text
-// from fuzzing-history.jsonl (matched by seq). Returns deltas vs the previous
-// snapshot so the web UI can color-code improvement/regression.
+// matched by seq. Returns deltas vs the previous snapshot so the web UI can
+// color-code improvement/regression.
 func (a *Agent) SnapshotComparison() any {
 	fuzzingLogsDir := filepath.Join(a.LogsDir, "fuzzing")
 	if multi := a.multiSnapshotComparison(fuzzingLogsDir); len(multi) > 0 {
@@ -64,6 +71,13 @@ func (a *Agent) SnapshotComparison() any {
 	currentSeq := seqs[len(seqs)-1]
 
 	analysisBySeq := readAnalysisBySeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
+	coverageBySeq := readCoverageBySeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
+	if coverageBySeq == nil {
+		coverageBySeq = map[int]snapshotCoverageSummary{}
+	}
+	if summary, ok := liveCoverageSummary(a.CoverageData()); ok {
+		coverageBySeq[currentSeq] = summary
+	}
 
 	var result []snapshotEntry
 	prevExecuted, prevUncovered := 0, 0
@@ -74,47 +88,11 @@ func (a *Agent) SnapshotComparison() any {
 
 		var executed, full, partial, uncovered int
 
-		if seq == currentSeq {
-			// Current snapshot: use the monitor's live covCache (no export needed).
-			if cov := a.CoverageData(); cov != nil {
-				if cs, ok := cov.(fuzzing.CoverageSnapshot); ok && cs.Available {
-					executed = cs.Coverage.Summary.ExecutedFunctions
-					full = cs.Coverage.Summary.FullFunctions
-					partial = cs.Coverage.Summary.PartialFunctions
-					uncovered = countUncovered(cs.Coverage)
-				}
-			}
-		}
-
-		if executed == 0 {
-			// Past snapshot (or current with no covCache): export the frozen
-			// aggregate.profdata. Cached after first export (frozen → immutable).
-			a.snapshotCmpMu.RLock()
-			cached, ok := a.snapshotCmp[seq]
-			a.snapshotCmpMu.RUnlock()
-			if !ok {
-				profdataPath := filepath.Join(snapDir, "monitor", "aggregate.profdata")
-				binaryPath := filepath.Join(snapDir, "cov_synthesized_driver")
-				if fileExists(profdataPath) && fileExists(binaryPath) {
-					cs, err := fuzzing.CollectCoverageStatus(profdataPath, binaryPath, a.State.SourceDir, a.State.BuildDir)
-					if err == nil {
-						if seq != currentSeq {
-							// Only cache past snapshots (current is live, don't cache).
-							a.snapshotCmpMu.Lock()
-							a.snapshotCmp[seq] = cs
-							a.snapshotCmpMu.Unlock()
-						}
-						cached = cs
-						ok = true
-					}
-				}
-			}
-			if ok {
-				executed = cached.Summary.ExecutedFunctions
-				full = cached.Summary.FullFunctions
-				partial = cached.Summary.PartialFunctions
-				uncovered = countUncovered(cached)
-			}
+		if summary, ok := coverageBySeq[seq]; ok {
+			executed = summary.ExecutedFunctions
+			full = summary.FullFunctions
+			partial = summary.PartialFunctions
+			uncovered = summary.UncoveredCount
 		}
 
 		crashCount := countFiles(filepath.Join(snapDir, "crashes"))
@@ -165,6 +143,18 @@ func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
 	if err != nil {
 		return nil
 	}
+	coverageByTargetSeq := readCoverageByTargetSeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
+	if coverageByTargetSeq == nil {
+		coverageByTargetSeq = map[string]snapshotCoverageSummary{}
+	}
+	for key, summary := range readMultiStateCoverage(filepath.Join(fuzzingLogsDir, "multi-fuzzing-state.json")) {
+		if _, exists := coverageByTargetSeq[key]; !exists {
+			coverageByTargetSeq[key] = summary
+		}
+	}
+	for key, summary := range liveCoverageByTargetSeq(a.CoverageData()) {
+		coverageByTargetSeq[key] = summary
+	}
 	analysisByTargetSeq := readAnalysisByTargetSeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
 	var result []snapshotEntry
 	for _, targetEntry := range targetEntries {
@@ -196,22 +186,18 @@ func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
 		for _, seq := range seqs {
 			snapDir := filepath.Join(targetDir, fmt.Sprintf("v%03d", seq))
 			executed, full, partial, uncovered := 0, 0, 0, 0
-			profdataPath := filepath.Join(snapDir, "monitor", "aggregate.profdata")
-			binaryPath := filepath.Join(snapDir, "cov_driver")
-			if fileExists(profdataPath) && fileExists(binaryPath) {
-				if cs, err := fuzzing.CollectCoverageStatus(profdataPath, binaryPath, a.State.SourceDir, a.State.BuildDir); err == nil {
-					executed = cs.Summary.ExecutedFunctions
-					full = cs.Summary.FullFunctions
-					partial = cs.Summary.PartialFunctions
-					uncovered = countUncovered(cs)
-				}
+			key := fmt.Sprintf("%d/%d", driverID, seq)
+			if summary, ok := coverageByTargetSeq[key]; ok {
+				executed = summary.ExecutedFunctions
+				full = summary.FullFunctions
+				partial = summary.PartialFunctions
+				uncovered = summary.UncoveredCount
 			}
 			info, _ := os.Stat(snapDir)
 			timestamp := ""
 			if info != nil {
 				timestamp = info.ModTime().Format("15:04:05")
 			}
-			key := fmt.Sprintf("%d/%d", driverID, seq)
 			uniqueCrashCount, crashReportCount := readCrashAnalysisCounts(filepath.Join(snapDir, "crash-analysis.json"))
 			deltaExecuted, deltaUncovered := 0, 0
 			if hasPrevious {
@@ -300,6 +286,150 @@ func countUncovered(cs fuzzing.CoverageStatus) int {
 		n += len(pf.UncoveredBranches)
 	}
 	return n
+}
+
+func readCoverageBySeq(path string) map[int]snapshotCoverageSummary {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := map[int]snapshotCoverageSummary{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Seq      int             `json:"seq"`
+			Coverage json.RawMessage `json:"coverage_status"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Seq <= 0 {
+			continue
+		}
+		if !hasCoveragePayload(rec.Coverage) {
+			continue
+		}
+		var coverage fuzzing.CorpusCoverageStatus
+		if json.Unmarshal(rec.Coverage, &coverage) != nil {
+			continue
+		}
+		out[rec.Seq] = snapshotCoverageSummaryFromCorpus(coverage)
+	}
+	return out
+}
+
+func readCoverageByTargetSeq(path string) map[string]snapshotCoverageSummary {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := map[string]snapshotCoverageSummary{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			DriverID int             `json:"driver_id"`
+			Seq      int             `json:"seq"`
+			Coverage json.RawMessage `json:"coverage_status"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.DriverID <= 0 || rec.Seq <= 0 {
+			continue
+		}
+		if !hasCoveragePayload(rec.Coverage) {
+			continue
+		}
+		var coverage fuzzing.CorpusCoverageStatus
+		if json.Unmarshal(rec.Coverage, &coverage) != nil {
+			continue
+		}
+		out[fmt.Sprintf("%d/%d", rec.DriverID, rec.Seq)] = snapshotCoverageSummaryFromCorpus(coverage)
+	}
+	return out
+}
+
+func readMultiStateCoverage(path string) map[string]snapshotCoverageSummary {
+	state, err := fuzzing.LoadMultiFuzzState(path)
+	if err != nil || state == nil {
+		return nil
+	}
+	out := map[string]snapshotCoverageSummary{}
+	for _, version := range state.Versions {
+		if version == nil || version.DriverID <= 0 || version.Seq <= 0 || version.LastCoverage == nil {
+			continue
+		}
+		out[fmt.Sprintf("%d/%d", version.DriverID, version.Seq)] = snapshotCoverageSummary{
+			ExecutedFunctions: version.LastCoverage.ExecutedFunctions,
+			FullFunctions:     version.LastCoverage.FullFunctions,
+			PartialFunctions:  version.LastCoverage.PartialFunctions,
+			UncoveredCount:    version.LastCoverage.UncoveredCount,
+		}
+	}
+	return out
+}
+
+func liveCoverageSummary(data any) (snapshotCoverageSummary, bool) {
+	snapshot, ok := data.(fuzzing.CoverageSnapshot)
+	if !ok {
+		ptr, ok := data.(*fuzzing.CoverageSnapshot)
+		if !ok || ptr == nil {
+			return snapshotCoverageSummary{}, false
+		}
+		snapshot = *ptr
+	}
+	if !snapshot.Available {
+		return snapshotCoverageSummary{}, false
+	}
+	return snapshotCoverageSummaryFromStatus(snapshot.Coverage), true
+}
+
+func liveCoverageByTargetSeq(data any) map[string]snapshotCoverageSummary {
+	snapshot, ok := data.(fuzzing.MultiCoverageSnapshot)
+	if !ok {
+		ptr, ok := data.(*fuzzing.MultiCoverageSnapshot)
+		if !ok || ptr == nil {
+			return nil
+		}
+		snapshot = *ptr
+	}
+	out := map[string]snapshotCoverageSummary{}
+	for _, target := range snapshot.Targets {
+		if target.DriverID <= 0 || target.Seq <= 0 {
+			continue
+		}
+		key := fmt.Sprintf("%d/%d", target.DriverID, target.Seq)
+		out[key] = snapshotCoverageSummary{
+			ExecutedFunctions: target.Summary.ExecutedFunctions,
+			FullFunctions:     target.Summary.FullFunctions,
+			PartialFunctions:  target.Summary.PartialFunctions,
+			UncoveredCount:    target.UncoveredCount,
+		}
+	}
+	return out
+}
+
+func snapshotCoverageSummaryFromStatus(status fuzzing.CoverageStatus) snapshotCoverageSummary {
+	return snapshotCoverageSummary{
+		ExecutedFunctions: status.Summary.ExecutedFunctions,
+		FullFunctions:     status.Summary.FullFunctions,
+		PartialFunctions:  status.Summary.PartialFunctions,
+		UncoveredCount:    countUncovered(status),
+	}
+}
+
+func snapshotCoverageSummaryFromCorpus(status fuzzing.CorpusCoverageStatus) snapshotCoverageSummary {
+	return snapshotCoverageSummary{
+		ExecutedFunctions: status.Summary.ExecutedFunctions,
+		FullFunctions:     status.Summary.FullFunctions,
+		PartialFunctions:  status.Summary.PartialFunctions,
+		UncoveredCount:    len(status.Uncovered),
+	}
+}
+
+func hasCoveragePayload(data json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(data))
+	return trimmed != "" && trimmed != "null" && trimmed != "{}"
 }
 
 // readAnalysisBySeq reads fuzzing-history.jsonl and associates each successful

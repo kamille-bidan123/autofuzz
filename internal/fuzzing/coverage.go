@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // CoverageStatus describes the function-level coverage of a fuzz run.
@@ -149,48 +148,89 @@ func cloneCounts(counts map[string]int64) map[string]int64 {
 	return out
 }
 
-// CollectCoverageStatus runs llvm-cov export on the given profdata file
-// produced by the coverage-instrumented synthesized driver and parses
-// the results into a CoverageStatus. buildDir covers out-of-tree builds
-// where the library sources were copied into the build directory (so
-// llvm-cov reports them under build/ rather than source/).
-func CollectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir string) (CoverageStatus, error) {
-	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, "")
+var (
+	coverageStatusExportFunc = runCoverageStatusExport
+	branchReachExportFunc    = runBranchReachExport
+)
+
+// CollectCoverageStatusWithinTask runs llvm-cov export on the given profdata
+// file and keeps any file that resolves under the task workspace root.
+// buildDir is still threaded through for metadata consistency and internal
+// fallback handling.
+func CollectCoverageStatusWithinTask(profdataPath, binaryPath, sourceDir, buildDir, taskDir string) (CoverageStatus, error) {
+	return collectCoverageStatusContext(context.Background(), profdataPath, binaryPath, sourceDir, buildDir, taskDir, "")
 }
 
-// CollectCoverageStatusWithDriverDir is like CollectCoverageStatus but also
-// accepts the fuzz driver directory so that driver-source functions are
-// not filtered out.
-func CollectCoverageStatusWithDriverDir(profdataPath, binaryPath, sourceDir, buildDir, driverDir string) (CoverageStatus, error) {
-	return collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driverDir)
+func collectCoverageStatusContext(ctx context.Context, profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir string) (CoverageStatus, error) {
+	item := coverageExecManager.submitRequired(ctx, coverageRequestMetadata{
+		kind:         coverageRequestCoverageSnapshot,
+		profdataPath: profdataPath,
+		binaryPath:   binaryPath,
+		taskDir:      taskDir,
+		sourceDir:    sourceDir,
+		buildDir:     buildDir,
+		driverDir:    driverDir,
+	}, func(execCtx context.Context) coverageWorkResult {
+		status, err := coverageStatusExportFunc(execCtx, profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir)
+		return coverageWorkResult{status: status, err: err}
+	})
+	return waitCoverageStatus(ctx, item)
 }
 
-// CollectBranchReach runs llvm-cov export and returns, per function name
-// (restricted to sourceDir, entry_count > 0), the set of branch locations
-// [line, col] that were actually evaluated at least once (trueCount +
-// falseCount > 0). This is used by proof-seed validation to ensure the target
-// branch site was actually reached before checking whether the missing branch
-// direction became covered.
-func CollectBranchReach(profdataPath, binaryPath, sourceDir, buildDir string) (map[string]map[[2]int]bool, error) {
+func collectCoverageStatusRefreshContext(ctx context.Context, profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir string) (CoverageStatus, error) {
+	item := coverageExecManager.submitRefresh(coverageStatusRefreshKey(profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir), coverageRequestMetadata{
+		kind:         coverageRequestLiveRefresh,
+		profdataPath: profdataPath,
+		binaryPath:   binaryPath,
+		taskDir:      taskDir,
+		sourceDir:    sourceDir,
+		buildDir:     buildDir,
+		driverDir:    driverDir,
+	}, func(execCtx context.Context) coverageWorkResult {
+		status, err := coverageStatusExportFunc(execCtx, profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir)
+		return coverageWorkResult{status: status, err: err}
+	})
+	return waitCoverageStatus(ctx, item)
+}
+
+// CollectBranchReachWithinTask runs llvm-cov export and returns, per function
+// name, the set of branch locations [line, col] that were actually evaluated
+// at least once (trueCount + falseCount > 0), restricted to files under
+// taskDir. This is used by proof-seed validation.
+func CollectBranchReachWithinTask(profdataPath, binaryPath, sourceDir, buildDir, taskDir string) (map[string]map[[2]int]bool, error) {
+	return collectBranchReachContext(context.Background(), profdataPath, binaryPath, sourceDir, buildDir, taskDir)
+}
+
+func collectBranchReachContext(ctx context.Context, profdataPath, binaryPath, sourceDir, buildDir, taskDir string) (map[string]map[[2]int]bool, error) {
+	item := coverageExecManager.submitRequired(ctx, coverageRequestMetadata{
+		kind:         coverageRequestBranchReach,
+		profdataPath: profdataPath,
+		binaryPath:   binaryPath,
+		taskDir:      taskDir,
+		sourceDir:    sourceDir,
+		buildDir:     buildDir,
+	}, func(execCtx context.Context) coverageWorkResult {
+		reach, err := branchReachExportFunc(execCtx, profdataPath, binaryPath, sourceDir, buildDir, taskDir)
+		return coverageWorkResult{branchReach: reach, err: err}
+	})
+	return waitBranchReach(ctx, item)
+}
+
+func runBranchReachExport(ctx context.Context, profdataPath, binaryPath, sourceDir, buildDir, taskDir string) (map[string]map[[2]int]bool, error) {
 	covBin := findCovTool()
 	if covBin == "" {
 		return nil, fmt.Errorf("llvm-cov not found")
 	}
-	// Use a timeout so a stuck llvm-cov export (e.g. under CPU contention)
-	// does not block the monitor's goroutine indefinitely, preventing
-	// monitor.Stop() from returning on cancel.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	exportCmd := exec.CommandContext(ctx, covBin, "export", "-instr-profile="+profdataPath,
 		binaryPath, "--format=text")
 	exportOutput, err := exportCmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("llvm-cov export failed: %w\nstdout/stderr: %s", err, string(exportOutput))
 	}
-	return parseBranchReach(exportOutput, sourceDir, buildDir)
+	return parseBranchReach(exportOutput, sourceDir, buildDir, taskDir)
 }
 
-func parseBranchReach(data []byte, sourceDir, buildDir string) (map[string]map[[2]int]bool, error) {
+func parseBranchReach(data []byte, sourceDir, buildDir, taskDir string) (map[string]map[[2]int]bool, error) {
 	var root exportRoot
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse llvm-cov export JSON: %w", err)
@@ -204,10 +244,7 @@ func parseBranchReach(data []byte, sourceDir, buildDir string) (map[string]map[[
 		if len(fn.Filenames) > 0 {
 			fnFile = fn.Filenames[0]
 		}
-		// buildDir is guarded against "" because isPathUnder falls back to
-		// the process CWD for an empty base, which would silently accept
-		// unrelated files.
-		if !isPathUnder(fnFile, sourceDir) && !(buildDir != "" && isPathUnder(fnFile, buildDir)) {
+		if !isCoveragePathAllowed(fnFile, sourceDir, buildDir, taskDir, "") {
 			continue
 		}
 		if fn.Count == 0 {
@@ -230,7 +267,7 @@ func parseBranchReach(data []byte, sourceDir, buildDir string) (map[string]map[[
 	return out, nil
 }
 
-func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driverDir string) (CoverageStatus, error) {
+func runCoverageStatusExport(ctx context.Context, profdataPath, binaryPath, sourceDir, buildDir, taskDir, driverDir string) (CoverageStatus, error) {
 	status := CoverageStatus{
 		Full:    []FunctionCoverage{},
 		Partial: []PartialFunctionCoverage{},
@@ -240,10 +277,6 @@ func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driver
 	if covBin == "" {
 		return status, fmt.Errorf("llvm-cov not found")
 	}
-	// Use a timeout so a stuck llvm-cov export does not block the monitor's
-	// coverageLoop goroutine indefinitely, preventing monitor.Stop() on cancel.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	exportCmd := exec.CommandContext(ctx, covBin, "export", "-instr-profile="+profdataPath,
 		binaryPath, "--format=text")
 	exportOutput, err := exportCmd.CombinedOutput()
@@ -251,7 +284,7 @@ func collectCoverageStatus(profdataPath, binaryPath, sourceDir, buildDir, driver
 		return status, fmt.Errorf("llvm-cov export failed: %w\nstdout/stderr: %s", err, string(exportOutput))
 	}
 
-	funcs, err := parseExportJSON(exportOutput, sourceDir, buildDir, driverDir)
+	funcs, err := parseExportJSON(exportOutput, sourceDir, buildDir, taskDir, driverDir)
 	if err != nil {
 		return status, err
 	}
@@ -318,7 +351,7 @@ type exportRoot struct {
 	Data []exportData `json:"data"`
 }
 
-func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]funcCoverageData, error) {
+func parseExportJSON(data []byte, sourceDir, buildDir, taskDir, driverDir string) ([]funcCoverageData, error) {
 	var root exportRoot
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse llvm-cov export JSON: %w", err)
@@ -334,13 +367,7 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 		if len(fn.Filenames) > 0 {
 			fnFile = fn.Filenames[0]
 		}
-		// Accept functions whose source lives under the library source dir,
-		// the out-of-tree build dir (sources copied into build/), or the
-		// driver dir. buildDir is guarded against "" because isPathUnder
-		// falls back to the process CWD for an empty base.
-		if !isPathUnder(fnFile, sourceDir) &&
-			!(buildDir != "" && isPathUnder(fnFile, buildDir)) &&
-			!isPathUnder(fnFile, driverDir) {
+		if !isCoveragePathAllowed(fnFile, sourceDir, buildDir, taskDir, driverDir) {
 			continue
 		}
 
@@ -427,6 +454,22 @@ func parseExportJSON(data []byte, sourceDir, buildDir, driverDir string) ([]func
 	}
 
 	return result, nil
+}
+
+func isCoveragePathAllowed(path, sourceDir, buildDir, taskDir, driverDir string) bool {
+	if taskDir != "" {
+		return isPathUnder(path, taskDir)
+	}
+	// buildDir is guarded against "" because isPathUnder falls back to the
+	// process CWD for an empty base, which would silently accept unrelated
+	// files.
+	if isPathUnder(path, sourceDir) {
+		return true
+	}
+	if buildDir != "" && isPathUnder(path, buildDir) {
+		return true
+	}
+	return isPathUnder(path, driverDir)
 }
 
 func coverageRegionsFromExport(fn exportFunc) []CoverageRegion {

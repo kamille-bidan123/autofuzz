@@ -45,6 +45,14 @@ type CrashFixOrigin struct {
 	Context         string
 }
 
+func defaultMaxFuzzDrivers() int {
+	limit := runtime.NumCPU() / 2
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
+
 func (o *Options) Normalize() error {
 	if o.PromeFuzzRoot == "" {
 		return fmt.Errorf("promefuzz is required")
@@ -73,7 +81,7 @@ func (o *Options) Normalize() error {
 		}
 	}
 	if o.MaxFuzzDrivers == 0 {
-		o.MaxFuzzDrivers = runtime.NumCPU()
+		o.MaxFuzzDrivers = defaultMaxFuzzDrivers()
 	}
 	if o.PoolSize < 1 || o.Jobs < 1 || o.MaxFuzzDrivers < 1 {
 		return fmt.Errorf("pool-size, jobs and max-fuzz-drivers must be positive")
@@ -104,7 +112,7 @@ func (o *Options) Normalize() error {
 func DefaultOptions() Options {
 	return Options{
 		Workspace: "autofuzz-work",
-		PoolSize:  5, Jobs: runtime.NumCPU(), MaxFuzzDrivers: runtime.NumCPU(), StopAfter: state.StageFuzzing, FuzzInterval: 30 * time.Minute,
+		PoolSize:  5, Jobs: runtime.NumCPU(), MaxFuzzDrivers: defaultMaxFuzzDrivers(), StopAfter: state.StageFuzzing, FuzzInterval: 30 * time.Minute,
 		CodexCommand: "codex",
 	}
 }

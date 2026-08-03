@@ -26,4 +26,11 @@ describe('router', () => {
     expect(route.params.taskId).toBe('run-1');
     expect(route.params.driverId).toBe('1');
   });
+
+  it('resolves the global coverage queue page', () => {
+    const route = router.resolve('/coverage-queue');
+
+    expect(route.name).toBe('coverage-queue');
+    expect(route.fullPath).toBe('/coverage-queue');
+  });
 });
