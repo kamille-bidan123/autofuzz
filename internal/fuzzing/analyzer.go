@@ -75,6 +75,27 @@ type CrashLLMReport struct {
 	Analysis       string `json:"analysis"`
 }
 
+type DriverCrashFixRequest struct {
+	DriverID       int    `json:"driver_id"`
+	SourceDir      string `json:"source_dir"`
+	WorkDir        string `json:"work_dir"`
+	BuildScript    string `json:"build_script"`
+	BinaryPath     string `json:"binary_path"`
+	CrashFile      string `json:"crash_file"`
+	CrashType      string `json:"crash_type"`
+	UniqueCrash    string `json:"unique_crash"`
+	ASanReport     string `json:"asan_report"`
+	CrashAnalysis  string `json:"crash_analysis"`
+}
+
+type DriverCrashFixResponse struct {
+	NeedsUpdate   bool     `json:"needs_update"`
+	ChangedFiles  []string `json:"changed_files"`
+	CompilePassed bool     `json:"compile_passed"`
+	CrashResolved bool     `json:"crash_resolved"`
+	Analysis      string   `json:"analysis"`
+}
+
 // analysisSchema defines the JSON schema for Codex output.
 const analysisSchema = `{
   "type":"object","additionalProperties":false,
@@ -116,6 +137,18 @@ const crashAnalysisSchema = `{
   "properties":{
     "classification":{"type":"string","enum":["fuzz_driver_bug","library_bug","unknown"]},
     "analysis":{"type":"string","description":"必须使用简体中文 Markdown 文本说明复现结果、根因判断和证据；如果 classification 为 fuzz_driver_bug，必须写清楚 fuzz driver 的错误位置、错误原因以及具体修改建议；如果 classification 为 library_bug，必须包含“漏洞分析”“库代码现场”“复现程序”“修复建议”四个 Markdown 章节，且复现程序必须是单个 C 语言程序代码块"}
+  }
+}`
+
+const driverCrashFixSchema = `{
+  "type":"object","additionalProperties":false,
+  "required":["needs_update","changed_files","compile_passed","crash_resolved","analysis"],
+  "properties":{
+    "needs_update":{"type":"boolean"},
+    "changed_files":{"type":"array","items":{"type":"string"}},
+    "compile_passed":{"type":"boolean"},
+    "crash_resolved":{"type":"boolean"},
+    "analysis":{"type":"string","description":"必须使用简体中文说明 fuzz driver 根因、修改点、编译命令和 replay 结果；函数名、文件名、API 名和代码标识符可保留英文"}
   }
 }`
 
@@ -331,6 +364,65 @@ func (c CodexAnalyzer) AnalyzeCrash(ctx context.Context, req CrashAnalysisReques
 	return resp, nil
 }
 
+func (c CodexAnalyzer) AnalyzeDriverCrashFix(ctx context.Context, req DriverCrashFixRequest, logDir string) (DriverCrashFixResponse, error) {
+	if c.Command == "" {
+		c.Command = "codex"
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 30 * time.Minute
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return DriverCrashFixResponse{}, err
+	}
+
+	schemaPath := filepath.Join(logDir, "response.schema.json")
+	responsePath := filepath.Join(logDir, "response.json")
+	if err := os.WriteFile(schemaPath, []byte(driverCrashFixSchema), 0o644); err != nil {
+		return DriverCrashFixResponse{}, err
+	}
+
+	prompt := buildDriverCrashFixPrompt(req)
+	if err := os.WriteFile(filepath.Join(logDir, "prompt.txt"), []byte(prompt), 0o644); err != nil {
+		return DriverCrashFixResponse{}, err
+	}
+
+	c.logf("[fuzzing] ===== driver crash-fix prompt sent to Codex CLI =====\n%s\n[fuzzing] ===== end of driver crash-fix prompt =====", prompt)
+
+	args := codex.CommandArgv(c.Command, "exec", "--ephemeral", "--sandbox", "workspace-write",
+		"--ignore-rules", "--json", "--skip-git-repo-check", "--color", "never",
+		"--output-schema", schemaPath, "--output-last-message", responsePath)
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	if c.Profile != "" {
+		args = append(args, "--profile", c.Profile)
+	}
+	args = append(args, "-")
+
+	commandCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	onStdout := codex.JSONLineSink(c.EventSink)
+	if _, err := c.Runner.RunInputStreaming(commandCtx, logDir, "codex-driver-fix", req.WorkDir, nil, prompt, onStdout, nil, args...); err != nil {
+		return DriverCrashFixResponse{}, fmt.Errorf("Codex driver crash fix failed: %w", err)
+	}
+
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		return DriverCrashFixResponse{}, fmt.Errorf("read Codex driver crash fix response: %w", err)
+	}
+	payload := data
+	if !json.Valid(payload) {
+		if extracted := codex.ExtractJSONObject(payload); extracted != nil {
+			payload = extracted
+		}
+	}
+	var resp DriverCrashFixResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return DriverCrashFixResponse{}, fmt.Errorf("decode Codex driver crash fix response: %w", err)
+	}
+	return resp, nil
+}
+
 func validateCrashAnalysisPayload(payload []byte) error {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &obj); err != nil {
@@ -507,6 +599,42 @@ func buildTargetAnalysisPrompt(req TargetAnalysisRequest) string {
 最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。不要输出 driver_id；当前 driver 已由 Go 侧固定为 driver_id=%d。analysis 必须使用简体中文。`,
 		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath, req.WorkDir,
 		string(fuzzJSON), string(coverageJSON), req.DriverID)
+}
+
+func buildDriverCrashFixPrompt(req DriverCrashFixRequest) string {
+	return fmt.Sprintf(`你是一位 fuzz driver 修复专家。当前只能修复一个子 driver：driver_id=%d。
+
+你对目标库源码 %s 有读权限。
+你的工作目录是 %s。当前子 driver 源码在 workdir/driver/ 下，构建脚本是 %s，编译产物必须是 %s。
+你只能修改当前 workdir/driver/ 下的该子 driver 源码，以及当前目录的 build_cov_driver.sh；不要修改库源码，不要修改 crash 输入，不要修改其他 task 文件。
+
+当前这个 unique crash 已经被上游分析为 fuzz_driver_bug。你需要根据 crash 分析、ASan 报告和 driver 源码，修复 driver 违反 API 前置条件/对象生命周期/调用顺序的问题。
+
+已知信息：
+- crash_file: %s
+- crash_type: %s
+- unique crash 输入: %s
+- ASan report:
+%s
+
+- 上游 crash 分析（Markdown）：
+%s
+
+你的任务：
+1. 阅读当前 workdir/driver/ 下的 driver 源码、构建脚本，以及必要的目标库源码，确认 fuzz_driver_bug 的根因。
+2. 如果你认为无需修改，返回 needs_update=false，并在 analysis 中说明原因。
+3. 如果需要修改，只能改当前 driver 文件和 build_cov_driver.sh。
+4. 修改后运行构建脚本验证编译通过。
+5. 用编译后的 fuzz driver 运行：<binary> -runs=1 <unique crash 输入>，确认该 crash 不再复现。
+6. 只有在你确实修改了允许的文件、编译通过、并且 replay 不再 crash 时，才能返回 needs_update=true、compile_passed=true、crash_resolved=true。
+7. changed_files 只能列出真正修改过的 driver 源码文件，以及只有在确实修改过时才列出 build_cov_driver.sh。不要把日志、profraw、profdata、临时文件写入 changed_files。
+8. 如果编译失败，或者 replay 仍然 crash，或者你无法稳定修复，必须回滚自己的修改并返回 needs_update=false；analysis 中写清楚失败原因。
+
+最后回复必须是且仅是一个 JSON 对象，不能有 markdown 代码块或其他文字。字段只能为：
+needs_update、changed_files、compile_passed、crash_resolved、analysis。
+analysis 必须使用简体中文。`,
+		req.DriverID, req.SourceDir, req.WorkDir, req.BuildScript, req.BinaryPath,
+		req.CrashFile, req.CrashType, req.UniqueCrash, req.ASanReport, req.CrashAnalysis)
 }
 
 func (c CodexAnalyzer) logf(format string, args ...any) {

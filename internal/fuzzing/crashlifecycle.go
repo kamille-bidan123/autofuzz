@@ -144,6 +144,12 @@ type CrashAnalysisEntry struct {
 	ReportUpdatedAt string `json:"report_updated_at,omitempty"`
 	Classification  string `json:"classification,omitempty"`
 	Analysis        string `json:"analysis,omitempty"`
+	DriverFixStatus string `json:"driver_fix_status,omitempty"`
+	DriverFixError  string `json:"driver_fix_error,omitempty"`
+	DriverFixSeq    int    `json:"driver_fix_seq,omitempty"`
+	DriverFixPath   string `json:"driver_fix_path,omitempty"`
+	DriverFixReport string `json:"driver_fix_report,omitempty"`
+	DriverFixAt     string `json:"driver_fix_at,omitempty"`
 }
 
 // parseASanType extracts the ASan error type (e.g. "heap-use-after-free",

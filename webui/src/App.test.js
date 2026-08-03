@@ -92,6 +92,11 @@ describe('App routing', () => {
           codex_command: 'codex'
         });
       }
+      if (path === '/api/runs/run-1/crash-fix-queue' || path === '/api/runs/run-1/crash-analysis-queue') {
+        return jsonResponse({items: []});
+      }
+      if (path === '/api/runs/run-1/unique-crashes') return jsonResponse({crashes: []});
+      if (path === '/api/runs/run-1/snapshots') return jsonResponse([]);
       if (path === '/api/runs/run-1') {
         return jsonResponse({
           id: 'run-1',

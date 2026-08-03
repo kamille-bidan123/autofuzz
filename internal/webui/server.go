@@ -51,11 +51,16 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots", server.snapshots)
 	server.mux.HandleFunc("GET /api/runs/{id}/unique-crashes", server.uniqueCrashes)
 	server.mux.HandleFunc("DELETE /api/runs/{id}/unique-crashes", server.deleteUniqueCrashes)
-	server.mux.HandleFunc("GET /api/runs/{id}/crash-analysis-queue", server.crashAnalysisQueue)
-	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-analysis-queue", server.removeCrashAnalysisQueueItem)
+	server.mux.HandleFunc("GET /api/runs/{id}/crash-fix-queue", server.crashFixQueue)
+	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-fix-queue", server.removeCrashFixQueueItem)
+	server.mux.HandleFunc("GET /api/runs/{id}/crash-analysis-queue", server.crashFixQueue)
+	server.mux.HandleFunc("DELETE /api/runs/{id}/crash-analysis-queue", server.removeCrashFixQueueItem)
 	server.mux.HandleFunc("GET /api/runs/{id}/crash-reports", server.crashReports)
 	server.mux.HandleFunc("POST /api/runs/{id}/crash-reports/analyze", server.analyzeCrashReport)
 	server.mux.HandleFunc("POST /api/runs/{id}/crash-fix-tasks", server.createCrashFixTask)
+	server.mux.HandleFunc("POST /api/runs/{id}/driver-fix-candidates/enqueue", server.enqueueDriverFixCandidate)
+	server.mux.HandleFunc("POST /api/runs/{id}/driver-fix-candidates/approve", server.approveDriverFixCandidate)
+	server.mux.HandleFunc("POST /api/runs/{id}/driver-fix-candidates/reject", server.rejectDriverFixCandidate)
 	server.mux.HandleFunc("GET /api/runs/{id}/snapshots/{seq}/diff", server.snapshotDiff)
 	server.mux.HandleFunc("DELETE /api/runs/{id}", server.deleteRun)
 	server.mux.HandleFunc("GET /static/", server.serveStatic)
@@ -391,8 +396,8 @@ func (s *Server) deleteUniqueCrashes(response http.ResponseWriter, request *http
 	writeJSON(response, http.StatusOK, result)
 }
 
-func (s *Server) crashAnalysisQueue(response http.ResponseWriter, request *http.Request) {
-	result, err := s.manager.CrashAnalysisQueue(request.PathValue("id"))
+func (s *Server) crashFixQueue(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.CrashFixQueue(request.PathValue("id"))
 	if err != nil {
 		writeError(response, http.StatusNotFound, err.Error())
 		return
@@ -400,13 +405,13 @@ func (s *Server) crashAnalysisQueue(response http.ResponseWriter, request *http.
 	writeJSON(response, http.StatusOK, result)
 }
 
-func (s *Server) removeCrashAnalysisQueueItem(response http.ResponseWriter, request *http.Request) {
+func (s *Server) removeCrashFixQueueItem(response http.ResponseWriter, request *http.Request) {
 	itemID := request.URL.Query().Get("item_id")
 	if strings.TrimSpace(itemID) == "" {
 		writeError(response, http.StatusBadRequest, "missing queue item id")
 		return
 	}
-	if err := s.manager.RemoveCrashAnalysisQueueItem(request.PathValue("id"), itemID); err != nil {
+	if err := s.manager.RemoveCrashFixQueueItem(request.PathValue("id"), itemID); err != nil {
 		writeError(response, http.StatusConflict, err.Error())
 		return
 	}
@@ -462,6 +467,55 @@ func (s *Server) createCrashFixTask(response http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(response, http.StatusCreated, snapshot)
+}
+
+func (s *Server) enqueueDriverFixCandidate(response http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	var input DriverFixCandidateQueueRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if err := s.manager.TriggerDriverFixCandidate(request.PathValue("id"), input); err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+func (s *Server) approveDriverFixCandidate(response http.ResponseWriter, request *http.Request) {
+	s.handleDriverFixCandidateDecision(response, request, true)
+}
+
+func (s *Server) rejectDriverFixCandidate(response http.ResponseWriter, request *http.Request) {
+	s.handleDriverFixCandidateDecision(response, request, false)
+}
+
+func (s *Server) handleDriverFixCandidateDecision(response http.ResponseWriter, request *http.Request, approve bool) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	var input DriverFixCandidateDecisionRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	var (
+		result DriverFixCandidateDecisionResponse
+		err    error
+	)
+	if approve {
+		result, err = s.manager.ApproveDriverFixCandidate(request.PathValue("id"), input)
+	} else {
+		result, err = s.manager.RejectDriverFixCandidate(request.PathValue("id"), input)
+	}
+	if err != nil {
+		writeError(response, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Server) snapshotDiff(response http.ResponseWriter, request *http.Request) {

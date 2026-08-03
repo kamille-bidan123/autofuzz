@@ -1204,6 +1204,23 @@ type CrashFixTaskRequest struct {
 	Crashes  []string `json:"crashes"`
 }
 
+type DriverFixCandidateQueueRequest struct {
+	DriverID int    `json:"driver_id,omitempty"`
+	Seq      int    `json:"seq"`
+	File     string `json:"file"`
+}
+
+type DriverFixCandidateDecisionRequest struct {
+	DriverID int `json:"driver_id"`
+	Seq      int `json:"seq"`
+}
+
+type DriverFixCandidateDecisionResponse struct {
+	DriverID int    `json:"driver_id"`
+	Seq      int    `json:"seq"`
+	Status   string `json:"status"`
+}
+
 type UniqueCrashDeleteRequest struct {
 	Crashes []UniqueCrashDeleteRef `json:"crashes"`
 }
@@ -1220,6 +1237,8 @@ type UniqueCrashDeleteResponse struct {
 
 type CrashAnalysisQueueView struct {
 	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	KindLabel   string `json:"kind_label"`
 	Status      string `json:"status"`
 	Position    int    `json:"position"`
 	DriverID    int    `json:"driver_id,omitempty"`
@@ -1270,20 +1289,33 @@ type CrashReportView struct {
 	Error  string                     `json:"error,omitempty"`
 }
 
-func (m *Manager) CrashAnalysisQueue(id string) (CrashAnalysisQueueResponse, error) {
+func crashFixQueueKindLabel(kind string) string {
+	switch kind {
+	case fuzzing.CrashFixQueueKindDriverFix:
+		return "driver 修复候选"
+	case fuzzing.CrashFixQueueKindCrashAnalysis:
+		return "crash 分析"
+	default:
+		return kind
+	}
+}
+
+func (m *Manager) CrashFixQueue(id string) (CrashAnalysisQueueResponse, error) {
 	targetDir := m.targetDirFor(id)
 	if targetDir == "" {
 		return CrashAnalysisQueueResponse{}, fmt.Errorf("task not found")
 	}
 	logRoot := filepath.Join(targetDir, "logs", "fuzzing")
 	result := CrashAnalysisQueueResponse{Items: []CrashAnalysisQueueView{}}
-	for _, item := range fuzzing.CrashAnalysisQueueSnapshot() {
+	for _, item := range fuzzing.CrashFixQueueSnapshot() {
 		if !isPathUnderRoot(item.SnapshotDir, logRoot) {
 			continue
 		}
 		driverID, seq := crashAnalysisSnapshotIdentity(logRoot, item.SnapshotDir)
 		view := CrashAnalysisQueueView{
 			ID:          item.ID,
+			Kind:        item.Kind,
+			KindLabel:   crashFixQueueKindLabel(item.Kind),
 			Status:      item.Status,
 			Position:    item.Position,
 			DriverID:    driverID,
@@ -1302,6 +1334,10 @@ func (m *Manager) CrashAnalysisQueue(id string) (CrashAnalysisQueueResponse, err
 		result.Items = append(result.Items, view)
 	}
 	return result, nil
+}
+
+func (m *Manager) CrashAnalysisQueue(id string) (CrashAnalysisQueueResponse, error) {
+	return m.CrashFixQueue(id)
 }
 
 func (m *Manager) CoverageQueue() CoverageQueueResponse {
@@ -1460,7 +1496,7 @@ func coverageQueueSnapshotIdentityFromPath(path string) (string, int, int, bool)
 	}
 }
 
-func (m *Manager) RemoveCrashAnalysisQueueItem(id, itemID string) error {
+func (m *Manager) RemoveCrashFixQueueItem(id, itemID string) error {
 	targetDir := m.targetDirFor(id)
 	if targetDir == "" {
 		return fmt.Errorf("task not found")
@@ -1471,20 +1507,20 @@ func (m *Manager) RemoveCrashAnalysisQueueItem(id, itemID string) error {
 	}
 	logRoot := filepath.Join(targetDir, "logs", "fuzzing")
 	found := false
-	for _, item := range fuzzing.CrashAnalysisQueueSnapshot() {
+	for _, item := range fuzzing.CrashFixQueueSnapshot() {
 		if item.ID != itemID || !isPathUnderRoot(item.SnapshotDir, logRoot) {
 			continue
 		}
 		found = true
 		if item.Status == "running" {
-			return fmt.Errorf("crash analysis is already running")
+			return fmt.Errorf("%s is already running", crashFixQueueKindLabel(item.Kind))
 		}
 		break
 	}
 	if !found {
 		return fmt.Errorf("queue item not found")
 	}
-	removed, err := fuzzing.RemoveQueuedCrashAnalysis(itemID)
+	removed, err := fuzzing.RemoveQueuedCrashFixJob(itemID)
 	if err != nil {
 		return err
 	}
@@ -1492,6 +1528,10 @@ func (m *Manager) RemoveCrashAnalysisQueueItem(id, itemID string) error {
 		return fmt.Errorf("queue item not found or already running")
 	}
 	return nil
+}
+
+func (m *Manager) RemoveCrashAnalysisQueueItem(id, itemID string) error {
+	return m.RemoveCrashFixQueueItem(id, itemID)
 }
 
 func (m *Manager) UniqueCrashes(id string) (UniqueCrashesResponse, error) {
@@ -1610,8 +1650,8 @@ func deleteUniqueCrashesFromSnapshot(snapDir string, files []string) (int, error
 			filtered = append(filtered, entry)
 			continue
 		}
-		if fuzzing.IsCrashAnalysisQueuedOrRunning(fuzzing.CrashAnalysisJobKey(snapDir, file)) {
-			return 0, fmt.Errorf("unique crash %s is queued or running crash analysis", file)
+		if fuzzing.IsCrashOrFixQueuedOrRunning(snapDir, file) {
+			return 0, fmt.Errorf("unique crash %s is queued or running in the crash & fix queue", file)
 		}
 		deletedEntries = append(deletedEntries, entry)
 		deletedFiles = append(deletedFiles, file)
@@ -1734,6 +1774,8 @@ func normalizeCrashReportEntryForDisplayInSnapshot(snapDir string, entry *fuzzin
 	if entry == nil || snapDir == "" {
 		return
 	}
+	fillDriverFixEntryFromSnapshot(snapDir, entry)
+	normalizeDriverFixEntryForDisplayInSnapshot(snapDir, entry)
 	reportPath := crashReportPathForEntry(snapDir, *entry)
 	switch entry.ReportStatus {
 	case "queued", "running":
@@ -1761,6 +1803,79 @@ func normalizeCrashReportEntryForDisplayInSnapshot(snapDir string, entry *fuzzin
 			fillCrashEntryFromReport(reportPath, entry)
 		}
 	}
+}
+
+func normalizeDriverFixEntryForDisplayInSnapshot(snapDir string, entry *fuzzing.CrashAnalysisEntry) {
+	if entry == nil {
+		return
+	}
+	switch entry.DriverFixStatus {
+	case "queued", "running":
+		if fuzzing.IsDriverFixQueuedOrRunning(fuzzing.DriverFixJobKey(snapDir, entry.File)) {
+			return
+		}
+		fillDriverFixEntryFromSnapshot(snapDir, entry)
+		switch entry.DriverFixStatus {
+		case "candidate", "approved", "rejected":
+			return
+		}
+		entry.DriverFixStatus = "failed"
+		if entry.DriverFixError == "" {
+			entry.DriverFixError = "driver fix generation was interrupted or service restarted; no active crash & fix worker found"
+		}
+	}
+}
+
+func fillDriverFixEntryFromSnapshot(snapDir string, entry *fuzzing.CrashAnalysisEntry) {
+	if entry == nil {
+		return
+	}
+	driverID, baseSeq := snapshotDriverVersionIdentityForWeb(snapDir)
+	if driverID <= 0 || baseSeq <= 0 {
+		return
+	}
+	logsDir := filepath.Dir(filepath.Dir(filepath.Dir(snapDir)))
+	state := fuzzing.FindDriverFixCandidateForBase(logsDir, driverID, baseSeq)
+	if state == nil {
+		return
+	}
+	if state.CandidateCrash != "" && filepath.Base(state.CandidateCrash) != filepath.Base(entry.File) {
+		return
+	}
+	if entry.DriverFixSeq <= 0 {
+		entry.DriverFixSeq = state.Seq
+	}
+	if strings.TrimSpace(entry.DriverFixPath) == "" {
+		entry.DriverFixPath = state.CurrentSnapshot
+	}
+	if strings.TrimSpace(entry.DriverFixReport) == "" {
+		entry.DriverFixReport = state.CandidateReport
+	}
+	if strings.TrimSpace(entry.DriverFixAt) == "" {
+		entry.DriverFixAt = state.CandidateAt
+	}
+	switch state.ApprovalStatus {
+	case "approved":
+		entry.DriverFixStatus = "approved"
+	case "rejected":
+		entry.DriverFixStatus = "rejected"
+	default:
+		switch entry.DriverFixStatus {
+		case "", "queued", "running", "failed":
+			entry.DriverFixStatus = "candidate"
+		}
+	}
+}
+
+func snapshotDriverVersionIdentityForWeb(snapDir string) (driverID, seq int) {
+	base := filepath.Base(snapDir)
+	parent := filepath.Base(filepath.Dir(snapDir))
+	if !strings.HasPrefix(parent, "driver-") || !strings.HasPrefix(base, "v") {
+		return 0, 0
+	}
+	driverID, _ = strconv.Atoi(strings.TrimPrefix(parent, "driver-"))
+	seq, _ = strconv.Atoi(strings.TrimPrefix(base, "v"))
+	return driverID, seq
 }
 
 func crashReportPathForEntry(snapDir string, entry fuzzing.CrashAnalysisEntry) string {
@@ -2015,6 +2130,181 @@ func (m *Manager) TriggerCrashReportAnalysis(id string, driverID, seq int, crash
 	return nil
 }
 
+func (m *Manager) TriggerDriverFixCandidate(id string, input DriverFixCandidateQueueRequest) error {
+	targetDir := m.targetDirFor(id)
+	if targetDir == "" {
+		return fmt.Errorf("task not found")
+	}
+	crashFile := filepath.Base(input.File)
+	if input.Seq <= 0 {
+		return fmt.Errorf("invalid snapshot version")
+	}
+	if crashFile == "." || crashFile == string(filepath.Separator) || strings.TrimSpace(crashFile) == "" {
+		return fmt.Errorf("missing crash file")
+	}
+	snapDir := crashReportSnapshotDir(targetDir, input.DriverID, input.Seq)
+	logRoot := filepath.Join(targetDir, "logs", "fuzzing")
+	if !isPathUnderRoot(snapDir, logRoot) {
+		return fmt.Errorf("snapshot path escapes task logs")
+	}
+	info, err := os.Stat(snapDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("snapshot not found")
+	}
+	var entry fuzzing.CrashAnalysisEntry
+	found := false
+	for _, current := range readCrashAnalysisEntries(filepath.Join(snapDir, "crash-analysis.json")) {
+		if filepath.Base(current.File) != crashFile {
+			continue
+		}
+		entry = current
+		found = true
+		break
+	}
+	if !found {
+		return fmt.Errorf("unique crash not found")
+	}
+	normalizeCrashReportEntryForDisplayInSnapshot(snapDir, &entry)
+	if entry.Classification != "fuzz_driver_bug" {
+		return fmt.Errorf("unique crash is not classified as fuzz_driver_bug")
+	}
+	switch entry.DriverFixStatus {
+	case "queued", "running", "candidate", "approved", "rejected":
+		return fmt.Errorf("driver fix is already %s", entry.DriverFixStatus)
+	}
+
+	request := m.requestFor(id)
+	m.ensureManualEventTask(id, targetDir, request)
+	runState, err := state.Load(filepath.Join(targetDir, "agent-state.json"))
+	if err != nil {
+		_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+			entry.DriverFixStatus = "failed"
+			entry.DriverFixError = "load task state: " + err.Error()
+			entry.DriverFixAt = time.Now().Format(time.RFC3339)
+			return nil
+		})
+		return fmt.Errorf("load task state: %w", err)
+	}
+	cfg := fuzzing.FuzzConfig{
+		SourceDir:    runState.SourceDir,
+		BinaryPath:   snapshotCrashBinary(snapDir),
+		CodexCommand: request.CodexCommand,
+		CodexModel:   request.CodexModel,
+		CodexProfile: request.CodexProfile,
+		Runner:       runner.Runner{Verbose: request.Verbose},
+		LogsDir:      filepath.Join(filepath.Dir(filepath.Dir(snapDir)), "manual-driver-fix"),
+		EventSink:    m.taskCodexEventSink(id),
+		LogSink:      m.taskLogSink(id),
+	}
+	if cfg.CodexCommand == "" {
+		cfg.CodexCommand = DefaultRunRequest().CodexCommand
+	}
+	var liveAgent *agent.Agent
+	if task, exists := m.Get(id); exists {
+		task.mu.RLock()
+		if task.status == "running" || task.status == "stopping" {
+			liveAgent = task.agent
+		}
+		task.mu.RUnlock()
+	}
+	queued, err := fuzzing.EnqueueDriverFixJob(m.ctx, fuzzing.DriverFixQueueJob{
+		Key:         fuzzing.DriverFixJobKey(snapDir, crashFile),
+		Config:      cfg,
+		SnapshotDir: snapDir,
+		Entry:       entry,
+		OnQueued: func() {
+			_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+				entry.DriverFixStatus = "queued"
+				entry.DriverFixError = ""
+				entry.DriverFixSeq = 0
+				entry.DriverFixPath = ""
+				entry.DriverFixReport = ""
+				entry.DriverFixAt = time.Now().Format(time.RFC3339)
+				return nil
+			})
+			m.taskLogSink(id)("driver fix queued: " + crashFile)
+		},
+		OnStart: func() {
+			_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+				entry.DriverFixStatus = "running"
+				entry.DriverFixError = ""
+				entry.DriverFixAt = time.Now().Format(time.RFC3339)
+				return nil
+			})
+			m.taskLogSink(id)("driver fix started: " + crashFile)
+		},
+		OnComplete: func(result fuzzing.DriverFixCandidateResult) {
+			status := "failed"
+			if result.Existing && result.State != nil {
+				status = "candidate"
+				if result.State.ApprovalStatus == "approved" {
+					status = "approved"
+				} else if result.State.ApprovalStatus == "rejected" {
+					status = "rejected"
+				}
+			} else if result.State != nil {
+				status = "candidate"
+			}
+			_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+				entry.DriverFixStatus = status
+				entry.DriverFixError = ""
+				entry.DriverFixAt = time.Now().Format(time.RFC3339)
+				if result.State != nil {
+					entry.DriverFixSeq = result.State.Seq
+					entry.DriverFixPath = result.State.CurrentSnapshot
+					entry.DriverFixReport = result.State.CandidateReport
+				} else {
+					entry.DriverFixSeq = 0
+					entry.DriverFixPath = ""
+					entry.DriverFixReport = result.Response.Analysis
+				}
+				return nil
+			})
+			if result.State != nil && liveAgent != nil {
+				if err := liveAgent.RegisterDriverCandidate(result.State); err != nil {
+					m.taskLogSink(id)("driver fix candidate sync warning: " + err.Error())
+				}
+			}
+			if result.State != nil {
+				m.taskLogSink(id)(fmt.Sprintf("driver fix candidate ready: d%d/v%d", result.State.DriverID, result.State.Seq))
+			} else {
+				m.taskLogSink(id)("driver fix completed without candidate: " + crashFile)
+			}
+		},
+		OnError: func(result fuzzing.DriverFixCandidateResult, err error) {
+			_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+				entry.DriverFixStatus = "failed"
+				entry.DriverFixError = err.Error()
+				entry.DriverFixSeq = 0
+				entry.DriverFixPath = ""
+				entry.DriverFixReport = result.Response.Analysis
+				entry.DriverFixAt = time.Now().Format(time.RFC3339)
+				return nil
+			})
+			m.taskLogSink(id)("driver fix failed: " + err.Error())
+		},
+		OnCancel: func() {
+			_, _, _ = updateCrashAnalysisEntry(snapDir, crashFile, func(entry *fuzzing.CrashAnalysisEntry) error {
+				entry.DriverFixStatus = "failed"
+				entry.DriverFixError = "driver fix candidate generation removed from queue"
+				entry.DriverFixSeq = 0
+				entry.DriverFixPath = ""
+				entry.DriverFixReport = ""
+				entry.DriverFixAt = time.Now().Format(time.RFC3339)
+				return nil
+			})
+			m.taskLogSink(id)("driver fix removed from queue: " + crashFile)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if !queued {
+		return fmt.Errorf("driver fix candidate is already queued or running")
+	}
+	return nil
+}
+
 func (m *Manager) CreateCrashFixTask(id string, input CrashFixTaskRequest) (*TaskSnapshot, error) {
 	if input.DriverID <= 0 || input.Seq <= 0 {
 		return nil, fmt.Errorf("driver_id and seq are required")
@@ -2083,6 +2373,75 @@ func (m *Manager) CreateCrashFixTask(id string, input CrashFixTaskRequest) (*Tas
 	}
 	out := task.Snapshot()
 	return &out, nil
+}
+
+func (m *Manager) ApproveDriverFixCandidate(id string, input DriverFixCandidateDecisionRequest) (DriverFixCandidateDecisionResponse, error) {
+	return m.updateDriverFixCandidateApproval(id, input, "approve")
+}
+
+func (m *Manager) RejectDriverFixCandidate(id string, input DriverFixCandidateDecisionRequest) (DriverFixCandidateDecisionResponse, error) {
+	return m.updateDriverFixCandidateApproval(id, input, "reject")
+}
+
+func (m *Manager) updateDriverFixCandidateApproval(id string, input DriverFixCandidateDecisionRequest, action string) (DriverFixCandidateDecisionResponse, error) {
+	if input.DriverID <= 0 || input.Seq <= 0 {
+		return DriverFixCandidateDecisionResponse{}, fmt.Errorf("driver_id and seq are required")
+	}
+	targetDir := m.targetDirFor(id)
+	if targetDir == "" {
+		return DriverFixCandidateDecisionResponse{}, fmt.Errorf("task not found")
+	}
+	logsDir := filepath.Join(targetDir, "logs", "fuzzing")
+	var (
+		state *fuzzing.TargetState
+		err   error
+	)
+	if task, exists := m.Get(id); exists {
+		task.mu.RLock()
+		live := task.status == "running" || task.status == "stopping"
+		autoAgent := task.agent
+		task.mu.RUnlock()
+		if live && autoAgent != nil {
+			if candidateState := loadDriverCandidateState(logsDir, input.DriverID, input.Seq); candidateState != nil {
+				if err := autoAgent.RegisterDriverCandidate(candidateState); err != nil {
+					return DriverFixCandidateDecisionResponse{}, err
+				}
+			}
+			if action == "approve" {
+				err = autoAgent.ApproveDriverCandidate(input.DriverID, input.Seq)
+			} else {
+				err = autoAgent.RejectDriverCandidate(input.DriverID, input.Seq)
+			}
+			if err != nil {
+				return DriverFixCandidateDecisionResponse{}, err
+			}
+			state = loadDriverCandidateState(logsDir, input.DriverID, input.Seq)
+		}
+	}
+	if state == nil {
+		state, err = fuzzing.UpdateDriverCandidateApproval(logsDir, input.DriverID, input.Seq, action)
+		if err != nil {
+			return DriverFixCandidateDecisionResponse{}, err
+		}
+	}
+	if state == nil {
+		return DriverFixCandidateDecisionResponse{}, fmt.Errorf("driver candidate d%d/v%d not found", input.DriverID, input.Seq)
+	}
+	status := "candidate"
+	if state.ApprovalStatus == "approved" {
+		status = "approved"
+	} else if state.ApprovalStatus == "rejected" {
+		status = "rejected"
+	}
+	if err := updateCrashEntryDriverFixApproval(targetDir, state, status); err != nil {
+		return DriverFixCandidateDecisionResponse{}, err
+	}
+	if action == "approve" {
+		m.taskLogSink(id)(fmt.Sprintf("driver fix candidate approved: d%d/v%d", state.DriverID, state.Seq))
+	} else {
+		m.taskLogSink(id)(fmt.Sprintf("driver fix candidate rejected: d%d/v%d", state.DriverID, state.Seq))
+	}
+	return DriverFixCandidateDecisionResponse{DriverID: state.DriverID, Seq: state.Seq, Status: status}, nil
 }
 
 func (m *Manager) requestFor(id string) RunRequest {
@@ -2262,6 +2621,35 @@ func safeTaskName(name string) string {
 		return fmt.Sprintf("crash-fix-%d", time.Now().Unix())
 	}
 	return out
+}
+
+func loadDriverCandidateState(logsDir string, driverID, seq int) *fuzzing.TargetState {
+	state, err := fuzzing.LoadDriverCandidateState(logsDir, driverID, seq)
+	if err == nil && state != nil {
+		return state
+	}
+	multi, err := fuzzing.LoadMultiFuzzState(filepath.Join(logsDir, "multi-fuzzing-state.json"))
+	if err != nil || multi == nil {
+		return nil
+	}
+	return multi.Versions[fmt.Sprintf("driver-%04d-v%03d", driverID, seq)]
+}
+
+func updateCrashEntryDriverFixApproval(targetDir string, targetState *fuzzing.TargetState, status string) error {
+	if targetState == nil || targetState.DriverID <= 0 || targetState.CandidateBaseSeq <= 0 || strings.TrimSpace(targetState.CandidateCrash) == "" {
+		return nil
+	}
+	snapDir := crashReportSnapshotDir(targetDir, targetState.DriverID, targetState.CandidateBaseSeq)
+	_, _, err := updateCrashAnalysisEntry(snapDir, filepath.Base(targetState.CandidateCrash), func(entry *fuzzing.CrashAnalysisEntry) error {
+		entry.DriverFixStatus = status
+		entry.DriverFixError = ""
+		entry.DriverFixSeq = targetState.Seq
+		entry.DriverFixPath = targetState.CurrentSnapshot
+		entry.DriverFixReport = targetState.CandidateReport
+		entry.DriverFixAt = time.Now().Format(time.RFC3339)
+		return nil
+	})
+	return err
 }
 
 func crashFixContextForSelection(parent registryEntry, runState *state.RunState, snapDir string, input CrashFixTaskRequest) ([]string, string, error) {

@@ -13,7 +13,7 @@ const statusLabels = {
 };
 
 const mainViewTitles = {
-  dashboard: ['运行看板', '任务状态、发现问题与 crash 分析队列概览'],
+  dashboard: ['运行看板', '任务状态、发现问题与 Crash & Fix 队列概览'],
   tasks: ['任务列表', '创建、启动并查看所有 Autofuzz 任务'],
   'coverage-queue': ['覆盖队列', '全局 llvm-cov 覆盖导出与实时刷新队列'],
   detail: ['任务中控', '查看阶段、覆盖、crash、snapshot 与日志']
@@ -137,6 +137,26 @@ function crashReportStatusLabel(value) {
   if (value === 'pending') return '等待分析';
   if (value === 'skipped') return '已跳过';
   return value || '未知';
+}
+
+function driverFixStatusLabel(value) {
+  if (value === 'queued') return '候选排队中';
+  if (value === 'running') return '候选生成中';
+  if (value === 'candidate') return '候选待确认';
+  if (value === 'approved') return '已加入调度';
+  if (value === 'rejected') return '已丢弃';
+  if (value === 'failed') return '候选生成失败';
+  return value || '无候选';
+}
+
+function snapshotStatusLabel(value) {
+  if (value === 'candidate') return '候选';
+  if (value === 'rejected') return '已拒绝';
+  if (value === 'running') return '运行中';
+  if (value === 'queued') return '待调度';
+  if (value === 'failed') return '失败';
+  if (value === 'historical') return '历史';
+  return value || '';
 }
 
 const uniqueCrashFilterColumns = ['crash', 'status', 'type'];
@@ -296,11 +316,23 @@ function crashAnalysisText(item = {}) {
 }
 
 export function uniqueCrashAnalysisSummary(item, limit = 180) {
+  const entry = crashEntryForFilter(item);
+  if (entry.driver_fix_status === 'candidate' && Number(entry.driver_fix_seq || 0) > 0) {
+    return `已生成候选 driver v${entry.driver_fix_seq}，等待人工确认加入调度`;
+  }
+  if (entry.driver_fix_status === 'approved' && Number(entry.driver_fix_seq || 0) > 0) {
+    return `候选 driver v${entry.driver_fix_seq} 已确认加入调度`;
+  }
+  if (entry.driver_fix_status === 'rejected' && Number(entry.driver_fix_seq || 0) > 0) {
+    return `候选 driver v${entry.driver_fix_seq} 已被人工丢弃`;
+  }
+  if (entry.driver_fix_status === 'queued') return '修复候选已加入 Crash & Fix 队列';
+  if (entry.driver_fix_status === 'running') return '正在生成修复候选 driver';
+  if (entry.driver_fix_status === 'failed') return entry.driver_fix_error || entry.driver_fix_report || '候选 driver 生成失败';
   const text = crashAnalysisText(item);
   if (text) return shortCrashText(text, limit);
-  const entry = crashEntryForFilter(item);
   const status = entry.report_status || 'pending';
-  if (status === 'queued') return '已加入分析队列';
+  if (status === 'queued') return '已加入 Crash & Fix 队列';
   if (status === 'running') return 'LLM 正在分析';
   if (status === 'failed') return entry.report_error || item?.error || '分析失败';
   if (status === 'skipped') return entry.report_error || '该 crash 已跳过 LLM 分析';
@@ -324,6 +356,11 @@ function uniqueCrashSearchText(item) {
     entry.stack,
     entry.asan_report,
     entry.report_error,
+    entry.driver_fix_status,
+    driverFixStatusLabel(entry.driver_fix_status || ''),
+    entry.driver_fix_error,
+    entry.driver_fix_report,
+    entry.driver_fix_seq ? `candidate-v${entry.driver_fix_seq}` : '',
     crashAnalysisText(item),
     item?.error
   ].filter(Boolean).join('\n').toLowerCase();
@@ -1005,6 +1042,7 @@ export function useAutofuzzController() {
     const messages = reactive({ dashboard: '', list: '' });
     const detailActionBusy = reactive({resume: false, cancel: false, trigger: false, library: false});
     const crashQueueBusy = reactive(new Set());
+    const driverFixCandidateBusy = reactive(new Set());
     const crashFixMode = ref(false);
     const crashFixBusy = ref(false);
     const crashDeleteMode = ref(false);
@@ -1358,6 +1396,11 @@ export function useAutofuzzController() {
       if (!item) return null;
       const entry = uniqueCrashEntry(item);
       const badge = crashReportBadge(entry.report_status || 'pending', entry.classification || '');
+      const candidateStatus = entry.driver_fix_status || '';
+      const candidateSeq = Number(entry.driver_fix_seq || 0);
+      const candidateSummary = candidateSeq
+        ? `d${Number(item?.driver_id || 0) || '-'} / v${candidateSeq} · ${driverFixStatusLabel(candidateStatus)}`
+        : driverFixStatusLabel(candidateStatus);
       return {
         item,
         file: entry.file || '(unknown crash)',
@@ -1373,7 +1416,15 @@ export function useAutofuzzController() {
         analysisHtml: markdownToHtml(uniqueCrashAnalysisSummary(item, 700)),
         createdAt: uniqueCrashCreatedAt(item),
         lastAnalysisAt: uniqueCrashLastAnalysisAt(item),
-        fixable: crashFixEligible(item)
+        fixable: crashFixEligible(item),
+        candidateStatus,
+        candidateSeq,
+        candidateSummary,
+        candidateAnalysis: entry.driver_fix_report || '',
+        canQueueCandidate: canQueueDriverFixCandidate(item),
+        canApproveCandidate: candidateStatus === 'candidate' && candidateSeq > 0 && !driverFixCandidateBusy.has(uniqueCrashKey(item)),
+        canRejectCandidate: candidateStatus === 'candidate' && candidateSeq > 0 && !driverFixCandidateBusy.has(uniqueCrashKey(item)),
+        candidateBusy: driverFixCandidateBusy.has(uniqueCrashKey(item))
       };
     });
     const snapshotRows = computed(() => detail.snapshots || []);
@@ -2513,6 +2564,99 @@ export function useAutofuzzController() {
       );
     }
 
+    function canOpenDriverFixCandidate(item) {
+      return Number(uniqueCrashEntry(item).driver_fix_seq || 0) > 1;
+    }
+
+    function isDriverFixCandidateBusy(item) {
+      return driverFixCandidateBusy.has(uniqueCrashKey(item));
+    }
+
+    function canQueueDriverFixCandidate(item) {
+      const entry = uniqueCrashEntry(item);
+      const status = entry.driver_fix_status || '';
+      return entry.classification === 'fuzz_driver_bug' &&
+        !['queued', 'running', 'candidate', 'approved', 'rejected'].includes(status);
+    }
+
+    function openDriverFixCandidate(item) {
+      if (!canOpenDriverFixCandidate(item)) return;
+      openSnapshotDiff({
+        driver_id: Number(item?.driver_id || 0),
+        seq: Number(uniqueCrashEntry(item).driver_fix_seq || 0)
+      });
+    }
+
+    async function queueDriverFixCandidate(item) {
+      if (!canQueueDriverFixCandidate(item)) return;
+      const id = detail.id;
+      const entry = uniqueCrashEntry(item);
+      const key = uniqueCrashKey(item);
+      const driverId = Number(item?.driver_id || 0);
+      const seq = Number(item?.seq || 0);
+      const file = entry.file || '';
+      if (!id || seq <= 0 || !file || driverFixCandidateBusy.has(key)) return;
+      driverFixCandidateBusy.add(key);
+      crashFixMessage.value = '正在加入 Fix 队列...';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/driver-fix-candidates/enqueue`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({driver_id: driverId, seq, file})
+        });
+        await responseJSON(response, '加入 Fix 队列失败');
+        crashFixMessage.value = driverId
+          ? `driver bug crash 已加入 d${driverId}/v${seq} 的 Fix 队列。`
+          : 'driver bug crash 已加入 Fix 队列。';
+        await refreshDetailData(id, ['crashQueue', 'uniqueCrashes', 'snapshots']);
+      } catch (error) {
+        if (detail.id === id) crashFixMessage.value = error.message || '加入 Fix 队列失败';
+      } finally {
+        driverFixCandidateBusy.delete(key);
+      }
+    }
+
+    async function submitDriverFixCandidateDecision(item, approve) {
+      const id = detail.id;
+      const entry = uniqueCrashEntry(item);
+      const key = uniqueCrashKey(item);
+      const driverId = Number(item?.driver_id || 0);
+      const seq = Number(entry.driver_fix_seq || 0);
+      if (!id || !driverId || seq <= 0 || driverFixCandidateBusy.has(key)) return;
+      const actionLabel = approve ? '确认加入调度' : '丢弃';
+      const question = approve
+        ? `确认将候选 driver d${driverId}/v${seq} 加入调度？`
+        : `确认丢弃候选 driver d${driverId}/v${seq}？`;
+      if (!window.confirm(question)) return;
+      driverFixCandidateBusy.add(key);
+      crashFixMessage.value = `${actionLabel}候选 driver 中...`;
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/driver-fix-candidates/${approve ? 'approve' : 'reject'}`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({driver_id: driverId, seq})
+        });
+        const result = await responseJSON(response, `${actionLabel}候选 driver 失败`);
+        crashFixMessage.value = approve
+          ? `候选 driver d${result.driver_id || driverId}/v${result.seq || seq} 已加入调度。`
+          : `候选 driver d${result.driver_id || driverId}/v${result.seq || seq} 已丢弃。`;
+        await refreshDetailData(id, ['uniqueCrashes', 'snapshots', 'coverage']);
+        await refreshSnapshot(id);
+      } catch (error) {
+        if (detail.id === id) crashFixMessage.value = error.message || `${actionLabel}候选 driver 失败`;
+      } finally {
+        driverFixCandidateBusy.delete(key);
+      }
+    }
+
+    function approveDriverFixCandidate(item) {
+      return submitDriverFixCandidateDecision(item, true);
+    }
+
+    function rejectDriverFixCandidate(item) {
+      return submitDriverFixCandidateDecision(item, false);
+    }
+
     function isCrashQueueBusy(itemId) {
       return crashQueueBusy.has(itemId);
     }
@@ -2523,11 +2667,11 @@ export function useAutofuzzController() {
       crashQueueBusy.add(itemId);
       try {
         const params = new URLSearchParams({item_id: itemId});
-        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/crash-analysis-queue?${params.toString()}`, {method: 'DELETE'});
-        await responseJSON(response, '移出 crash 分析队列失败');
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/crash-fix-queue?${params.toString()}`, {method: 'DELETE'});
+        await responseJSON(response, '移出 Crash & Fix 队列失败');
         await refreshDetailData(id, ['crashQueue', 'uniqueCrashes']);
       } catch (error) {
-        if (detail.id === id) detail.message = error.message || '移出 crash 分析队列失败';
+        if (detail.id === id) detail.message = error.message || '移出 Crash & Fix 队列失败';
       } finally {
         crashQueueBusy.delete(itemId);
       }
@@ -2651,7 +2795,7 @@ export function useAutofuzzController() {
       const paths = {
         coverage: 'coverage',
         snapshots: 'snapshots',
-        crashQueue: 'crash-analysis-queue',
+        crashQueue: 'crash-fix-queue',
         uniqueCrashes: 'unique-crashes'
       };
       if (resource === 'coverage' && !detail.coverage.data) {
@@ -2725,6 +2869,7 @@ export function useAutofuzzController() {
       detailActionBusy.library = false;
       resetLibraryConfig();
       cancelCrashFixSelection();
+      driverFixCandidateBusy.clear();
     }
 
     function setStageStatus(stageId, status) {
@@ -3584,14 +3729,17 @@ export function useAutofuzzController() {
       issueNote,
       isCrashQueueBusy,
       isCrashFixSelected,
+      isDriverFixCandidateBusy,
       isTaskBusy,
       isUniqueCrashSelected,
       linearStages,
       messages,
+      markdown: markdownToHtml,
       navigate,
       onPathInput,
       openCreateModal,
       openDriverCoverage,
+      openDriverFixCandidate,
       openIssue,
       openPathPicker,
       openTask,
@@ -3632,6 +3780,7 @@ export function useAutofuzzController() {
       snapDeltaStr,
       snapshotKey: snapshot => `${snapshot.driver_id || 0}:${snapshot.seq || 0}:${snapshot.timestamp || ''}`,
       snapshotRows,
+      snapshotStatusLabel,
       snapshotsMulti,
       statusClass: safeClass,
       statusColumns: statusColumnsView,
@@ -3684,6 +3833,11 @@ export function useAutofuzzController() {
       uniqueCrashSelectionDisabledReason,
       uniqueCrashSelectionMode,
       openLibraryConfig,
+      approveDriverFixCandidate,
+      canQueueDriverFixCandidate,
+      canOpenDriverFixCandidate,
+      queueDriverFixCandidate,
+      rejectDriverFixCandidate,
       submitLibraryConfigReprocess,
       toggleCrashDeleteMode,
       toggleCrashFixMode,

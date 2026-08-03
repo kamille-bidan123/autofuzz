@@ -15,6 +15,7 @@ import (
 type snapshotEntry struct {
 	DriverID          int    `json:"driver_id,omitempty"`
 	Seq               int    `json:"seq"`
+	Status            string `json:"status,omitempty"`
 	Timestamp         string `json:"timestamp"`
 	ExecutedFunctions int    `json:"executed_functions"`
 	FullFunctions     int    `json:"full_functions"`
@@ -143,6 +144,12 @@ func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
 	if err != nil {
 		return nil
 	}
+	versionStateByKey := map[string]*fuzzing.TargetState{}
+	if multiState, err := fuzzing.LoadMultiFuzzState(filepath.Join(fuzzingLogsDir, "multi-fuzzing-state.json")); err == nil && multiState != nil {
+		for key, version := range multiState.Versions {
+			versionStateByKey[key] = version
+		}
+	}
 	coverageByTargetSeq := readCoverageByTargetSeq(filepath.Join(fuzzingLogsDir, "fuzzing-history.jsonl"))
 	if coverageByTargetSeq == nil {
 		coverageByTargetSeq = map[string]snapshotCoverageSummary{}
@@ -187,6 +194,10 @@ func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
 			snapDir := filepath.Join(targetDir, fmt.Sprintf("v%03d", seq))
 			executed, full, partial, uncovered := 0, 0, 0, 0
 			key := fmt.Sprintf("%d/%d", driverID, seq)
+			status := ""
+			if version := versionStateByKey[key]; version != nil {
+				status = fuzzing.TargetDisplayStatus(version)
+			}
 			if summary, ok := coverageByTargetSeq[key]; ok {
 				executed = summary.ExecutedFunctions
 				full = summary.FullFunctions
@@ -205,7 +216,7 @@ func (a *Agent) multiSnapshotComparison(fuzzingLogsDir string) []snapshotEntry {
 				deltaUncovered = uncovered - prevUncovered
 			}
 			result = append(result, snapshotEntry{
-				DriverID: driverID, Seq: seq, Timestamp: timestamp,
+				DriverID: driverID, Seq: seq, Status: status, Timestamp: timestamp,
 				ExecutedFunctions: executed, FullFunctions: full, PartialFunctions: partial,
 				UncoveredCount: uncovered, CrashCount: countFiles(filepath.Join(snapDir, "crashes")),
 				UniqueCrashCount: uniqueCrashCount,

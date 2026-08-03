@@ -12,11 +12,12 @@ const ui = useAutofuzz();
       <div v-else-if="!ui.snapshotRows.length" class="cov-empty">{{ ui.detail.fuzzStageStatus === 'pending' ? 'fuzzing 阶段开始后可用' : '当前还没有可展示的 snapshot 缓存' }}</div>
       <template v-else>
         <div class="snap-row head" :class="{multi: ui.snapshotsMulti}">
-          <div v-if="ui.snapshotsMulti">driver</div><div>v</div><div>时间</div><div>已执行(±)</div><div>未覆盖(±)</div><div>crash</div><div>unique</div><div>报告</div><div>corpus</div><div>LLM 修改</div>
+          <div v-if="ui.snapshotsMulti">driver</div><div>v</div><div>状态</div><div>时间</div><div>已执行(±)</div><div>未覆盖(±)</div><div>crash</div><div>unique</div><div>报告</div><div>corpus</div><div>LLM 修改</div>
         </div>
         <div v-for="snap in ui.snapshotRows" :key="ui.snapshotKey(snap)" class="snap-row" :class="{multi: ui.snapshotsMulti, clickable: snap.seq > 1}" @click="ui.openSnapshotDiff(snap)">
           <div v-if="ui.snapshotsMulti">d{{ snap.driver_id || '-' }}</div>
           <div><button v-if="snap.seq > 1" type="button" class="snap-version-button" @click.stop="ui.openSnapshotDiff(snap)">v{{ snap.seq }}</button><span v-else>v{{ snap.seq }}</span></div>
+          <div>{{ ui.snapshotStatusLabel(snap.status) || '-' }}</div>
           <div>{{ snap.timestamp || '-' }}</div>
           <div>{{ snap.executed_functions || 0 }} <span v-if="snap.seq > 1" class="snap-delta" :class="ui.snapDeltaClass(snap.delta_executed)">{{ ui.snapDeltaStr(snap.delta_executed) }}</span></div>
           <div>{{ snap.uncovered_count || 0 }} <span v-if="snap.seq > 1" class="snap-delta" :class="ui.snapDeltaClass(-(snap.delta_uncovered || 0))">{{ ui.snapDeltaStr(-(snap.delta_uncovered || 0)) }}</span></div>

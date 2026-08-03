@@ -649,6 +649,9 @@ func (m *CorpusMonitor) enqueueCrashReport(ctx context.Context, file string) {
 		OnComplete: func(report CrashLLMReport) {
 			m.cfg.logf("[crash-analysis] unique crash %s classified as %s\n", file, report.Classification)
 			m.updateCrashReportState(file, "completed", report.Classification, report.Analysis, "")
+			if report.Classification == "fuzz_driver_bug" {
+				m.enqueueDriverFixCandidate(ctx, file)
+			}
 		},
 		OnError: func(err error) {
 			m.cfg.logf("[crash-analysis] unique crash %s analysis failed: %v\n", file, err)
@@ -782,6 +785,104 @@ func (m *CorpusMonitor) updateCrashReportState(file, status, classification, ana
 		break
 	}
 	m.saveCrashAnalysisLocked()
+}
+
+func (m *CorpusMonitor) updateDriverFixState(file, status string, seq int, analysis, errText, path string) {
+	m.crashMu.Lock()
+	defer m.crashMu.Unlock()
+	for i := range m.uniqueCrashList {
+		if m.uniqueCrashList[i].File != file {
+			continue
+		}
+		m.ensureCrashEntryPaths(&m.uniqueCrashList[i])
+		m.uniqueCrashList[i].DriverFixStatus = status
+		m.uniqueCrashList[i].DriverFixAt = time.Now().Format(time.RFC3339)
+		m.uniqueCrashList[i].DriverFixError = errText
+		if seq > 0 {
+			m.uniqueCrashList[i].DriverFixSeq = seq
+		}
+		if strings.TrimSpace(path) != "" {
+			m.uniqueCrashList[i].DriverFixPath = path
+		}
+		if strings.TrimSpace(analysis) != "" {
+			m.uniqueCrashList[i].DriverFixReport = analysis
+		}
+		break
+	}
+	m.saveCrashAnalysisLocked()
+}
+
+func (m *CorpusMonitor) enqueueDriverFixCandidate(ctx context.Context, file string) {
+	entry, ok := m.crashEntry(file)
+	if !ok {
+		return
+	}
+	switch entry.DriverFixStatus {
+	case "queued", "running", "candidate", "approved", "rejected":
+		return
+	}
+	queued, err := EnqueueDriverFixJob(ctx, DriverFixQueueJob{
+		Key:         DriverFixJobKey(m.snapshotDir, file),
+		Config:      m.cfg,
+		SnapshotDir: m.snapshotDir,
+		Entry:       entry,
+		OnQueued: func() {
+			m.updateDriverFixState(file, "queued", entry.DriverFixSeq, "", "", entry.DriverFixPath)
+			m.cfg.logf("[driver-fix] queued approval-gated candidate generation for %s in %s\n", file, m.snapshotDir)
+		},
+		OnStart: func() {
+			m.updateDriverFixState(file, "running", entry.DriverFixSeq, "", "", entry.DriverFixPath)
+			m.cfg.logf("[driver-fix] generating approval-gated candidate for %s in %s\n", file, m.snapshotDir)
+		},
+		OnComplete: func(result DriverFixCandidateResult) {
+			if result.Existing && result.State != nil {
+				status := "candidate"
+				if result.State.ApprovalStatus == "approved" {
+					status = "approved"
+				} else if result.State.ApprovalStatus == "rejected" {
+					status = "rejected"
+				}
+				m.cfg.logf("[driver-fix] existing candidate reused for %s: d%d/v%d (%s)\n", file, result.State.DriverID, result.State.Seq, status)
+				m.updateDriverFixState(file, status, result.State.Seq, result.State.CandidateReport, "", result.State.CurrentSnapshot)
+				return
+			}
+			if result.State == nil {
+				message := "LLM 未生成可验证的 driver 修复候选"
+				if strings.TrimSpace(result.Response.Analysis) != "" {
+					message = result.Response.Analysis
+				}
+				m.cfg.logf("[driver-fix] no candidate generated for %s\n", file)
+				m.updateDriverFixState(file, "failed", 0, result.Response.Analysis, message, "")
+				return
+			}
+			m.updateDriverFixState(file, "candidate", result.State.Seq, result.Response.Analysis, "", result.State.CurrentSnapshot)
+			if m.cfg.CandidateEvents != nil {
+				select {
+				case m.cfg.CandidateEvents <- DriverCandidateEvent{State: result.State}:
+				default:
+					m.cfg.logf("[driver-fix] candidate event channel is full; candidate d%d/v%d will be discovered on next reload\n", result.State.DriverID, result.State.Seq)
+				}
+			}
+			m.cfg.logf("[driver-fix] candidate d%d/v%d is ready and awaiting approval for %s\n", result.State.DriverID, result.State.Seq, file)
+		},
+		OnError: func(result DriverFixCandidateResult, err error) {
+			analysis := result.Response.Analysis
+			m.cfg.logf("[driver-fix] candidate generation failed for %s: %v\n", file, err)
+			m.updateDriverFixState(file, "failed", 0, analysis, err.Error(), "")
+		},
+		OnCancel: func() {
+			m.cfg.logf("[driver-fix] candidate generation removed from queue for %s\n", file)
+			m.updateDriverFixState(file, "failed", 0, "", "driver fix candidate generation removed from queue", "")
+		},
+	})
+	if err != nil {
+		m.cfg.logf("[driver-fix] candidate queue failed for %s: %v\n", file, err)
+		m.updateDriverFixState(file, "failed", 0, "", err.Error(), "")
+		return
+	}
+	if !queued {
+		m.cfg.logf("[driver-fix] candidate generation for %s is already queued or running\n", file)
+	}
 }
 
 // CrashAnalysisData returns the current per-snapshot crash analysis state for

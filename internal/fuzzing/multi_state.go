@@ -38,6 +38,11 @@ type TargetState struct {
 	LastLLMIteration int                    `json:"last_llm_iteration,omitempty"`
 	LastCoverage     *CoverageSummaryPoint  `json:"last_coverage,omitempty"`
 	CoverageHistory  []CoverageSummaryPoint `json:"coverage_history,omitempty"`
+	ApprovalStatus   string                 `json:"approval_status,omitempty"`
+	CandidateBaseSeq int                    `json:"candidate_base_seq,omitempty"`
+	CandidateCrash   string                 `json:"candidate_crash,omitempty"`
+	CandidateReport  string                 `json:"candidate_report,omitempty"`
+	CandidateAt      string                 `json:"candidate_at,omitempty"`
 }
 
 type CoverageSummaryPoint struct {
@@ -205,6 +210,7 @@ func (s *MultiFuzzState) importVersionSnapshots(logsDir string) {
 				CorpusDir:       filepath.Join(snapDir, "corpus"),
 				Status:          "queued",
 			}
+			applyDriverCandidateMarker(targetState, readDriverCandidateMarker(snapDir))
 			if hash, err := driverSourceHash(filepath.Join(snapDir, "driver")); err == nil {
 				targetState.SourceHash = hash
 			}
@@ -250,6 +256,45 @@ func targetSnapshotSource(snapDir string, driverID int) string {
 		}
 	}
 	return ""
+}
+
+func targetApprovalPending(state *TargetState) bool {
+	return state != nil && state.ApprovalStatus == "pending"
+}
+
+func targetApprovalRejected(state *TargetState) bool {
+	return state != nil && state.ApprovalStatus == "rejected"
+}
+
+func targetSchedulable(state *TargetState) bool {
+	if state == nil {
+		return false
+	}
+	return !targetApprovalPending(state) && !targetApprovalRejected(state)
+}
+
+func targetDisplayStatus(state *TargetState) string {
+	if state == nil {
+		return ""
+	}
+	switch state.ApprovalStatus {
+	case "pending":
+		return "candidate"
+	case "rejected":
+		return "rejected"
+	}
+	if strings.TrimSpace(state.Status) != "" {
+		return state.Status
+	}
+	return "queued"
+}
+
+func TargetSchedulable(state *TargetState) bool {
+	return targetSchedulable(state)
+}
+
+func TargetDisplayStatus(state *TargetState) string {
+	return targetDisplayStatus(state)
 }
 
 func targetRootDir(logsDir string, driverID int) string {

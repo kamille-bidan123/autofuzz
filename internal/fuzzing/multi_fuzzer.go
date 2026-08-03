@@ -101,11 +101,19 @@ type TargetCoverageSnapshot struct {
 // controller compatible with the single-driver fuzzing loop.
 func StartMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) FuzzController {
 	ctrl := FuzzController{
-		Trigger: make(chan struct{}, 1),
-		Done:    make(chan error, 1),
+		Trigger:          make(chan struct{}, 1),
+		Done:             make(chan error, 1),
+		candidateActions: make(chan DriverCandidateAction, 8),
+		candidateEvents:  make(chan DriverCandidateEvent, 8),
 	}
 	if cfg.TriggerCh == nil {
 		cfg.TriggerCh = ctrl.Trigger
+	}
+	if cfg.CandidateActions == nil {
+		cfg.CandidateActions = ctrl.candidateActions
+	}
+	if cfg.CandidateEvents == nil {
+		cfg.CandidateEvents = ctrl.candidateEvents
 	}
 	go func() {
 		ctrl.Done <- RunMultiFuzzingPhase(ctx, cfg)
@@ -255,6 +263,38 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 		return nil
 	}
 
+	handleCandidateEvent := func(event DriverCandidateEvent) error {
+		if !applyDriverCandidateEvent(st, event) {
+			return nil
+		}
+		if err := st.Save(statePath); err != nil {
+			cfg.logf("[fuzzing] multi state save failed after candidate event: %v\n", err)
+		}
+		lastCycleData = collectMultiLiveData(running, st.Iteration)
+		emitCoverage(lastCycleData)
+		cfg.logf("[fuzzing] driver %d v%d created as approval-gated candidate\n", event.State.DriverID, event.State.Seq)
+		return nil
+	}
+
+	handleCandidateAction := func(action DriverCandidateAction) error {
+		err := applyDriverCandidateAction(st, action)
+		if err != nil {
+			return err
+		}
+		if err := st.Save(statePath); err != nil {
+			cfg.logf("[fuzzing] multi state save failed after candidate action: %v\n", err)
+		}
+		if action.Action == "approve" {
+			if err := settleRunningSet(targetRuntimeKey{}); err != nil {
+				return err
+			}
+		}
+		lastCycleData = collectMultiLiveData(running, st.Iteration)
+		emitCoverage(lastCycleData)
+		cfg.logf("[fuzzing] driver %d v%d candidate action applied: %s\n", action.DriverID, action.Seq, action.Action)
+		return nil
+	}
+
 	analysisTimer := time.NewTimer(time.Until(nextAnalysisAt))
 	defer analysisTimer.Stop()
 	coverageTicker := time.NewTicker(multiCoverageEmitInterval)
@@ -273,6 +313,20 @@ func RunMultiFuzzingPhase(ctx context.Context, cfg FuzzConfig) error {
 			refreshRunningCoverageCaches(ctx, running, cfg.logf)
 			lastCycleData = collectMultiLiveData(running, st.Iteration)
 			emitCoverage(lastCycleData)
+			continue
+		case event := <-cfg.CandidateEvents:
+			if err := handleCandidateEvent(event); err != nil {
+				return err
+			}
+			continue
+		case action := <-cfg.CandidateActions:
+			err := handleCandidateAction(action)
+			if action.Result != nil {
+				action.Result <- err
+			}
+			if err != nil {
+				return err
+			}
 			continue
 		case <-cfg.TriggerCh:
 			if !analysisTimer.Stop() {
@@ -803,7 +857,7 @@ func fillRunningTargets(ctx context.Context, cfg FuzzConfig, st *MultiFuzzState,
 		if _, ok := running[key]; ok {
 			continue
 		}
-		if targetState == nil || targetState.Status == "build_failed" || targetState.Status == "start_failed" {
+		if targetState == nil || !targetSchedulable(targetState) || targetState.Status == "build_failed" || targetState.Status == "start_failed" {
 			continue
 		}
 		rt, err := startRunningTarget(ctx, cfg, targetState)
@@ -840,6 +894,9 @@ func rotateExpiredTargets(cfg FuzzConfig, running map[targetRuntimeKey]*runningT
 
 func markQueuedTargets(st *MultiFuzzState, running map[targetRuntimeKey]*runningTarget) {
 	for _, targetState := range st.versionStates() {
+		if !targetSchedulable(targetState) {
+			continue
+		}
 		if _, ok := running[runtimeKey(targetState)]; ok {
 			continue
 		}
@@ -1051,7 +1108,7 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, maxP
 			snapshot.SeedCount += item.cache.SeedCount
 		}
 		snapshot.Targets = append(snapshot.Targets, TargetCoverageSnapshot{
-			DriverID: item.state.DriverID, Seq: item.state.Seq, Status: item.state.Status,
+			DriverID: item.state.DriverID, Seq: item.state.Seq, Status: targetDisplayStatus(item.state),
 			Available: item.cache.Available, SeedCount: item.cache.SeedCount,
 			CorpusDir: item.state.CorpusDir, Summary: item.coverage.Summary, Coverage: CloneCoverageStatus(item.cache.Coverage),
 			UncoveredCount: len(item.coverage.Uncovered),
@@ -1073,7 +1130,7 @@ func buildMultiCoverageSnapshot(data []targetCycleData, st *MultiFuzzState, maxP
 			uncoveredCount = targetState.LastCoverage.UncoveredCount
 		}
 		snapshot.Targets = append(snapshot.Targets, TargetCoverageSnapshot{
-			DriverID: targetState.DriverID, Seq: targetState.Seq, Status: targetState.Status,
+			DriverID: targetState.DriverID, Seq: targetState.Seq, Status: targetDisplayStatus(targetState),
 			Available: false, CorpusDir: targetState.CorpusDir, Summary: summary,
 			UncoveredCount: uncoveredCount,
 			Plateau:        targetReachedPlateau(targetState.CoverageHistory),
@@ -1107,7 +1164,7 @@ func schedulerVersionQueues(st *MultiFuzzState) ([]TargetVersionRef, []TargetVer
 	}
 	var running []TargetVersionRef
 	for _, targetState := range states {
-		if targetState.Status == "running" {
+		if targetSchedulable(targetState) && targetState.Status == "running" {
 			running = append(running, TargetVersionRef{DriverID: targetState.DriverID, Seq: targetState.Seq})
 		}
 	}
@@ -1119,6 +1176,9 @@ func schedulerVersionQueues(st *MultiFuzzState) ([]TargetVersionRef, []TargetVer
 	}
 	for offset := 0; offset < len(states); offset++ {
 		targetState := states[(start+offset)%len(states)]
+		if !targetSchedulable(targetState) {
+			continue
+		}
 		switch targetState.Status {
 		case "build_failed", "start_failed", "running":
 			continue

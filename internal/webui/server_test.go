@@ -81,7 +81,7 @@ func TestIndexUsesVueTaskConsole(t *testing.T) {
 		`/coverage/function-sources`,
 		`/api/coverage-queue`,
 		`覆盖队列`,
-		`/crash-analysis-queue`,
+		`/crash-fix-queue`,
 		`unique-crashes`,
 		`/crash-reports/analyze`,
 		`/library-config`,
@@ -836,6 +836,72 @@ func TestUniqueCrashesEndpointReconcilesStaleRunningReport(t *testing.T) {
 	requireSameRFC3339Instant(t, got.Crashes[0].LastAnalysisAt, reportTime)
 }
 
+func TestApproveDriverFixCandidateEndpointUpdatesUniqueCrashState(t *testing.T) {
+	request := lifecycleTestRequest(t)
+	manager := NewManager(context.Background())
+	pending, err := manager.Create(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupCrashFixParent(t, pending, fuzzing.CrashAnalysisEntry{
+		File:           "driver-crash-a",
+		Type:           "heap-buffer-overflow",
+		ASanReport:     "SUMMARY: AddressSanitizer: heap-buffer-overflow",
+		ReportStatus:   "completed",
+		Classification: "fuzz_driver_bug",
+		Analysis:       "driver missed a bounds check on the input length",
+		ReportPath:     "crash-reports/driver-crash-a.json",
+	})
+
+	logsDir := filepath.Join(pending.TargetDir, "logs", "fuzzing")
+	candidateDir := setupDriverFixCandidateSnapshot(t, logsDir, 9, 1, 2, "driver-crash-a", "added input length guard")
+
+	body := []byte(`{"driver_id":9,"seq":2}`)
+	httpRequest := httptest.NewRequest(http.MethodPost, "/api/runs/"+pending.ID+"/driver-fix-candidates/approve", bytes.NewReader(body))
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpResponse := httptest.NewRecorder()
+	NewServer(manager).ServeHTTP(httpResponse, httpRequest)
+	if httpResponse.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", httpResponse.Code, httpResponse.Body.String())
+	}
+
+	var result DriverFixCandidateDecisionResponse
+	if err := json.Unmarshal(httpResponse.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.DriverID != 9 || result.Seq != 2 || result.Status != "approved" {
+		t.Fatalf("unexpected approval response: %#v", result)
+	}
+
+	candidate := fuzzing.FindDriverFixCandidateForBase(logsDir, 9, 1)
+	if candidate == nil || candidate.ApprovalStatus != "approved" || candidate.Status != "queued" {
+		t.Fatalf("candidate state was not approved: %#v", candidate)
+	}
+
+	unique, err := manager.UniqueCrashes(pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unique.Crashes) != 1 {
+		t.Fatalf("unique crash count = %d, want 1", len(unique.Crashes))
+	}
+	entry := unique.Crashes[0].Entry
+	if entry.DriverFixStatus != "approved" || entry.DriverFixSeq != 2 || entry.DriverFixReport != "added input length guard" {
+		t.Fatalf("unique crash entry missing approved candidate metadata: %#v", entry)
+	}
+	if !strings.Contains(filepath.ToSlash(entry.DriverFixPath), "driver-targets/driver-0009/v002") {
+		t.Fatalf("driver fix path = %q, want candidate snapshot", entry.DriverFixPath)
+	}
+
+	markerData, err := os.ReadFile(filepath.Join(candidateDir, "driver-fix-candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(markerData), `"status": "approved"`) {
+		t.Fatalf("candidate marker was not updated:\n%s", markerData)
+	}
+}
+
 func TestDeleteUniqueCrashesEndpointRemovesEntriesAndArtifacts(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	targetDir := t.TempDir()
@@ -953,6 +1019,45 @@ func requireSameRFC3339Instant(t *testing.T, got string, want time.Time) {
 	if !parsed.Equal(want) {
 		t.Fatalf("time = %s, want same instant as %s", got, want.Format(time.RFC3339))
 	}
+}
+
+func setupDriverFixCandidateSnapshot(t *testing.T, logsDir string, driverID, baseSeq, seq int, crashFile, report string) string {
+	t.Helper()
+	snapDir := filepath.Join(logsDir, "driver-targets", fmt.Sprintf("driver-%04d", driverID), fmt.Sprintf("v%03d", seq))
+	for _, dir := range []string{
+		filepath.Join(snapDir, "driver"),
+		filepath.Join(snapDir, "corpus"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(snapDir, "driver", fmt.Sprintf("fuzz_driver_%d.c", driverID))
+	if err := os.WriteFile(source, []byte("int LLVMFuzzerTestOneInput(const unsigned char *Data, unsigned long Size) { return Size > 0 ? Data[0] : 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "build_cov_driver.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := map[string]any{
+		"driver_id":  driverID,
+		"seq":        seq,
+		"base_seq":   baseSeq,
+		"crash_file": crashFile,
+		"status":     "pending",
+		"analysis":   report,
+		"report":     report,
+		"created_at": time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"updated_at": time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "driver-fix-candidate.json"), append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return snapDir
 }
 
 func TestCrashReportsEndpointNormalizesLegacyLeakTimeout(t *testing.T) {

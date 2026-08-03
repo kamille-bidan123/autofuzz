@@ -7,14 +7,14 @@ const ui = useAutofuzz();
 <template>
   <div class="detail-tab-stack">
     <section v-if="ui.sortedCrashQueue.length" class="panel">
-      <div class="panel-head compact"><div><h2>分析队列</h2><p>{{ ui.sortedCrashQueue.length }} 个 crash 等待或正在分析</p></div></div>
+      <div class="panel-head compact"><div><h2>Crash &amp; Fix 队列</h2><p>{{ ui.sortedCrashQueue.length }} 个 crash 分析或 driver 修复候选等待/执行中</p></div></div>
       <div class="crash-queue-list">
-        <div class="crash-queue-row head"><div>driver</div><div>版本</div><div>crash</div><div>状态</div><div>时间</div><div>操作</div></div>
+        <div class="crash-queue-row head"><div>driver</div><div>版本</div><div>任务</div><div>状态</div><div>时间</div><div>操作</div></div>
         <div v-for="item in ui.sortedCrashQueue" :key="item.id || `${item.driver_id}:${item.seq}:${item.file}`" class="crash-queue-row" :class="item.status">
           <div>{{ ui.queueDriverLabel(item) }}</div>
           <div>v{{ item.seq || '-' }}</div>
-          <div class="crash-queue-task">{{ item.file || '(unknown)' }}<template v-if="item.type"> · {{ item.type }}</template></div>
-          <div><span class="crash-queue-status"><span v-if="item.status === 'running'" class="crash-queue-spinner"></span>{{ item.status === 'running' ? '正在分析' : '排队中' }}</span></div>
+          <div class="crash-queue-task">{{ item.kind_label || '队列任务' }} · {{ item.file || '(unknown)' }}<template v-if="item.type"> · {{ item.type }}</template></div>
+          <div><span class="crash-queue-status"><span v-if="item.status === 'running'" class="crash-queue-spinner"></span>{{ item.status === 'running' ? (item.kind === 'driver_fix' ? '正在生成候选' : '正在分析') : (item.kind === 'driver_fix' ? '等待生成候选' : '排队中') }}</span></div>
           <div>{{ ui.shortTime(item.status === 'running' ? item.started_at : item.queued_at) }}</div>
           <div><button class="driver-detail-button danger-mini" type="button" :disabled="!item.removable || ui.isCrashQueueBusy(item.id)" @click="ui.removeCrashQueueItem(item.id)">移出</button></div>
         </div>
@@ -190,7 +190,16 @@ const ui = useAutofuzz();
               <div><span class="crash-class" :class="ui.crashBadgeForEntry(ui.uniqueCrashEntry(item)).className">{{ ui.crashBadgeForEntry(ui.uniqueCrashEntry(item)).label }}</span></div>
               <div>{{ ui.uniqueCrashEntry(item).type || '-' }}</div>
               <div class="unique-crash-stack">{{ ui.uniqueCrashEntry(item).stack || ui.uniqueCrashEntry(item).asan_report || '暂无栈签名' }}</div>
-              <div class="unique-crash-analysis">{{ ui.uniqueCrashAnalysisSummary(item) }}</div>
+              <div class="unique-crash-analysis">
+                <span>{{ ui.uniqueCrashAnalysisSummary(item) }}</span>
+                <button
+                  v-if="ui.canQueueDriverFixCandidate(item)"
+                  type="button"
+                  class="driver-detail-button"
+                  :disabled="ui.isDriverFixCandidateBusy(item)"
+                  @click.stop="ui.queueDriverFixCandidate(item)"
+                >{{ ui.uniqueCrashTriagePreview?.item === item && ui.uniqueCrashTriagePreview.candidateBusy ? '处理中...' : '加入 Fix 队列' }}</button>
+              </div>
               <div class="unique-crash-time">{{ ui.uniqueCrashLastAnalysisAt(item) }}</div>
             </div>
           </template>
@@ -211,10 +220,15 @@ const ui = useAutofuzz();
               <div><span>分类</span><strong>{{ ui.uniqueCrashTriagePreview.classification }}</strong></div>
               <div><span>发现时间</span><strong>{{ ui.uniqueCrashTriagePreview.createdAt }}</strong></div>
               <div><span>上次分析</span><strong>{{ ui.uniqueCrashTriagePreview.lastAnalysisAt }}</strong></div>
+              <div v-if="ui.uniqueCrashTriagePreview.candidateStatus"><span>候选版本</span><strong>{{ ui.uniqueCrashTriagePreview.candidateSummary }}</strong></div>
             </div>
             <section class="crash-preview-section">
               <h4>分析结论</h4>
               <div class="codex-markdown crash-analysis-markdown" v-html="ui.uniqueCrashTriagePreview.analysisHtml"></div>
+            </section>
+            <section v-if="ui.uniqueCrashTriagePreview.candidateAnalysis" class="crash-preview-section">
+              <h4>候选修复说明</h4>
+              <div class="codex-markdown crash-analysis-markdown" v-html="ui.markdown(ui.uniqueCrashTriagePreview.candidateAnalysis)"></div>
             </section>
             <section class="crash-preview-section">
               <h4>栈签名</h4>
@@ -227,6 +241,28 @@ const ui = useAutofuzz();
             <div class="crash-preview-actions">
               <button type="button" class="driver-detail-button" @click="ui.openUniqueCrash(ui.uniqueCrashTriagePreview.item)">查看完整报告</button>
               <button type="button" class="driver-detail-button" :disabled="!ui.canAnalyzeUniqueCrash(ui.uniqueCrashTriagePreview.item)" @click="ui.analyzeUniqueCrash(ui.uniqueCrashTriagePreview.item)">{{ ui.uniqueCrashAnalyzeLabel(ui.uniqueCrashTriagePreview.item) }}</button>
+              <button
+                v-if="ui.uniqueCrashTriagePreview.canQueueCandidate"
+                type="button"
+                class="driver-detail-button"
+                :disabled="ui.uniqueCrashTriagePreview.candidateBusy"
+                @click="ui.queueDriverFixCandidate(ui.uniqueCrashTriagePreview.item)"
+              >{{ ui.uniqueCrashTriagePreview.candidateBusy ? '处理中...' : '加入 Fix 队列' }}</button>
+              <button v-if="ui.canOpenDriverFixCandidate(ui.uniqueCrashTriagePreview.item)" type="button" class="driver-detail-button" @click="ui.openDriverFixCandidate(ui.uniqueCrashTriagePreview.item)">查看候选 Diff</button>
+              <button
+                v-if="ui.uniqueCrashTriagePreview.canApproveCandidate"
+                type="button"
+                class="task-action primary"
+                :disabled="ui.uniqueCrashTriagePreview.candidateBusy"
+                @click="ui.approveDriverFixCandidate(ui.uniqueCrashTriagePreview.item)"
+              >{{ ui.uniqueCrashTriagePreview.candidateBusy ? '处理中...' : '确认加入调度' }}</button>
+              <button
+                v-if="ui.uniqueCrashTriagePreview.canRejectCandidate"
+                type="button"
+                class="task-action danger"
+                :disabled="ui.uniqueCrashTriagePreview.candidateBusy"
+                @click="ui.rejectDriverFixCandidate(ui.uniqueCrashTriagePreview.item)"
+              >{{ ui.uniqueCrashTriagePreview.candidateBusy ? '处理中...' : '丢弃候选' }}</button>
             </div>
           </template>
         </aside>

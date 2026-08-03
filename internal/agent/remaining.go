@@ -671,3 +671,33 @@ func (a *Agent) TriggerFuzzAnalysis() bool {
 	}
 	return false
 }
+
+func (a *Agent) ApproveDriverCandidate(driverID, seq int) error {
+	a.fuzzControllerMu.RLock()
+	controller := a.fuzzController
+	a.fuzzControllerMu.RUnlock()
+	if controller == nil {
+		return fmt.Errorf("fuzz controller is unavailable")
+	}
+	return controller.ApproveCandidate(driverID, seq)
+}
+
+func (a *Agent) RejectDriverCandidate(driverID, seq int) error {
+	a.fuzzControllerMu.RLock()
+	controller := a.fuzzController
+	a.fuzzControllerMu.RUnlock()
+	if controller == nil {
+		return fmt.Errorf("fuzz controller is unavailable")
+	}
+	return controller.RejectCandidate(driverID, seq)
+}
+
+func (a *Agent) RegisterDriverCandidate(state *fuzzing.TargetState) error {
+	a.fuzzControllerMu.RLock()
+	controller := a.fuzzController
+	a.fuzzControllerMu.RUnlock()
+	if controller == nil {
+		return fmt.Errorf("fuzz controller is unavailable")
+	}
+	return controller.RegisterCandidate(state)
+}

@@ -69,6 +69,14 @@ type FuzzConfig struct {
 	// FlowSink receives structured state transitions for the repeating
 	// fuzz/analyze/rebuild loop. The same snapshots are persisted to disk.
 	FlowSink func(FuzzFlowSnapshot)
+
+	// CandidateActions receives approval/rejection actions for approval-gated
+	// driver versions generated from crash-based fuzz_driver_bug fixes.
+	CandidateActions chan DriverCandidateAction `json:"-"`
+
+	// CandidateEvents receives newly generated approval-gated driver versions
+	// so the live scheduler can merge them into the in-memory state.
+	CandidateEvents chan DriverCandidateEvent `json:"-"`
 }
 
 // logf prints a formatted message to the LogSink (if set) or stdout.
@@ -83,8 +91,10 @@ func (cfg FuzzConfig) logf(format string, args ...any) {
 // FuzzController is returned by RunFuzzingPhaseStart so the caller can
 // signal a manual trigger.
 type FuzzController struct {
-	Trigger chan struct{}
-	Done    chan error
+	Trigger          chan struct{}
+	Done             chan error
+	candidateActions chan DriverCandidateAction
+	candidateEvents  chan DriverCandidateEvent
 }
 
 // StartFuzzingPhase is like RunFuzzingPhase but returns immediately with
@@ -92,11 +102,19 @@ type FuzzController struct {
 // force an immediate analysis cycle, and receives the final error on Done.
 func StartFuzzingPhase(ctx context.Context, cfg FuzzConfig) FuzzController {
 	ctrl := FuzzController{
-		Trigger: make(chan struct{}, 1),
-		Done:    make(chan error, 1),
+		Trigger:          make(chan struct{}, 1),
+		Done:             make(chan error, 1),
+		candidateActions: make(chan DriverCandidateAction, 8),
+		candidateEvents:  make(chan DriverCandidateEvent, 8),
 	}
 	if cfg.TriggerCh == nil {
 		cfg.TriggerCh = ctrl.Trigger
+	}
+	if cfg.CandidateActions == nil {
+		cfg.CandidateActions = ctrl.candidateActions
+	}
+	if cfg.CandidateEvents == nil {
+		cfg.CandidateEvents = ctrl.candidateEvents
 	}
 	go func() {
 		ctrl.Done <- RunFuzzingPhase(ctx, cfg)
@@ -113,6 +131,46 @@ func (c FuzzController) TriggerAnalysis() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (c FuzzController) ApproveCandidate(driverID, seq int) error {
+	return c.sendCandidateAction(DriverCandidateAction{Action: "approve", DriverID: driverID, Seq: seq, Result: make(chan error, 1)})
+}
+
+func (c FuzzController) RejectCandidate(driverID, seq int) error {
+	return c.sendCandidateAction(DriverCandidateAction{Action: "reject", DriverID: driverID, Seq: seq, Result: make(chan error, 1)})
+}
+
+func (c FuzzController) RegisterCandidate(state *TargetState) error {
+	if state == nil || state.DriverID <= 0 || state.Seq <= 0 {
+		return fmt.Errorf("candidate state is invalid")
+	}
+	if c.candidateEvents == nil {
+		return fmt.Errorf("candidate control is unavailable")
+	}
+	select {
+	case c.candidateEvents <- DriverCandidateEvent{State: state}:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("candidate control timed out")
+	}
+}
+
+func (c FuzzController) sendCandidateAction(action DriverCandidateAction) error {
+	if c.candidateActions == nil {
+		return fmt.Errorf("candidate control is unavailable")
+	}
+	select {
+	case c.candidateActions <- action:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("candidate control timed out")
+	}
+	select {
+	case err := <-action.Result:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("candidate control timed out")
 	}
 }
 
