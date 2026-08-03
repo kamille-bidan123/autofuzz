@@ -10,10 +10,9 @@ const ui = useAutofuzz();
       <div class="stage-scroll">
         <div class="stages">
           <template v-for="stage in ui.linearStages" :key="stage.id">
-            <div class="stage linear-stage" :class="stage.status" :data-stage="stage.id" :data-owner="stage.owner">
+            <div class="stage linear-stage" :class="stage.status" :data-stage="stage.id">
               <div class="stage-top"><span class="stage-index">{{ stage.index }}</span><span class="spinner"></span></div>
               <div class="stage-name">{{ stage.name }}</div>
-              <span class="stage-owner">{{ stage.owner }}</span>
               <button
                 v-if="stage.id === 'configured'"
                 class="stage-action-button"
@@ -25,10 +24,9 @@ const ui = useAutofuzz();
             <div class="flow-connector" aria-hidden="true"></div>
           </template>
           <div class="stage-cycle">
-            <div class="stage" :class="ui.fuzzStage.status" data-stage="fuzzing" :data-owner="ui.fuzzStage.owner">
+            <div class="stage" :class="ui.fuzzStage.status" data-stage="fuzzing">
               <div class="stage-top"><span class="stage-index">7</span><span class="spinner"></span></div>
               <div class="stage-name">{{ ui.fuzzStage.name }}</div>
-              <span class="stage-owner">{{ ui.fuzzStage.owner }}</span>
               <div class="stage-detail">{{ ui.fuzzStage.detail }}</div>
             </div>
             <div class="cycle-track" aria-hidden="true">
@@ -41,10 +39,9 @@ const ui = useAutofuzz();
                 <text class="cycle-label cycle-back" :class="{active: ui.flowBackActive}" x="66" y="112" text-anchor="middle">继续 / 重建</text>
               </svg>
             </div>
-            <div class="stage" :class="ui.analysisStage.status" data-stage="fuzz_analysis" :data-owner="ui.analysisStage.owner">
+            <div class="stage" :class="ui.analysisStage.status" data-stage="fuzz_analysis">
               <div class="stage-top"><span class="stage-index">↻</span><span class="spinner"></span></div>
               <div class="stage-name">{{ ui.analysisStage.name }}</div>
-              <span class="stage-owner">{{ ui.analysisStage.owner }}</span>
               <div class="stage-detail">{{ ui.analysisStage.detail }}</div>
               <div class="stage-result">{{ ui.analysisStage.result }}</div>
             </div>

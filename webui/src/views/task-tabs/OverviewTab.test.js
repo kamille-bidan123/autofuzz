@@ -104,6 +104,9 @@ describe('OverviewTab', () => {
     expect(wrapper.findAll('.driver-board-tile')).toHaveLength(1);
     expect(wrapper.text()).toContain('持续 Fuzz 测试');
     expect(wrapper.text()).toContain('LLM 优化分析');
+    expect(wrapper.text()).not.toContain('Codex CLI');
+    expect(wrapper.text()).not.toContain('libFuzzer');
+    expect(wrapper.text()).not.toContain('Go');
     expect(wrapper.findAll('.driver-schedule-tile')).toHaveLength(3);
     expect(wrapper.find('.driver-schedule-tile.running').text()).toContain('d1');
     expect(wrapper.find('.driver-schedule-tile.next').text()).toContain('v2');
