@@ -70,6 +70,22 @@ func (c Client) GenerateAllCover(ctx context.Context, libraryConfig string, pool
 	return err
 }
 
+// GenerateGiven runs PromeFuzz's given generation mode for the supplied
+// function names, producing per-function fuzz drivers and (on exit) the
+// synthesized dispatcher in the library output's fuzz_driver directory.
+func (c Client) GenerateGiven(ctx context.Context, libraryConfig string, poolSize int, functions []string, clearState bool) error {
+	args := []string{c.Python, "PromeFuzz.py", "--config", c.ConfigPath, "-F", libraryConfig,
+		"generate", "--task", "given", "--pool-size", fmt.Sprintf("%d", poolSize)}
+	if clearState {
+		args = append(args, "--clear-state")
+	}
+	args = append(args, functions...)
+	commandCtx, cancel := context.WithTimeout(ctx, 4*time.Hour)
+	defer cancel()
+	_, err := c.Runner.Run(commandCtx, filepath.Join(c.LogsDir, "generate-given"), "promefuzz", c.Root, unbufferedPython, args...)
+	return err
+}
+
 var unbufferedPython = []string{"PYTHONUNBUFFERED=1"}
 
 func AssessAPI(path string) (APIAssessment, error) {

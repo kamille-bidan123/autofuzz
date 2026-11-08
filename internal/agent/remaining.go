@@ -99,6 +99,12 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 	if a.Options.StopAfter == state.StagePreprocessed {
 		return nil
 	}
+	// Given mode: PromeFuzz preprocess is done. Park the task until the user
+	// selects the function set, then generate drivers for exactly those
+	// functions and (unless stop-after says otherwise) continue to fuzzing.
+	if a.isGivenMode() {
+		return a.runGivenGeneration(ctx)
+	}
 	apiAssessment, err := promefuzz.AssessAPI(filepath.Join(a.State.OutputPath, "preprocessor", "api.json"))
 	if err != nil {
 		return a.fail(state.StagePreprocessed, err)
@@ -144,6 +150,92 @@ func (a *Agent) runRemaining(ctx context.Context) error {
 		}
 		a.stageCompleted(state.StageGenerated, fmt.Sprintf("allcover 完成，已生成 %d 个 fuzz driver", len(a.State.GeneratedDrivers)))
 		fmt.Printf("allcover generated %d fuzz driver source file(s)\n", len(a.State.GeneratedDrivers))
+	}
+	if a.Options.StopAfter == state.StageGenerated {
+		return nil
+	}
+	if !a.State.Stage.AtLeast(state.StageFuzzing) {
+		a.stageStarted(state.StageFuzzing, "正在执行持续 fuzz 测试与覆盖分析")
+		if err := a.runFuzzing(ctx); err != nil {
+			return a.fail(state.StageFuzzing, err)
+		}
+		a.State.Stage = state.StageFuzzing
+		a.State.RunStatus = ""
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StageFuzzing, "fuzz 测试完成")
+		fmt.Println("fuzzing phase completed")
+	}
+	return nil
+}
+
+func (a *Agent) isGivenMode() bool {
+	return a.Options.GenerationMode == "given" || a.State.GenerationTask == "given"
+}
+
+// runGivenGeneration drives the given-mode flow that follows preprocess:
+//  1. build (or reuse) the selectable function catalog,
+//  2. if no function set was chosen yet, park as awaiting_input and return,
+//  3. otherwise run PromeFuzz given generation for the selected functions,
+//     mark the task generated, and continue to the normal fuzz loop.
+func (a *Agent) runGivenGeneration(ctx context.Context) error {
+	if a.State.GenerationTask != "given" {
+		a.State.GenerationTask = "given"
+	}
+	if a.State.FunctionCatalogPath == "" || !fileExists(a.State.FunctionCatalogPath) {
+		catalog, err := promefuzz.BuildFunctionCatalog(a.State.OutputPath)
+		if err != nil {
+			return a.fail(state.StagePreprocessed, fmt.Errorf("build function catalog: %w", err))
+		}
+		catalogPath := filepath.Join(a.TargetDir, "function-catalog.json")
+		data, err := json.MarshalIndent(catalog, "", "  ")
+		if err != nil {
+			return a.fail(state.StagePreprocessed, fmt.Errorf("encode function catalog: %w", err))
+		}
+		if err := os.WriteFile(catalogPath, append(data, '\n'), 0o644); err != nil {
+			return a.fail(state.StagePreprocessed, fmt.Errorf("save function catalog: %w", err))
+		}
+		a.State.FunctionCatalogPath = catalogPath
+	}
+	if len(a.State.GivenFunctions) == 0 && len(a.Options.GivenFunctions) > 0 {
+		a.State.GivenFunctions = append([]string(nil), a.Options.GivenFunctions...)
+	}
+	if len(a.State.GivenFunctions) == 0 {
+		a.State.RunStatus = state.RunStatusAwaitingInput
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StagePreprocessed, fmt.Sprintf("PromeFuzz 预处理完成，等待选择给定函数（可选函数见 %s）", a.State.FunctionCatalogPath))
+		fmt.Printf("given mode: preprocess complete; catalog at %s; task parked awaiting function selection\n", a.State.FunctionCatalogPath)
+		return nil
+	}
+	if a.Options.StopAfter == state.StagePreprocessed || a.Options.StopAfter == state.StageComprehended {
+		return nil
+	}
+	// Resume-safety: only regenerate when the given selection has not been
+	// generated yet (fresh selection or cleared output). Otherwise skip
+	// straight to the fuzz loop, which resumes its own multi-fuzzer state.
+	needsGenerate := !a.State.Stage.AtLeast(state.StageGenerated) || len(findDrivers(a.State.OutputPath)) == 0
+	if needsGenerate {
+		a.stageStarted(state.StageGenerated, "PromeFuzz given 模式正在生成所选函数的 fuzz driver")
+		logDir := filepath.Join(a.LogsDir, "given-generate")
+		_ = os.MkdirAll(logDir, 0o755)
+		if err := a.promeFuzzClient().GenerateGiven(ctx, a.State.LibraryConfigPath, a.Options.PoolSize, a.State.GivenFunctions, true); err != nil {
+			return a.fail(state.StageGenerated, err)
+		}
+		drivers := findDrivers(a.State.OutputPath)
+		if len(drivers) == 0 {
+			return a.fail(state.StageGenerated, fmt.Errorf("given generate returned no fuzz driver"))
+		}
+		a.State.GeneratedDrivers = drivers
+		a.State.Stage = state.StageGenerated
+		a.State.RunStatus = ""
+		if err := a.State.Save(a.StatePath); err != nil {
+			return err
+		}
+		a.stageCompleted(state.StageGenerated, fmt.Sprintf("given 模式生成完成，共 %d 个 fuzz driver", len(drivers)))
+		fmt.Printf("given mode generated %d fuzz driver source file(s)\n", len(drivers))
 	}
 	if a.Options.StopAfter == state.StageGenerated {
 		return nil

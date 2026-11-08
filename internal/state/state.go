@@ -30,6 +30,10 @@ type RunStatus string
 const (
 	RunStatusBlocked RunStatus = "blocked"
 	RunStatusFailed  RunStatus = "failed"
+	// RunStatusAwaitingInput marks a task that has finished automatic
+	// preparation (e.g. PromeFuzz preprocess) and is parked waiting for the
+	// user to select which functions to fuzz in given mode.
+	RunStatusAwaitingInput RunStatus = "awaiting_input"
 )
 
 var stageOrder = map[Stage]int{
@@ -64,39 +68,46 @@ type ErrorRecord struct {
 }
 
 type RunState struct {
-	Version             int            `json:"version"`
-	Stage               Stage          `json:"stage"`
-	RunStatus           RunStatus      `json:"run_status,omitempty"`
-	RepositoryURL       string         `json:"repository_url"`
-	SourceKind          string         `json:"source_kind,omitempty"`
-	Ref                 string         `json:"ref,omitempty"`
-	TaskKind            string         `json:"task_kind,omitempty"`
-	ParentTaskID        string         `json:"parent_task_id,omitempty"`
-	OriginDriverID      int            `json:"origin_driver_id,omitempty"`
-	OriginDriverSeq     int            `json:"origin_driver_seq,omitempty"`
-	OriginCrashes       []string       `json:"origin_crashes,omitempty"`
-	OriginSnapshotDir   string         `json:"origin_snapshot_dir,omitempty"`
-	OriginSourceDir     string         `json:"origin_source_dir,omitempty"`
-	OriginBuildDir      string         `json:"origin_build_dir,omitempty"`
-	OriginInstallDir    string         `json:"origin_install_dir,omitempty"`
-	Commit              string         `json:"commit,omitempty"`
-	ProjectName         string         `json:"project_name"`
-	SourceDir           string         `json:"source_dir"`
-	BuildSystem         string         `json:"build_system,omitempty"`
-	Language            string         `json:"language,omitempty"`
-	BuildDir            string         `json:"build_dir,omitempty"`
-	InstallDir          string         `json:"install_dir,omitempty"`
-	CompileCommandsPath string         `json:"compile_commands_path,omitempty"`
-	StaticLibraries     []string       `json:"static_libraries,omitempty"`
-	HeaderPaths         []string       `json:"header_paths,omitempty"`
-	ConsumerPaths       []string       `json:"consumer_paths,omitempty"`
-	BuildReportPath     string         `json:"build_report_path,omitempty"`
-	LibraryReportPath   string         `json:"library_report_path,omitempty"`
-	BuildMethod         string         `json:"build_method,omitempty"`
-	LibraryConfigPath   string         `json:"library_config_path,omitempty"`
-	OutputPath          string         `json:"output_path,omitempty"`
-	GenerationTask      string         `json:"generation_task,omitempty"`
-	GeneratedDrivers    []string       `json:"generated_drivers,omitempty"`
+	Version             int       `json:"version"`
+	Stage               Stage     `json:"stage"`
+	RunStatus           RunStatus `json:"run_status,omitempty"`
+	RepositoryURL       string    `json:"repository_url"`
+	SourceKind          string    `json:"source_kind,omitempty"`
+	Ref                 string    `json:"ref,omitempty"`
+	TaskKind            string    `json:"task_kind,omitempty"`
+	ParentTaskID        string    `json:"parent_task_id,omitempty"`
+	OriginDriverID      int       `json:"origin_driver_id,omitempty"`
+	OriginDriverSeq     int       `json:"origin_driver_seq,omitempty"`
+	OriginCrashes       []string  `json:"origin_crashes,omitempty"`
+	OriginSnapshotDir   string    `json:"origin_snapshot_dir,omitempty"`
+	OriginSourceDir     string    `json:"origin_source_dir,omitempty"`
+	OriginBuildDir      string    `json:"origin_build_dir,omitempty"`
+	OriginInstallDir    string    `json:"origin_install_dir,omitempty"`
+	Commit              string    `json:"commit,omitempty"`
+	ProjectName         string    `json:"project_name"`
+	SourceDir           string    `json:"source_dir"`
+	BuildSystem         string    `json:"build_system,omitempty"`
+	Language            string    `json:"language,omitempty"`
+	BuildDir            string    `json:"build_dir,omitempty"`
+	InstallDir          string    `json:"install_dir,omitempty"`
+	CompileCommandsPath string    `json:"compile_commands_path,omitempty"`
+	StaticLibraries     []string  `json:"static_libraries,omitempty"`
+	HeaderPaths         []string  `json:"header_paths,omitempty"`
+	ConsumerPaths       []string  `json:"consumer_paths,omitempty"`
+	BuildReportPath     string    `json:"build_report_path,omitempty"`
+	LibraryReportPath   string    `json:"library_report_path,omitempty"`
+	BuildMethod         string    `json:"build_method,omitempty"`
+	LibraryConfigPath   string    `json:"library_config_path,omitempty"`
+	OutputPath          string    `json:"output_path,omitempty"`
+	GenerationTask      string    `json:"generation_task,omitempty"`
+	GeneratedDrivers    []string  `json:"generated_drivers,omitempty"`
+	// GivenFunctions is the user-selected function list for given mode. When
+	// GenerationTask == "given" and this list is empty, the task is parked
+	// awaiting user selection (RunStatus == awaiting_input).
+	GivenFunctions []string `json:"given_functions,omitempty"`
+	// FunctionCatalogPath points at the function catalog JSON generated right
+	// after preprocess so the UI can render the selectable function list.
+	FunctionCatalogPath string         `json:"function_catalog_path,omitempty"`
 	BuildAttempts       []BuildAttempt `json:"build_attempts,omitempty"`
 	Errors              []ErrorRecord  `json:"errors,omitempty"`
 	Warnings            []string       `json:"warnings,omitempty"`

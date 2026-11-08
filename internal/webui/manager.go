@@ -17,6 +17,7 @@ import (
 	"autofuzz/internal/agent"
 	"autofuzz/internal/configagent"
 	"autofuzz/internal/fuzzing"
+	"autofuzz/internal/promefuzz"
 	"autofuzz/internal/runevent"
 	"autofuzz/internal/runner"
 	"autofuzz/internal/state"
@@ -41,6 +42,8 @@ type RunRequest struct {
 	StopAfter             string   `json:"stop_after"`
 	FuzzInterval          string   `json:"fuzz_interval"`
 	TaskKind              string   `json:"task_kind,omitempty"`
+	GenerationMode        string   `json:"generation_mode,omitempty"`
+	GivenFunctions        []string `json:"given_functions,omitempty"`
 	ParentTaskID          string   `json:"parent_task_id,omitempty"`
 	OriginDriverID        int      `json:"origin_driver_id,omitempty"`
 	OriginDriverSeq       int      `json:"origin_driver_seq,omitempty"`
@@ -72,7 +75,8 @@ func (r RunRequest) options() agent.Options {
 		PoolSize: r.PoolSize, Jobs: r.Jobs, MaxFuzzDrivers: r.MaxFuzzDrivers,
 		CodexCommand: r.CodexCommand, CodexModel: r.CodexModel, CodexProfile: r.CodexProfile,
 		Resume: r.Resume, Verbose: r.Verbose, StopAfter: state.Stage(r.StopAfter),
-		TaskKind: r.TaskKind, ParentTaskID: r.ParentTaskID,
+		TaskKind: r.TaskKind, GenerationMode: r.GenerationMode,
+		GivenFunctions: append([]string(nil), r.GivenFunctions...), ParentTaskID: r.ParentTaskID,
 		Origin: agent.CrashFixOrigin{
 			DriverID: r.OriginDriverID, DriverSeq: r.OriginDriverSeq,
 			Crashes: append([]string(nil), r.OriginCrashes...), SnapshotDir: r.OriginSnapshotDir,
@@ -107,6 +111,8 @@ func normalizedRunRequest(original RunRequest, options agent.Options) RunRequest
 	original.StopAfter = string(options.StopAfter)
 	original.FuzzInterval = options.FuzzInterval.String()
 	original.TaskKind = options.TaskKind
+	original.GenerationMode = options.GenerationMode
+	original.GivenFunctions = append([]string(nil), options.GivenFunctions...)
 	original.ParentTaskID = options.ParentTaskID
 	original.OriginDriverID = options.Origin.DriverID
 	original.OriginDriverSeq = options.Origin.DriverSeq
@@ -199,7 +205,7 @@ var stageDefinitions = []stageDefinition{
 	{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
 }
 
-func stageDefinitionsFor(taskKind string) []stageDefinition {
+func stageDefinitionsFor(taskKind, generationMode string) []stageDefinition {
 	if taskKind == "crash_fix_child" {
 		return []stageDefinition{
 			{string(state.StageBuilt), "修复并编译库", "Codex CLI"},
@@ -207,14 +213,29 @@ func stageDefinitionsFor(taskKind string) []stageDefinition {
 			{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
 		}
 	}
+	if generationMode == "given" {
+		return []stageDefinition{
+			{string(state.StageCloned), "准备源码", "Go"},
+			{string(state.StageBuilt), "构建并校验目标库", "Codex CLI"},
+			{string(state.StageConfigured), "生成 library.toml", "Codex CLI"},
+			{string(state.StagePreprocessed), "API 预处理（全量函数目录）", "PromeFuzz"},
+			{givenSelectionStageID, "选择函数集合", "用户"},
+			{string(state.StageGenerated), "Given 生成 fuzz driver", "PromeFuzz + Codex"},
+			{string(state.StageFuzzing), "持续 Fuzz 测试", "libFuzzer + Codex"},
+		}
+	}
 	return stageDefinitions
 }
+
+// givenSelectionStageID is a display-only stage for given mode that sits
+// between preprocess and generation; it is not a state.Stage value.
+const givenSelectionStageID = "given_selection"
 
 var stageRanks = map[string]int{
 	string(state.StageInit): 0, string(state.StageCloned): 1, string(state.StageBuilt): 2,
 	string(state.StageConfigured): 3, string(state.StagePreprocessed): 4,
-	string(state.StageComprehended): 5, string(state.StageGenerated): 6,
-	string(state.StageFuzzing): 7,
+	string(state.StageComprehended): 5, givenSelectionStageID: 5,
+	string(state.StageGenerated): 6, string(state.StageFuzzing): 7,
 }
 
 type Task struct {
@@ -250,7 +271,7 @@ func newTask(id string, createdAt time.Time, request RunRequest, autoAgent *agen
 
 func (t *Task) resetStages(autoAgent *agent.Agent) {
 	completedRank := stageRanks[string(autoAgent.State.Stage)]
-	for _, definition := range stageDefinitionsFor(t.request.TaskKind) {
+	for _, definition := range stageDefinitionsFor(t.request.TaskKind, t.request.GenerationMode) {
 		status := "pending"
 		if stageRanks[definition.id] <= completedRank {
 			status = "completed"
@@ -321,7 +342,7 @@ func (t *Task) finish(status, message string, err error) {
 func (t *Task) Snapshot() TaskSnapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	definitions := stageDefinitionsFor(t.request.TaskKind)
+	definitions := stageDefinitionsFor(t.request.TaskKind, t.request.GenerationMode)
 	stages := make([]StageSnapshot, 0, len(definitions))
 	for _, definition := range definitions {
 		stages = append(stages, StageSnapshot{
@@ -388,6 +409,7 @@ func (t *Task) closeSubscribersIfFinished() {
 
 type Manager struct {
 	ctx                 context.Context
+	defaults            RunRequest
 	mu                  sync.RWMutex
 	tasks               map[string]*Task
 	activeDir           map[string]string
@@ -397,9 +419,13 @@ type Manager struct {
 	activeCrashAnalysis map[string]bool
 }
 
-func NewManager(ctx context.Context) *Manager {
+func NewManager(ctx context.Context, defaults ...RunRequest) *Manager {
+	defaultRequest := DefaultRunRequest()
+	if len(defaults) > 0 {
+		defaultRequest = defaults[0]
+	}
 	return &Manager{
-		ctx: ctx, tasks: map[string]*Task{}, activeDir: map[string]string{},
+		ctx: ctx, defaults: defaultRequest, tasks: map[string]*Task{}, activeDir: map[string]string{},
 		activeCrashAnalysis: map[string]bool{},
 		runAgent: func(runContext context.Context, autoAgent *agent.Agent) error {
 			return autoAgent.Run(runContext)
@@ -407,9 +433,26 @@ func NewManager(ctx context.Context) *Manager {
 	}
 }
 
+// defaultRunRequest returns the service-level defaults (e.g. the PromeFuzz
+// path passed to autofuzz-web at startup) used to prefill the create-task form.
+func (m *Manager) defaultRunRequest() RunRequest {
+	return m.defaults
+}
+
 func (m *Manager) Create(request RunRequest) (*TaskSnapshot, error) {
 	if request.RepositoryURL == "" {
 		return nil, fmt.Errorf("repository_url cannot be empty")
+	}
+	// The PromeFuzz path (and related environment) is configured at
+	// autofuzz-web startup; fill it in when the client does not supply one.
+	if request.PromeFuzzRoot == "" {
+		request.PromeFuzzRoot = m.defaults.PromeFuzzRoot
+	}
+	if request.ConfigPath == "" {
+		request.ConfigPath = m.defaults.ConfigPath
+	}
+	if request.PythonPath == "" {
+		request.PythonPath = m.defaults.PythonPath
 	}
 	autoAgent, err := agent.New(request.options())
 	if err != nil {
@@ -443,11 +486,11 @@ func (m *Manager) StartTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("task not found")
 	}
 	status := effectiveRegistryStatus(entry)
-	if status != "pending" && status != "stopped" && status != "interrupted" && status != "failed" {
+	if status != "pending" && status != "stopped" && status != "interrupted" && status != "failed" && status != "awaiting_input" {
 		return nil, fmt.Errorf("task cannot be started from status %s", status)
 	}
 	request := entry.Request
-	if status == "interrupted" || status == "failed" || (status == "stopped" && fileExists(filepath.Join(entry.Workspace, entry.Name, "agent-state.json"))) {
+	if status == "interrupted" || status == "failed" || status == "awaiting_input" || (status == "stopped" && fileExists(filepath.Join(entry.Workspace, entry.Name, "agent-state.json"))) {
 		request.Resume = true
 	} else if status == "stopped" {
 		request.Resume = false
@@ -526,6 +569,12 @@ func (m *Manager) finishTask(task *Task, targetDir string, err error) {
 	} else if err != nil {
 		status = "failed"
 		message = err.Error()
+	}
+	if err == nil && !stopRequested && m.ctx.Err() == nil {
+		if awaiting, ok := awaitingInputStatus(filepath.Join(targetDir, "agent-state.json")); ok {
+			status = awaiting
+			message = "PromeFuzz 预处理完成，等待选择给定函数"
+		}
 	}
 	task.finish(status, message, err)
 	m.mu.Lock()
@@ -3292,7 +3341,7 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 	targetDir := filepath.Join(entry.Workspace, entry.Name)
 	statePath := filepath.Join(targetDir, "agent-state.json")
 	createdAt, _ := time.Parse(time.RFC3339, entry.CreatedAt)
-	stages := pendingStageSnapshots(entry.Request.TaskKind)
+	stages := pendingStageSnapshots(entry.Request.TaskKind, entry.Request.GenerationMode)
 	data, err := os.ReadFile(statePath)
 	if err == nil {
 		var runState state.RunState
@@ -3323,12 +3372,8 @@ func snapshotFromRegistry(entry registryEntry) TaskSnapshot {
 	}
 }
 
-func pendingStageSnapshots(taskKind ...string) []StageSnapshot {
-	kind := ""
-	if len(taskKind) > 0 {
-		kind = taskKind[0]
-	}
-	definitions := stageDefinitionsFor(kind)
+func pendingStageSnapshots(taskKind, generationMode string) []StageSnapshot {
+	definitions := stageDefinitionsFor(taskKind, generationMode)
 	stages := make([]StageSnapshot, 0, len(definitions))
 	for _, definition := range definitions {
 		stages = append(stages, StageSnapshot{ID: definition.id, Name: definition.name, Owner: definition.owner, Status: "pending"})
@@ -3339,13 +3384,21 @@ func pendingStageSnapshots(taskKind ...string) []StageSnapshot {
 func stageSnapshotsFromState(runState *state.RunState) []StageSnapshot {
 	completedRank := stageRanks[string(runState.EffectiveStage())]
 	failedStage := string(runState.FailedStage())
-	stages := pendingStageSnapshots(runState.TaskKind)
+	generationMode := runState.GenerationTask
+	stages := pendingStageSnapshots(runState.TaskKind, generationMode)
 	for index := range stages {
 		if stageRanks[stages[index].ID] <= completedRank {
 			stages[index].Status = "completed"
 		}
 		if stages[index].ID == failedStage {
 			stages[index].Status = "failed"
+		}
+	}
+	if generationMode == "given" && runState.RunStatus == state.RunStatusAwaitingInput {
+		for index := range stages {
+			if stages[index].ID == givenSelectionStageID {
+				stages[index].Status = "running"
+			}
 		}
 	}
 	return stages
@@ -3760,6 +3813,9 @@ func historicalStatus(statePath string) (status, stage string) {
 		return "missing", ""
 	}
 	stage = string(runState.EffectiveStage())
+	if runState.RunStatus == state.RunStatusAwaitingInput {
+		return string(state.RunStatusAwaitingInput), stage
+	}
 	if runState.TerminalStatus() != "" {
 		return "failed", stage
 	}
@@ -3767,6 +3823,96 @@ func historicalStatus(statePath string) (status, stage string) {
 		return "completed", stage
 	}
 	return "interrupted", stage
+}
+
+// FunctionCatalog returns the selectable function list for a given-mode task,
+// generated right after PromeFuzz preprocess.
+func (m *Manager) FunctionCatalog(id string) (*promefuzz.FunctionCatalog, error) {
+	entry, exists := registryEntryByID(id)
+	if !exists {
+		return nil, fmt.Errorf("task not found")
+	}
+	runState, err := state.Load(filepath.Join(entry.Workspace, entry.Name, "agent-state.json"))
+	if err != nil {
+		return nil, fmt.Errorf("load task state: %w", err)
+	}
+	if runState.FunctionCatalogPath == "" {
+		return nil, fmt.Errorf("function catalog is not available yet (PromeFuzz preprocess has not finished)")
+	}
+	data, err := os.ReadFile(runState.FunctionCatalogPath)
+	if err != nil {
+		return nil, fmt.Errorf("read function catalog: %w", err)
+	}
+	var catalog promefuzz.FunctionCatalog
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return nil, fmt.Errorf("decode function catalog: %w", err)
+	}
+	return &catalog, nil
+}
+
+// SubmitGivenFunctions records the user-selected function set for a given-mode
+// task and restarts the task so it can run PromeFuzz given generation and the
+// fuzz loop.
+func (m *Manager) SubmitGivenFunctions(id string, functions []string) (*Task, error) {
+	if len(functions) == 0 {
+		return nil, fmt.Errorf("functions cannot be empty")
+	}
+	entry, exists := registryEntryByID(id)
+	if !exists {
+		return nil, fmt.Errorf("task not found")
+	}
+	statePath := filepath.Join(entry.Workspace, entry.Name, "agent-state.json")
+	runState, err := state.Load(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("load task state: %w", err)
+	}
+	if runState.GenerationTask != "given" {
+		return nil, fmt.Errorf("task %s is not in given mode", id)
+	}
+	// Validate the selection against the catalog so typos surface early.
+	allowed := map[string]bool{}
+	if runState.FunctionCatalogPath != "" {
+		if data, rerr := os.ReadFile(runState.FunctionCatalogPath); rerr == nil {
+			var catalog promefuzz.FunctionCatalog
+			if json.Unmarshal(data, &catalog) == nil {
+				for _, item := range catalog.Functions {
+					allowed[item.Name] = true
+				}
+			}
+		}
+	}
+	for _, name := range functions {
+		if len(allowed) > 0 && !allowed[name] {
+			return nil, fmt.Errorf("function %q is not in the function catalog", name)
+		}
+	}
+	runState.GivenFunctions = append([]string(nil), functions...)
+	runState.RunStatus = ""
+	if err := runState.Save(statePath); err != nil {
+		return nil, fmt.Errorf("save task state: %w", err)
+	}
+	// Mark the registry entry so StartTask accepts it and resumes with the
+	// freshly selected functions.
+	entry.Status = "awaiting_input"
+	if err := upsertTaskRegistry(entry); err != nil {
+		return nil, err
+	}
+	return m.StartTask(id)
+}
+
+func awaitingInputStatus(statePath string) (string, bool) {
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return "", false
+	}
+	var runState state.RunState
+	if err := json.Unmarshal(data, &runState); err != nil {
+		return "", false
+	}
+	if runState.RunStatus == state.RunStatusAwaitingInput {
+		return string(state.RunStatusAwaitingInput), true
+	}
+	return "", false
 }
 
 // Delete removes a task from the registry. If the task is running, it is

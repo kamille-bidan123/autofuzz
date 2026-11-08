@@ -17,7 +17,9 @@ const ui = useAutofuzz();
         <form @submit.prevent="ui.submitCreateTask">
           <div class="form-grid">
             <div class="field full"><label for="repository_url">本地目录或 Git 仓库 *</label><PathPicker id="repository_url" v-model="ui.createForm.values.repository_url" required placeholder="/path/to/library 或 https://..." :state="ui.pathPickerState('repository_url')" @input-change="ui.onPathInput('repository_url')" @toggle="ui.togglePathPicker('repository_url')" @close="ui.closePathPickers()" @select-current="ui.selectCurrentPath('repository_url')" @select-entry="ui.selectPathEntry('repository_url', $event)" @open-dir="ui.openPathPicker('repository_url', $event)" /></div>
-            <div class="field full"><label for="promefuzz">PromeFuzz 路径 *</label><PathPicker id="promefuzz" v-model="ui.createForm.values.promefuzz" required :state="ui.pathPickerState('promefuzz')" @input-change="ui.onPathInput('promefuzz')" @toggle="ui.togglePathPicker('promefuzz')" @close="ui.closePathPickers()" @select-current="ui.selectCurrentPath('promefuzz')" @select-entry="ui.selectPathEntry('promefuzz', $event)" @open-dir="ui.openPathPicker('promefuzz', $event)" /></div>
+          </div>
+          <div class="form-grid generation-mode-row">
+            <div class="field full"><label for="generation_mode">生成模式</label><select id="generation_mode" v-model="ui.createForm.values.generation_mode"><option value="allcover">allcover — 自动覆盖全部公开 API（默认）</option><option value="given">given — 预处理后由你选择要 fuzz 的函数集合（含内部函数）</option></select></div>
           </div>
           <details class="advanced-section">
             <summary class="advanced-summary">高级参数</summary>

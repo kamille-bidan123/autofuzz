@@ -30,6 +30,13 @@ type Options struct {
 	FuzzInterval   time.Duration
 	TaskKind       string
 	ParentTaskID   string
+	// GenerationMode selects how fuzz drivers are generated: "" or
+	// "allcover" (default) uses PromeFuzz's all-cover scheduler, while
+	// "given" lets the user pick a function set after preprocess.
+	GenerationMode string
+	// GivenFunctions is the user-selected function set for given mode.
+	// Empty means the task stops after preprocess and waits for selection.
+	GivenFunctions []string
 	Origin         CrashFixOrigin
 }
 
@@ -105,6 +112,14 @@ func (o *Options) Normalize() error {
 	}
 	if !validStages[o.StopAfter] {
 		return fmt.Errorf("invalid stop-after stage %q", o.StopAfter)
+	}
+	switch o.GenerationMode {
+	case "", "allcover", "given":
+	default:
+		return fmt.Errorf("invalid generation-mode %q (want allcover or given)", o.GenerationMode)
+	}
+	if o.GenerationMode != "given" && len(o.GivenFunctions) > 0 {
+		return fmt.Errorf("given-functions requires generation-mode given")
 	}
 	return nil
 }

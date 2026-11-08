@@ -5,6 +5,40 @@ const ui = useAutofuzz();
 
 <template>
   <div class="detail-tab-stack overview-control">
+    <section v-if="ui.givenVisibility" class="panel given-selection-panel">
+      <div class="panel-head compact"><div><h2>Given 模式：选择要 fuzz 的函数</h2><p>PromeFuzz 预处理已完成，从全量函数中勾选目标后提交</p></div></div>
+      <div v-if="ui.given.loading" class="given-selection-status">正在加载函数目录...</div>
+      <div v-else-if="ui.given.error" class="given-selection-status error">{{ ui.given.error }}</div>
+      <div v-else-if="ui.given.functions.length">
+        <div class="given-selection-stats">
+          <span>总计 <strong>{{ ui.given.functions.length }}</strong></span>
+          <span>公开 <strong>{{ ui.given.publicCount }}</strong></span>
+          <span>内部 <strong>{{ ui.given.internalCount }}</strong></span>
+          <span>已选 <strong>{{ ui.givenSelectedCount }}</strong></span>
+        </div>
+        <div class="given-selection-toolbar">
+          <input v-model="ui.given.search" class="given-search" type="search" placeholder="搜索函数名 / 文件 / 签名" aria-label="搜索函数" />
+          <button type="button" class="given-action" @click="ui.selectAllGivenPublic">全选公开函数</button>
+          <button type="button" class="given-action" @click="ui.clearGivenSelection">清空选择</button>
+          <button type="button" class="given-action primary" :disabled="ui.given.submitBusy || !ui.givenSelectedCount" @click="ui.submitGivenSelection">提交并开始生成（{{ ui.givenSelectedCount }}）</button>
+        </div>
+        <div class="given-selection-table">
+          <div class="given-row given-head">
+            <span></span><span>函数</span><span>类型</span><span>位置</span><span>签名</span>
+          </div>
+          <label v-for="item in ui.givenFiltered" :key="item.key" class="given-row" :class="{selected: ui.given.selected.has(item.name)}">
+            <span><input type="checkbox" :checked="ui.given.selected.has(item.name)" @change="ui.toggleGivenFunction(item.name)" /></span>
+            <span class="given-name">{{ item.name }}</span>
+            <span><em :class="item.public ? 'given-badge public' : 'given-badge internal'">{{ item.public ? 'public' : 'internal' }}</em></span>
+            <span class="given-file">{{ item.file }}:{{ (item.loc || '').split(':').slice(-2).join(':') }}</span>
+            <span class="given-sig">{{ item.signature || '—' }}</span>
+          </label>
+        </div>
+        <p v-if="ui.given.message" class="given-selection-status" :class="{error: /失败/.test(ui.given.message)}">{{ ui.given.message }}</p>
+      </div>
+      <div v-else class="given-selection-status">当前任务没有可选择的函数（catalog 为空）。</div>
+    </section>
+
     <section class="panel overview-stage-panel">
       <div class="panel-head compact"><div><h2>执行阶段</h2><p>Fuzz 与 LLM 优化循环</p></div></div>
       <div class="stage-scroll">

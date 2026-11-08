@@ -42,6 +42,8 @@ func NewServer(manager *Manager) *Server {
 	server.mux.HandleFunc("GET /api/runs/{id}/history", server.runHistory)
 	server.mux.HandleFunc("GET /api/runs/{id}/fuzz-flow", server.fuzzFlow)
 	server.mux.HandleFunc("GET /api/runs/{id}/library-config", server.libraryConfig)
+	server.mux.HandleFunc("GET /api/runs/{id}/function-catalog", server.functionCatalog)
+	server.mux.HandleFunc("POST /api/runs/{id}/given-functions", server.submitGivenFunctions)
 	server.mux.HandleFunc("POST /api/runs/{id}/library-config/reprocess", server.reprocessLibraryConfig)
 	server.mux.HandleFunc("POST /api/runs/{id}/cancel", server.cancelRun)
 	server.mux.HandleFunc("POST /api/runs/{id}/trigger-fuzz", server.triggerFuzz)
@@ -113,7 +115,7 @@ func (s *Server) serveStatic(response http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) defaults(response http.ResponseWriter, _ *http.Request) {
-	writeJSON(response, http.StatusOK, DefaultRunRequest())
+	writeJSON(response, http.StatusOK, s.manager.defaultRunRequest())
 }
 
 type dirEntry struct {
@@ -272,6 +274,42 @@ func (s *Server) cancelRun(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{"status": "stopping"})
+}
+
+func (s *Server) functionCatalog(response http.ResponseWriter, request *http.Request) {
+	result, err := s.manager.FunctionCatalog(request.PathValue("id"))
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) submitGivenFunctions(response http.ResponseWriter, request *http.Request) {
+	var payload struct {
+		Functions []string `json:"functions"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		writeError(response, http.StatusBadRequest, err.Error())
+		return
+	}
+	task, err := s.manager.SubmitGivenFunctions(request.PathValue("id"), payload.Functions)
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "task not found") {
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err.Error())
+		return
+	}
+	task.mu.RLock()
+	status := task.status
+	task.mu.RUnlock()
+	writeJSON(response, http.StatusAccepted, map[string]string{"status": status})
 }
 
 func (s *Server) triggerFuzz(response http.ResponseWriter, request *http.Request) {

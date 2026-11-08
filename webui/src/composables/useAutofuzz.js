@@ -7,6 +7,7 @@ const statusLabels = {
   stopping: '停止中',
   stopped: '已停止',
   interrupted: '已中断',
+  awaiting_input: '等待选择函数',
   completed: '已完成',
   failed: '运行失败',
   missing: '数据缺失'
@@ -40,6 +41,16 @@ const crashFixChildStageDefs = [
   { id: 'built', name: '修复并编译库', owner: 'Codex CLI', index: 1 },
   { id: 'generated', name: '编译 fuzz_driver', owner: 'Go', index: 2 },
   { id: 'fuzzing', name: '持续 Fuzz 测试', owner: 'libFuzzer', index: 3 }
+];
+
+const givenStageDefs = [
+  { id: 'cloned', name: '准备源码', owner: 'Go', index: 1 },
+  { id: 'built', name: '构建并校验目标库', owner: 'Codex CLI', index: 2 },
+  { id: 'configured', name: '生成 library.toml', owner: 'Codex CLI', index: 3 },
+  { id: 'preprocessed', name: 'API 预处理（全量函数目录）', owner: 'PromeFuzz', index: 4 },
+  { id: 'given_selection', name: '选择函数集合', owner: '用户', index: 5 },
+  { id: 'generated', name: 'Given 生成 fuzz driver', owner: 'PromeFuzz + Codex', index: 6 },
+  { id: 'fuzzing', name: '持续 Fuzz 测试', owner: 'libFuzzer', index: 7 }
 ];
 
 const detailTabs = [
@@ -1085,7 +1096,8 @@ export function useAutofuzzController() {
         codex_model: '',
         codex_profile: '',
         resume: false,
-        verbose: false
+        verbose: false,
+        generation_mode: 'allcover'
       },
       message: 'Web 服务默认仅监听本机。对于不可信仓库，请在一次性容器或隔离虚拟机中运行。',
       submitting: false,
@@ -1210,7 +1222,11 @@ export function useAutofuzzController() {
       for (const stage of detail.stages || []) map[stage.id] = stage.status || 'pending';
       return map;
     });
-    const activeStageDefs = computed(() => detail.taskKind === 'crash_fix_child' ? crashFixChildStageDefs : stageDefs);
+    const activeStageDefs = computed(() => {
+      if (detail.taskKind === 'crash_fix_child') return crashFixChildStageDefs;
+      if (detail.taskKind === 'given' || (detail.stages || []).some(stage => stage.id === 'given_selection')) return givenStageDefs;
+      return stageDefs;
+    });
     const linearStages = computed(() =>
       activeStageDefs.value.filter(stage => stage.id !== 'fuzzing').map(stage => ({
         ...stage,
@@ -1889,6 +1905,96 @@ export function useAutofuzzController() {
       }
     }
 
+    const given = reactive({
+      loading: false,
+      error: '',
+      message: '',
+      catalog: null,
+      functions: [],
+      publicCount: 0,
+      internalCount: 0,
+      selected: new Set(),
+      search: '',
+      submitBusy: false
+    });
+
+    const givenVisibility = computed(() => detail.status === 'awaiting_input');
+    const givenSelectedCount = computed(() => given.selected.size);
+    const givenFiltered = computed(() => {
+      const query = String(given.search || '').trim().toLowerCase();
+      if (!query) return given.functions;
+      return given.functions.filter(item => {
+        return String(item.name || '').toLowerCase().includes(query)
+          || String(item.file || '').toLowerCase().includes(query)
+          || String(item.signature || '').toLowerCase().includes(query);
+      });
+    });
+
+    async function loadGivenCatalog(id) {
+      const target = id || detail.id;
+      if (!target || given.loading) return;
+      given.loading = true;
+      given.error = '';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(target)}/function-catalog`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '加载函数目录失败');
+        given.catalog = result;
+        given.functions = (result.functions || []).map(item => ({...item, key: item.loc || item.name}));
+        given.publicCount = Number(result.public_count || 0);
+        given.internalCount = Number(result.internal_count || 0);
+      } catch (error) {
+        given.error = error.message;
+      } finally {
+        given.loading = false;
+      }
+    }
+
+    function toggleGivenFunction(name) {
+      if (given.selected.has(name)) {
+        given.selected.delete(name);
+      } else {
+        given.selected.add(name);
+      }
+    }
+
+    function selectAllGivenPublic() {
+      for (const item of given.functions) {
+        if (item.public) given.selected.add(item.name);
+      }
+    }
+
+    function clearGivenSelection() {
+      given.selected.clear();
+    }
+
+    async function submitGivenSelection() {
+      const id = detail.id;
+      const functions = [...given.selected];
+      if (!id || given.submitBusy) return;
+      if (!functions.length) {
+        given.message = '请至少选择一个函数。';
+        return;
+      }
+      given.submitBusy = true;
+      given.message = '';
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(id)}/given-functions`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({functions})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '提交函数选择失败');
+        given.message = `已提交 ${functions.length} 个函数，任务已重启并开始 given 模式生成。`;
+        await loadTaskDetail(id);
+      } catch (error) {
+        given.message = error.message;
+      } finally {
+        given.submitBusy = false;
+      }
+    }
+
     function createRequestBody() {
       const value = key => String(createForm.values[key] ?? '').trim();
       const numberValue = key => Number(createForm.values[key]) || 0;
@@ -1907,7 +2013,8 @@ export function useAutofuzzController() {
         codex_profile: value('codex_profile'),
         resume: Boolean(createForm.values.resume),
         verbose: Boolean(createForm.values.verbose),
-        stop_after: value('stop_after')
+        stop_after: value('stop_after'),
+        generation_mode: value('generation_mode')
       };
     }
 
@@ -3047,6 +3154,9 @@ export function useAutofuzzController() {
         detail.meta = `任务 ${id}${parentMeta}${originMeta} · workspace: ${snapshot.target_dir || ''}${snapshot.error ? ' · 错误: ' + snapshot.error : ''}`;
         detail.status = snapshot.status || '';
         detail.statusText = statusLabels[snapshot.status] || snapshot.status || '未启动';
+        if (detail.status === 'awaiting_input') {
+          loadGivenCatalog(id);
+        }
         setDriverScheduleData(snapshot.driver_schedule || null);
         loadFuzzFlow(id, selectionVersion);
         if (snapshot.status === 'running' || snapshot.status === 'stopping') {
@@ -3785,8 +3895,15 @@ export function useAutofuzzController() {
       statusClass: safeClass,
       statusColumns: statusColumnsView,
       statusLabel: status => statusLabels[status] || status || '-',
+      submitGivenSelection,
       targetStatusLabel,
+      given,
+      givenFiltered,
+      givenSelectedCount,
+      givenVisibility,
       hasDriverCoverageDetails,
+      loadGivenCatalog,
+      selectAllGivenPublic,
       stopTask,
       submitCrashFixTask,
       submitCreateTask,
@@ -3818,6 +3935,7 @@ export function useAutofuzzController() {
       uniqueCrashTriagePreview,
       uniqueCrashTotalCount,
       closeCreateModal,
+      clearGivenSelection,
       closeLibraryConfig,
       closeUniqueCrashFilter,
       cancelCrashDeleteSelection,
@@ -3842,6 +3960,7 @@ export function useAutofuzzController() {
       toggleCrashDeleteMode,
       toggleCrashFixMode,
       toggleUniqueCrashFilter,
+      toggleGivenFunction,
       togglePathPicker
     };
     return controller;

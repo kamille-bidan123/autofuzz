@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"autofuzz/internal/agent"
@@ -26,6 +27,19 @@ func main() {
 	flag.StringVar(&options.CodexCommand, "codex-command", options.CodexCommand, "Codex CLI executable used for autonomous build and configuration")
 	flag.StringVar(&options.CodexModel, "codex-model", options.CodexModel, "Optional Codex model for autonomous build and configuration")
 	flag.StringVar(&options.CodexProfile, "codex-profile", options.CodexProfile, "Optional Codex profile for autonomous build and configuration")
+	flag.StringVar(&options.GenerationMode, "generation-mode", options.GenerationMode, "Fuzz driver generation mode: allcover (default) or given")
+	flag.Func("given-functions", "Comma-separated function names to fuzz in given mode (requires --generation-mode given)", func(value string) error {
+		if value == "" {
+			return nil
+		}
+		options.GivenFunctions = nil
+		for _, part := range strings.Split(value, ",") {
+			if name := strings.TrimSpace(part); name != "" {
+				options.GivenFunctions = append(options.GivenFunctions, name)
+			}
+		}
+		return nil
+	})
 	flag.BoolVar(&options.Resume, "resume", false, "Resume an existing target state")
 	flag.BoolVar(&options.Verbose, "verbose", false, "Stream command output as well as writing logs")
 	flag.DurationVar(&options.FuzzInterval, "fuzz-interval", options.FuzzInterval, "Interval between fuzz/coverage assessments")
